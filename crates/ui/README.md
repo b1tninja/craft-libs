@@ -288,7 +288,55 @@ construct it yourself), `Draft` gained `expected_pages` and `expected_sheets()`,
 `fraction()` and `with_expected_total()`; `JobHandle`, `JobUpdate`, `State::start_job` and `Labels` are
 unchanged.
 
-Rules kept by the model: only options the printer lists are offered and sent; the confirmation is
+**Options are three-state** (`capability::Capability`, see below). For copies, sides, orientation,
+quality, colour mode and resolution (and the media size the app names in `Draft::request`), `Caps`
+holds a `Capability`: *supported* (the printer published a list or range: the control is enabled and
+offers only that), *unsupported* (it published its answer and the option is not in it: the control is
+shown **disabled**, not hidden, with the app's reason from `Labels::unsupported_*` as visible text and
+as the control's accessible description; the request never carries a value for it) or *unknown* (not
+published, or the details read failed: the control is enabled with the quiet `Labels::unconfirmed_note`
+and the value is sent as a hint, because a backend may ignore it or honour it). Unknown offers every
+value the dialog knows (`COMMON_RESOLUTIONS` for resolution, up to `UNKNOWN_MAX_COPIES` copies). The
+model also reads a published list that offers nothing to choose as unsupported: sides without a
+two-sided value (so the flip-on-long/short-edge choices are disabled with it), colour without
+`ColorMode::Color`, copies with a maximum of 1, a list with no value the dialog knows. Capability is
+static; the printer's status (state and reasons) is only displayed and never disables a control.
+`Draft::{sides,orientation,quality,color,resolution,copies,media}_state()` return the effective state.
+A new query or a failed one replaces the states (a failed read leaves everything unknown and clears
+the choices); a choice the new answer rules out is cleared.
+
+Breaking changes to `Caps` (this module is unmerged): its option fields are `Capability` values
+instead of `Vec<String>` and `Option<(u32, u32)>` (`sides`, `orientations`, `qualities`,
+`media_sizes`: `Capability<String>`; `copies: Capability<u32>`, a range), and it gained `color_modes`
+and `resolutions`. An empty list used to mean "not said"; now `None`/empty is the host's call, see the
+table. `Request` gained `color` and `resolution`, `Draft` gained `color` and `resolution`, and `Labels`
+gained `color`, `color_color`, `color_monochrome`, `resolution`, `resolution_dpi` (`{dpi}`),
+`resolution_dpi_xy` (`{x}`, `{y}`), six `unsupported_*` reasons and `unconfirmed_note` (empty omits
+it); `ColorMode`, `Resolution`, `COMMON_RESOLUTIONS` and `UNKNOWN_MAX_COPIES` are new, and `Sides`,
+`Orientation` and `Quality` derive `Ord`.
+
+How a host fills `Caps` from `craft-print`'s `PrinterDetails`:
+
+| Option (`Caps`) | `PrinterDetails` field | Unknown | Supported | Unsupported |
+|---|---|---|---|---|
+| `sides` | `two_sided: Option<bool>` | `None` | `Some(true)`: `OneSided` and the two-sided tokens (the field cannot say which edges) | `Some(false)` (or `Supported(["OneSided"])`) |
+| `color_modes` | `colour: Option<bool>` | `None` | `Some(true)`: `Color`, `Monochrome` | `Some(false)`: `Supported(["Monochrome"])` (read as unsupported) |
+| `copies` | `max_copies: Option<u32>` | `None` | `Some(n)`: range `1..=n` | `Some(0 or 1)` (read as unsupported) |
+| `media_sizes` | `paper: Vec<String>` | empty (not distinguishable) | non-empty | not reachable: see below |
+| `resolutions` | `resolutions: Vec<Resolution>` | empty (not distinguishable) | non-empty | not reachable: see below |
+| `orientations`, `qualities` | no field | always, unless `honoured` is `Some(list)` without `JobHint::Orientation` / `JobHint::Quality` (the backend ignores the hint: map to `Unsupported`) | a client-specific list, if the backend has one | as for `honoured` |
+| `formats` | `formats: Vec<DocumentFormat>` | empty: the printer is left to answer for itself (unchanged) | non-empty | - |
+
+Findings for `craft-print` (read only, not changed here): `paper`, `resolutions`, `formats` and
+`options` are plain `Vec`s documented as "empty when not published", so a printer that published an
+empty list cannot be told from one that said nothing, and a host can only map them to `Unknown`.
+`two_sided`, `colour` and `max_copies` are `Option`s and map cleanly. Orientation and quality have no
+field at all; `honoured` (`Option<Vec<JobHint>>`, `None` = unknown) says only whether the backend
+applies the hint, not which values the device takes. `honoured` is device-independent evidence that
+a hint is useless, so it is the one case where a host may map an option to `Unsupported` without a
+list from the device.
+
+Other rules kept by the model: the confirmation is
 never on by default and is cleared when the address changes, the printer is queried again, a job
 starts and the dialog opens (`dialog_opened`); answers for an older query or another address are
 dropped; Print is blocked (`Block`) until the typed address was queried, the printer takes one of the

@@ -37,7 +37,8 @@ craft-<name> = { git = "https://github.com/storytold/craft-libs", rev = "<commit
 - [`craft-scan`](crates/scan/README.md): scanner settings, a neutral error contract, feeder status
   (possibly unknown), the BMP parser and 1-bit conversion, the device deny-list and the acquire
   contract, with a `Backend` trait and a registry the app plugs several backends into (WIA, SANE,
-  eSCL, ...). No platform code, no unsafe, no network.
+  eSCL, ...), and a `ScanJob` that records one scan across its attempts (pages kept, continue or
+  start over, `craft-job` views). No platform code, no unsafe, no network.
 
 - [`craft-settings`](crates/settings/README.md): `config.toml` settings storage for every app: platform folders, portable mode and overrides, atomic saves while running, backup, damaged-file recovery and schema migrations. Policy in [docs/settings-storage.md](docs/settings-storage.md).
 - [`craft-ui`](crates/ui/README.md): SVG catalogs, icon buttons, tabs, pane controls, transactional docking, print settings and theme helpers for egui frontends;

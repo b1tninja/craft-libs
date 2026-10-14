@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['crates/scan/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/scan.yml']
+    paths: ['crates/scan/**', 'crates/job/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/scan.yml']
   pull_request:
-    paths: ['crates/scan/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/scan.yml']
+    paths: ['crates/scan/**', 'crates/job/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/scan.yml']
 permissions:
   contents: read
 jobs:

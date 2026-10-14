@@ -4,7 +4,7 @@ The portable core of scanning for the Craft apps: scan settings and the enums be
 neutral error contract (`ScanError`, `ScanErrorInfo`, `NativeCode`, recovery hints), paper-path
 status that may be unknown, the auto-fallback-to-glass decision, a device deny-list, cancel and
 progress tokens, the BMP parser and software 1-bit conversion, an optional JSONL acquire trace, and
-a registry of scanner backends. Extracted from PdfCraft's `crates/scan`. Requires Rust 1.95.
+a registry of scanner backends, and `ScanJob`, the record of one scan across its attempts. Extracted from PdfCraft's `crates/scan`. Requires Rust 1.95.
 
 There is **no platform code, no unsafe, no network and no UI** here, and nothing in this crate
 opens a scanner. The code that talks to a device (Windows WIA, SANE, eSCL, ImageCaptureCore, ...)
@@ -99,6 +99,22 @@ Platform ideas, non-binding and **not provided here**: WIA (Windows, `unsafe` CO
 (Linux, `sane_*` calls or `scanimage`), eSCL/AirScan (HTTP to a network scanner), ImageCaptureCore
 (macOS). The tests in `tests/common` carry a WIA-, a SANE- and an eSCL-shaped fake to show the
 contract holds for all three; they are not shipped API.
+
+## Tracking one scan: `ScanJob`
+
+`craft_scan::job::ScanJob` is the record of **one user-visible acquisition** across the attempts it takes: a
+large feeder scan that jams at sheet 12, a feeder that runs dry and is reloaded, a scanner that answers busy.
+It does not run `acquire` (the app does, on its worker thread); it plans each attempt (`begin_attempt`,
+`begin_attempt_with(Continuation::Append | Restart)`), records the pages streamed through the `ProgressToken`
+and the result (`record_progress`, `finish_attempt`), and answers `retry_advice()` (a `craft_job::RetryAdvice`;
+automatic retry only for safe, transient failures with nothing kept, `CheckDeviceFirst` for an unknown outcome).
+Pages received survive a failed attempt; `snapshot()` is cheap (no page bytes), `view()` is a `craft_job::JobView`,
+`take_pages()` hands the pages over. `device_view(&Scanner, status, source)` maps the status bits onto a
+`craft_job::DeviceView`, a clear bit from a driver that reports nothing being `NotReported`, not `Off`.
+
+No thread, clock, async or I/O. There is **no idempotency tag for a scan** (`Backend::tag_support()` is
+`TagSupport::None` everywhere) and a duplicate `acquire` moves the carriage and pulls paper. The states,
+continuation rules, what survives which failure and the limits are in [docs/scan-job.md](docs/scan-job.md).
 
 ## Environment variables
 

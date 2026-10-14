@@ -61,13 +61,21 @@ fn labels() -> Labels<'static> {
         canceling: "Abbrechen laeuft",
         cancel: "Abbrechen",
         sent: "Gesendet an {printer}",
+        accepted: "Vom Drucker angenommen: {printer}",
+        stage_waiting: "Wartet",
+        stage_held: "Angehalten",
+        stage_printing: "Druckt",
+        stage_stopped: "Drucker braucht Aufmerksamkeit",
         sheets: "Blatt: {n}",
+        sheets_progress: "{done} von {total}",
         outcome_warnings: "Mit Warnungen",
         outcome_errors: "Mit Fehlern",
         outcome_canceled: "Abgebrochen",
         outcome_aborted: "Gestoppt",
         outcome_forgotten: "Vergessen",
         outcome_still_running: "Laeuft noch",
+        outcome_accepted_unknown: "Gesendet, Ergebnis unbekannt",
+        outcome_unknown_warning: "Moeglicherweise schon gesendet: erst am Drucker nachsehen",
         failure_policy: "Adresse abgelehnt",
         failure_transport: "Nicht erreichbar",
         failure_protocol: "Antwort unverstaendlich",
@@ -288,7 +296,7 @@ fn a_job_starts_only_when_nothing_blocks_it_and_spends_the_confirmation() {
     let send: SendJob = Box::new(move |url, request| {
         *seen2.borrow_mut() = Some((url.to_owned(), request));
         let counter = cancelled2.clone();
-        JobHandle { result: slot.borrow_mut().take().unwrap_or_else(|| mpsc::channel().1), cancel: Box::new(move || counter.set(counter.get() + 1)) }
+        JobHandle::new(slot.borrow_mut().take().unwrap_or_else(|| mpsc::channel().1), Box::new(move || counter.set(counter.get() + 1)))
     });
     assert!(!state.start_job(&send, true, true, &[PDF], None), "unconfirmed");
     state.draft.confirmed = true;
@@ -316,8 +324,7 @@ fn a_job_worker_that_stops_or_fails_is_reported() {
     let mut state = State::new(queried("192.0.2.5"));
     let (tx, rx) = mpsc::channel();
     let slot = std::cell::RefCell::new(Some(rx));
-    let send: SendJob =
-        Box::new(move |_, _| JobHandle { result: slot.borrow_mut().take().unwrap_or_else(|| mpsc::channel().1), cancel: Box::new(|| {}) });
+    let send: SendJob = Box::new(move |_, _| JobHandle::new(slot.borrow_mut().take().unwrap_or_else(|| mpsc::channel().1), Box::new(|| {})));
     state.draft.confirmed = true;
     assert!(state.start_job(&send, true, true, &[PDF], None));
     drop(tx);
@@ -325,8 +332,7 @@ fn a_job_worker_that_stops_or_fails_is_reported() {
     assert_eq!(state.draft.job, JobView::Failed(Failure::new(FailureKind::Stopped, "")));
     let (tx, rx) = mpsc::channel();
     let slot = std::cell::RefCell::new(Some(rx));
-    let send: SendJob =
-        Box::new(move |_, _| JobHandle { result: slot.borrow_mut().take().unwrap_or_else(|| mpsc::channel().1), cancel: Box::new(|| {}) });
+    let send: SendJob = Box::new(move |_, _| JobHandle::new(slot.borrow_mut().take().unwrap_or_else(|| mpsc::channel().1), Box::new(|| {})));
     state.draft.confirmed = true;
     assert!(state.start_job(&send, true, true, &[PDF], None));
     let failure = Failure::new(FailureKind::Fault, "refused");
@@ -435,4 +441,216 @@ fn a_running_job_disables_editing_and_offers_cancel() {
     let r = click(&f, at);
     assert!(r.cancel_requested);
     assert_eq!(state.borrow().draft.job, JobView::Running { canceling: true });
+}
+
+// ---- two-phase jobs: sending, accepted, status updates, result ----
+
+struct Worker {
+    result: mpsc::Sender<Result<Report, Failure>>,
+    updates: mpsc::Sender<JobUpdate>,
+    cancelled: Rc<Cell<u32>>,
+}
+
+/// A started job whose worker the test plays.
+fn running_job() -> (State, Worker, egui::Context) {
+    let ctx = egui::Context::default();
+    let mut state = State::new(queried("192.0.2.5"));
+    let (result_tx, result_rx) = mpsc::channel();
+    let (updates_tx, updates_rx) = mpsc::channel();
+    let cancelled = Rc::new(Cell::new(0));
+    let counter = cancelled.clone();
+    let handles = std::cell::RefCell::new(Some((result_rx, updates_rx)));
+    let send: SendJob = Box::new(move |_, _| {
+        let (result, updates) = handles.borrow_mut().take().unwrap_or_else(|| (mpsc::channel().1, mpsc::channel().1));
+        let counter = counter.clone();
+        JobHandle::new(result, Box::new(move || counter.set(counter.get() + 1))).with_updates(updates)
+    });
+    state.draft.confirmed = true;
+    assert!(state.start_job(&send, true, true, &[PDF], None));
+    (state, Worker { result: result_tx, updates: updates_tx, cancelled }, ctx)
+}
+
+fn progress(stage: Stage, done: Option<u32>, total: Option<u32>) -> Progress {
+    Progress { stage, sheets_done: done, sheets_total: total, notes: Vec::new() }
+}
+
+#[test]
+fn a_job_goes_from_sending_to_accepted_to_a_report_one_frame_at_a_time() {
+    let (mut state, worker, ctx) = running_job();
+    assert_eq!(state.draft.job, JobView::Running { canceling: false });
+    state.poll(&ctx);
+    assert_eq!(state.draft.job, JobView::Running { canceling: false }, "nothing arrived: nothing changed, and nothing blocked");
+    // The printer accepts the document: the UI no longer says "sending".
+    worker.updates.send(JobUpdate::Accepted(Progress::default())).unwrap();
+    state.poll(&ctx);
+    assert_eq!(state.draft.job, JobView::Accepted { canceling: false, progress: Progress::default() });
+    assert!(state.draft.running(), "an accepted job is still a job in flight");
+    assert_eq!(state.draft.block(true, true, &[PDF]), Some(Block::Busy));
+    // Several statuses in one frame: the last one is shown.
+    worker.updates.send(JobUpdate::Status(progress(Stage::Waiting, None, None))).unwrap();
+    worker.updates.send(JobUpdate::Status(progress(Stage::Printing, Some(1), Some(3)))).unwrap();
+    state.poll(&ctx);
+    assert_eq!(state.draft.job, JobView::Accepted { canceling: false, progress: progress(Stage::Printing, Some(1), Some(3)) });
+    // The result ends it.
+    let report = Report { outcome: Outcome::Completed, printer: "Office".into(), sheets: 3, notes: vec![] };
+    worker.result.send(Ok(report.clone())).unwrap();
+    state.poll(&ctx);
+    assert_eq!(state.draft.job, JobView::Finished(report.clone()));
+    assert!(!state.draft.running());
+    // Late updates change nothing.
+    worker.updates.send(JobUpdate::Status(progress(Stage::Printing, Some(2), Some(3)))).unwrap_or_default();
+    state.poll(&ctx);
+    assert_eq!(state.draft.job, JobView::Finished(report));
+}
+
+#[test]
+fn updates_and_the_result_in_the_same_frame_end_in_the_result() {
+    let (mut state, worker, ctx) = running_job();
+    worker.updates.send(JobUpdate::Accepted(Progress::default())).unwrap();
+    worker.updates.send(JobUpdate::Status(progress(Stage::Printing, Some(1), Some(1)))).unwrap();
+    let report = Report { outcome: Outcome::CompletedWithWarnings, printer: "Office".into(), sheets: 1, notes: vec!["low toner".into()] };
+    worker.result.send(Ok(report.clone())).unwrap();
+    state.poll(&ctx);
+    assert_eq!(state.draft.job, JobView::Finished(report));
+}
+
+#[test]
+fn a_status_before_the_acceptance_counts_as_the_acceptance_and_one_after_the_end_is_dropped() {
+    let mut d = queried("192.0.2.5");
+    d.job_progress(progress(Stage::Printing, None, None));
+    assert_eq!(d.job, JobView::Idle, "no job: nothing to update");
+    d.job_started();
+    d.job_progress(progress(Stage::Printing, None, None));
+    assert!(matches!(d.job, JobView::Accepted { canceling: false, ref progress } if progress.stage == Stage::Printing));
+    let mut d = queried("192.0.2.5");
+    d.job_started();
+    d.job_canceling();
+    d.job_accepted(Progress::default());
+    assert!(matches!(d.job, JobView::Accepted { canceling: true, .. }), "a cancel already pressed is kept");
+    d.job_accepted(progress(Stage::Printing, None, None));
+    assert!(matches!(d.job, JobView::Accepted { ref progress, .. } if progress.stage == Stage::Accepted), "accepted twice changes nothing");
+    d.job_finished(JobView::Failed(Failure::new(FailureKind::Other, "x")));
+    d.job_progress(progress(Stage::Printing, None, None));
+    assert!(matches!(d.job, JobView::Failed(_)));
+}
+
+#[test]
+fn cancel_works_in_both_phases_and_the_host_is_told_once() {
+    let (mut state, worker, ctx) = running_job();
+    worker.updates.send(JobUpdate::Accepted(Progress::default())).unwrap();
+    state.poll(&ctx);
+    assert!(state.cancel_job());
+    assert!(!state.cancel_job());
+    assert_eq!(worker.cancelled.get(), 1);
+    assert!(matches!(state.draft.job, JobView::Accepted { canceling: true, .. }));
+    worker.updates.send(JobUpdate::Status(progress(Stage::Printing, Some(1), Some(2)))).unwrap();
+    state.poll(&ctx);
+    assert!(matches!(state.draft.job, JobView::Accepted { canceling: true, .. }), "a status does not undo a cancel");
+    // And in the sending phase.
+    let (mut state, worker, _ctx) = running_job();
+    assert!(state.cancel_job());
+    assert_eq!(worker.cancelled.get(), 1);
+    worker.updates.send(JobUpdate::Accepted(Progress::default())).unwrap();
+    state.poll(&egui::Context::default());
+    assert!(matches!(state.draft.job, JobView::Accepted { canceling: true, .. }));
+}
+
+#[test]
+fn a_worker_that_stops_after_the_acceptance_is_sent_outcome_unknown_not_a_failure() {
+    let (mut state, worker, ctx) = running_job();
+    worker.updates.send(JobUpdate::Accepted(Progress::default())).unwrap();
+    drop(worker);
+    state.poll(&ctx);
+    assert_eq!(state.draft.job, JobView::Finished(Report { outcome: Outcome::AcceptedUnknown, printer: "Office".into(), sheets: 0, notes: vec![] }));
+    // Before the acceptance it is still a failure: nothing is known to have been sent.
+    let (mut state, worker, ctx) = running_job();
+    drop(worker);
+    state.poll(&ctx);
+    assert_eq!(state.draft.job, JobView::Failed(Failure::new(FailureKind::Stopped, "")));
+}
+
+#[test]
+fn a_printer_that_cannot_report_ends_as_accepted_unknown() {
+    let (mut state, worker, ctx) = running_job();
+    worker.updates.send(JobUpdate::Accepted(Progress::default())).unwrap();
+    let report = Report { outcome: Outcome::AcceptedUnknown, printer: "Office".into(), sheets: 0, notes: vec![] };
+    worker.result.send(Ok(report.clone())).unwrap();
+    state.poll(&ctx);
+    assert_eq!(state.draft.job, JobView::Finished(report));
+    assert!(!Outcome::AcceptedUnknown.is_success(), "sent is not printed");
+    assert_eq!(labels().outcome_text(Outcome::AcceptedUnknown), Some("Gesendet, Ergebnis unbekannt"));
+}
+
+#[test]
+fn client_names_map_tolerantly_to_stages_and_outcomes() {
+    for (name, stage) in [
+        ("pending", Stage::Waiting),
+        ("held", Stage::Held),
+        ("processing", Stage::Printing),
+        ("stopped", Stage::Stopped),
+        ("unknown", Stage::Accepted),
+        ("something new", Stage::Accepted),
+    ] {
+        assert_eq!(Stage::from_name(name), stage, "{name}");
+    }
+    assert_eq!(Outcome::from_name("accepted_unknown"), Outcome::AcceptedUnknown);
+    assert_eq!(Outcome::from_name("no_status"), Outcome::AcceptedUnknown);
+    assert_eq!(Outcome::from_name("completed"), Outcome::Completed, "the old names still map");
+    let l = labels();
+    assert_eq!(l.stage_text(Stage::Accepted, "Office"), "Vom Drucker angenommen: Office");
+    assert_eq!(l.stage_text(Stage::Printing, "Office"), "Druckt");
+    let f = Failure::new(FailureKind::Transport, "closed");
+    assert!(!f.outcome_unknown && f.clone().with_outcome_unknown(true).outcome_unknown);
+}
+
+#[test]
+fn the_accepted_phase_is_drawn_with_its_stage_progress_and_cancel() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut draft = queried("192.0.2.5");
+    draft.job_started();
+    draft.job_accepted(Progress { stage: Stage::Printing, sheets_done: Some(1), sheets_total: Some(4), notes: vec!["Papier fast leer".into()] });
+    let state = std::cell::RefCell::new(State::new(draft));
+    let validate: &Validate = &|_| Ok(());
+    let query = query_worker(Ok(printer()));
+    let f: Frames<'_> = (&ctx, &state, validate, &query);
+    let (r, output) = frame(&f, Vec::new());
+    assert_eq!(r.block, Some(Block::Busy));
+    assert!(center_of(&output, "Druckt").is_some(), "the stage is worded by the app");
+    assert!(center_of(&output, "Papier fast leer").is_some(), "the printer's reasons are shown");
+    assert!(center_of(&output, "Sende an Office").is_none(), "no longer 'sending'");
+    let tree = output.platform_output.accesskit_update.as_ref();
+    assert!(
+        tree.is_some_and(|t| t
+            .nodes
+            .iter()
+            .any(|(_, n)| n.label() == Some("1 von 4") || n.value() == Some("1 von 4") || n.label().is_some_and(|l| l.contains("1 von 4")))),
+        "the sheet progress is exposed"
+    );
+    let at = center_of(&output, "Abbrechen").unwrap_or_default();
+    let r = click(&f, at);
+    assert!(r.cancel_requested);
+    assert!(matches!(state.borrow().draft.job, JobView::Accepted { canceling: true, .. }));
+}
+
+#[test]
+fn an_accepted_job_without_status_says_accepted_and_a_failure_that_may_have_been_delivered_says_so() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut draft = queried("192.0.2.5");
+    draft.job_started();
+    draft.job_accepted(Progress::default());
+    let state = std::cell::RefCell::new(State::new(draft));
+    let validate: &Validate = &|_| Ok(());
+    let query = query_worker(Ok(printer()));
+    let f: Frames<'_> = (&ctx, &state, validate, &query);
+    let (_, output) = frame(&f, Vec::new());
+    assert!(center_of(&output, "Vom Drucker angenommen: Office").is_some());
+    state.borrow_mut().draft.job_finished(JobView::Failed(Failure::new(FailureKind::Transport, "closed").with_outcome_unknown(true)));
+    let (_, output) = frame(&f, Vec::new());
+    assert!(center_of(&output, "Nicht erreichbar").is_some());
+    assert!(center_of(&output, "Moeglicherweise schon gesendet: erst am Drucker nachsehen").is_some());
+    state.borrow_mut().draft.job_finished(JobView::Failed(Failure::new(FailureKind::Transport, "refused")));
+    let (_, output) = frame(&f, Vec::new());
+    assert!(center_of(&output, "Moeglicherweise schon gesendet: erst am Drucker nachsehen").is_none(), "only when it may have been sent");
 }

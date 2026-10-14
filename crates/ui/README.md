@@ -258,7 +258,21 @@ The host supplies `Host { validate, query, sheets_ok, formats }` and app-localis
 (wording of the per-job confirmation included), and `State::show(ui, id, &host, &labels)` returns a
 `Response { block, changed, query_started, cancel_requested }`. `query` is a `QueryPrinter` closure
 returning an `mpsc` receiver; the job is a `SendJob` closure returning a `JobHandle` (a result
-receiver plus a cancel closure). `poll` runs each frame inside `show` and may be called directly.
+receiver, optionally an updates receiver, and a cancel closure). `poll` runs each frame inside `show`
+and may be called directly.
+
+A job has two phases. The worker sends the document (`JobView::Running`), reports `JobUpdate::Accepted`
+when the printer has it (`JobView::Accepted`: "accepted", with a `Stage` of Accepted, Waiting, Held,
+Printing or Stopped and optional sheet counters), sends `JobUpdate::Status` as it learns more, and
+finishes with the result on the result receiver. For a printer that cannot report, the worker sends
+`Accepted` and then `Ok(Report { outcome: Outcome::AcceptedUnknown, .. })`: "sent, outcome unknown",
+which is neither a failure nor a claim that it printed. A worker that simply stops after `Accepted`
+is shown the same way. A `Failure` can carry `outcome_unknown` (the request may have reached the
+printer) and the UI then says to check the printer before sending again. Cancel works in both
+phases and the host is told once. Everything arrives over `mpsc` receivers drained once per frame, so
+the UI thread never blocks; a worker built on `craft-print` maps `Submitted` to `Accepted`, each
+`JobStatus` to `Status` (`JobState::name()` feeds `Stage::from_name`) and its `WatchOutcome` to the
+`Report`. Workers that send no updates behave exactly as before.
 
 Rules kept by the model: only options the printer lists are offered and sent; the confirmation is
 never on by default and is cleared when the address changes, the printer is queried again, a job

@@ -373,15 +373,7 @@ fn forged_malformed_and_oversized_messages_are_ignored() {
     let dtd = format!("<!DOCTYPE x [<!ENTITY a \"aaaa\">]>{good}");
     assert_eq!(post(addr, &path, soap, dtd.as_bytes()), Some(400));
     // Wrong namespace for the body, wrong element for the action, an event type we did not ask for.
-    assert_eq!(
-        post(
-            addr,
-            &path,
-            soap,
-            good.replace(WPRT, "urn:evil").replace(&format!("urn:evil/JobStatusEvent"), &format!("{WPRT}/JobStatusEvent")).as_bytes()
-        ),
-        Some(400)
-    );
+    assert_eq!(post(addr, &path, soap, good.replace(&format!("xmlns:wprt=\"{WPRT}\""), "xmlns:wprt=\"urn:evil\"").as_bytes()), Some(400));
     let mismatched = good.replace("<wprt:JobStatusEvent>", "<wprt:JobEndStateEvent>").replace("</wprt:JobStatusEvent>", "</wprt:JobEndStateEvent>");
     assert_eq!(post(addr, &path, soap, mismatched.as_bytes()), Some(400));
     let elements = event_body(&token, "PrinterElementsChangeEvent", 0, "g3");

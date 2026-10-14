@@ -1,6 +1,5 @@
 //! Push job status for the WS-Print backend: a WS-Eventing client plus a small inbound listener.
-//! **Opt-in**: nothing in this module runs unless the app calls [`WsdBackend::with_events`]
-//! (super::WsdBackend::with_events). See `docs/events.md` for the design and the exposure rules.
+//! **Opt-in**: nothing in this module runs unless the app calls [`WsdBackend::with_events`](super::WsdBackend::with_events). See `docs/events.md` for the design and the exposure rules.
 //!
 //! The one idea: **an event is only a wake-up.** A verified event makes the watch of the job it is
 //! about poll *now*; the state of the job always comes from `job_status` (`GetJobElements`). Nothing

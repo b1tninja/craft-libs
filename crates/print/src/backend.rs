@@ -50,7 +50,9 @@ use std::time::Duration;
 
 use crate::job::{JobId, JobState, JobStatus, Submitted, WatchSupport};
 use crate::options::JobOptions;
+use crate::remote::{Fingerprint, JobFilter, JobQueryCaps, Reconciled, RemoteJob, reconcile_jobs};
 use crate::retry::{Phase, RetrySafety};
+use crate::tag::{JobTag, TagSupport};
 use crate::{Error, Job, PrinterOption};
 
 /// A native error code and the domain that owns it. `domain` names the code space:
@@ -462,11 +464,22 @@ pub struct SubmitRequest<'a> {
     pub consent: Option<UserConfirmed>,
     pub cancel: CancelToken,
     pub progress: Option<ProgressCallback<'a>>,
+    /// The idempotency tag of the print this request belongs to ([`JobTag`]); the same for every
+    /// attempt. A backend carries it where its protocol allows ([`Backend::tag_support`]); the
+    /// registry removes it for a backend that cannot.
+    pub tag: Option<JobTag>,
 }
 
 impl<'a> SubmitRequest<'a> {
     pub fn new(document: Document<'a>, job: Job) -> Self {
-        Self { document, job, options: JobOptions::default(), consent: None, cancel: CancelToken::new(), progress: None }
+        Self { document, job, options: JobOptions::default(), consent: None, cancel: CancelToken::new(), progress: None, tag: None }
+    }
+
+    /// Put this idempotency tag on the job, where the backend can carry it. See [`JobTag`].
+    #[must_use]
+    pub fn with_tag(mut self, tag: JobTag) -> Self {
+        self.tag = Some(tag);
+        self
     }
 
     /// Per-job hints; see [`JobOptions`].
@@ -558,6 +571,40 @@ pub trait Backend: Send + Sync {
     fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {
         let _ = job;
         Err(PrintError::new(ErrorKind::Unsupported, format!("the {} backend cannot cancel a job once it is accepted", self.name())))
+    }
+
+    /// Whether and where this backend carries a [`SubmitRequest::tag`], and whether
+    /// [`Backend::list_jobs`] gives it back. Defaults to [`TagSupport::NONE`]. A backend that
+    /// supports a placement applies the tag itself (a name suffix with [`JobTag::apply_to`], within
+    /// its own length limit) and exactly once.
+    fn tag_support(&self) -> TagSupport {
+        TagSupport::NONE
+    }
+
+    /// What [`Backend::list_jobs`] can fill in. Defaults to [`JobQueryCaps::NONE`].
+    fn job_query_caps(&self) -> JobQueryCaps {
+        JobQueryCaps::NONE
+    }
+
+    /// The jobs of one printer (a native id): its active jobs and, when the source keeps them,
+    /// finished ones ([`JobQueryCaps::history`]). **One bounded, idempotent read.** Foreign jobs
+    /// are listed too; [`RemoteJob::ours`] is set from [`JobFilter::tag`] (use
+    /// [`crate::filter_jobs`]). The default is [`ErrorKind::Unsupported`]: a spooler that cannot
+    /// list keeps it, and says so in [`Backend::job_query_caps`].
+    fn list_jobs(&self, printer_native: &str, filter: &JobFilter) -> Result<Vec<RemoteJob>, PrintError> {
+        let _ = (printer_native, filter);
+        Err(PrintError::new(ErrorKind::Unsupported, format!("the {} backend cannot list jobs", self.name())).with_safety(RetrySafety::Safe))
+    }
+
+    /// After an attempt whose outcome is unknown: find the job it may have created. The default
+    /// lists jobs ([`Backend::list_jobs`]) and decides with [`reconcile_jobs`]: by tag when the
+    /// backend can match it, else by title, user and time, which may be
+    /// [`Reconciled::Ambiguous`]. A backend overrides it to fill in what only it knows (its own
+    /// user name).
+    fn find_job(&self, printer_native: &str, fingerprint: &Fingerprint) -> Result<Reconciled, PrintError> {
+        let support = self.tag_support();
+        let jobs = self.list_jobs(printer_native, &fingerprint.filter(support.matchable))?;
+        Ok(reconcile_jobs(jobs, fingerprint, support))
     }
 }
 

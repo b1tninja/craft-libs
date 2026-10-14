@@ -30,13 +30,15 @@
 //! the `wsd` feature too).
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::backend::{
     Backend, BackendClass, DocumentFormat, ErrorKind, JobHint, PrintError, PrinterDetails, PrinterRef, PrinterStatus, Progress, SubmitRequest,
 };
 use crate::job::{JobId, JobState, JobStatus, Submitted, WatchSupport};
 use crate::options::JobOptions;
+use crate::remote::{JobFilter, JobQueryCaps, RemoteJob, filter_jobs};
+use crate::tag::{JobTag, TagPlacement, TagSupport};
 use crate::{Job, PrinterOption};
 
 /// What a [`FakeBackend`] was asked to print.
@@ -52,6 +54,25 @@ pub struct Submission {
     pub options: JobOptions,
     /// Whether the request carried a [`crate::UserConfirmed`].
     pub consented: bool,
+    /// The idempotency tag the request carried (the registry removes it when the fake's
+    /// [`TagSupport`] is none).
+    pub tag: Option<JobTag>,
+    /// The document name the tag was put on, with [`TagPlacement::DocumentName`].
+    pub document_name: Option<String>,
+}
+
+/// What a [`FakeBackend`] does with its next `submit`, scripted with
+/// [`FakeBackend::with_submit_script`] (one step per call; when the script is used up, `submit`
+/// accepts).
+#[derive(Clone, Debug)]
+pub enum SubmitStep {
+    /// Accept the document.
+    Accept,
+    /// Fail without creating a job: the printer did not act.
+    Fail(PrintError),
+    /// The printer **created the job**, but the reply was lost: the call fails with this error
+    /// (give it [`crate::RetrySafety::OutcomeUnknown`]) and the job exists in the fake's queue.
+    LoseReply(PrintError),
 }
 
 type JobHandle = dyn Fn(Option<&str>, u32) -> Option<String> + Send + Sync;
@@ -62,6 +83,8 @@ struct Recorded {
     status_calls: u32,
     cancels: Vec<String>,
     script: Vec<Result<JobStatus, PrintError>>,
+    submit_script: Vec<SubmitStep>,
+    jobs: Vec<RemoteJob>,
 }
 
 #[derive(Clone)]
@@ -81,6 +104,11 @@ struct Config {
     poll_interval: Option<Duration>,
     can_cancel: bool,
     submitted_status: Option<JobStatus>,
+    tag_support: TagSupport,
+    query_caps: JobQueryCaps,
+    user: String,
+    created_at: Arc<dyn Fn() -> SystemTime + Send + Sync>,
+    title_max: Option<usize>,
 }
 
 /// A configurable [`Backend`] for tests; see the [module documentation](self). Build it with
@@ -124,8 +152,32 @@ impl FakeBackend {
             poll_interval: None,
             can_cancel: true,
             submitted_status: None,
+            tag_support: TagSupport::NONE,
+            query_caps: JobQueryCaps::NONE,
+            user: "fake-user".into(),
+            created_at: Arc::new(SystemTime::now),
+            title_max: None,
         };
         Self { config: Arc::new(config), recorded: Arc::default() }
+    }
+
+    /// A fake that behaves like a **CUPS-style spooler**: local class, a job handle at once, no
+    /// status after acceptance, **no tag support and no job listing**. Reconciling against it is
+    /// impossible, which is the point of using it.
+    pub fn cups_like(name: &'static str) -> Self {
+        Self::new(name)
+    }
+
+    /// A fake that behaves like a **network IPP printer**: network class (every request needs a
+    /// [`crate::UserConfirmed`]), pollable status, a job listing that carries the creation time,
+    /// the user and finished jobs, and an idempotency tag stored in a **native job attribute**
+    /// (the title is left alone and the listing returns the tag).
+    pub fn ipp_like(name: &'static str) -> Self {
+        Self::new(name)
+            .with_class(BackendClass::Network)
+            .with_watch(WatchSupport::Poll)
+            .with_tag_support(TagSupport::new(TagPlacement::Native, true))
+            .with_query_caps(JobQueryCaps::ALL)
     }
 
     fn configured(mut self, change: impl FnOnce(&mut Config)) -> Self {
@@ -254,6 +306,66 @@ impl FakeBackend {
         self
     }
 
+    /// Where the fake carries a tag and whether its listing returns it (default: none).
+    #[must_use]
+    pub fn with_tag_support(self, support: TagSupport) -> Self {
+        self.configured(|c| c.tag_support = support)
+    }
+
+    /// What the fake's `list_jobs` fills in (default: nothing, and `list_jobs` is unsupported).
+    #[must_use]
+    pub fn with_query_caps(self, caps: JobQueryCaps) -> Self {
+        self.configured(|c| c.query_caps = caps)
+    }
+
+    /// The user the fake lists its jobs under (default `fake-user`).
+    #[must_use]
+    pub fn with_user(self, user: &str) -> Self {
+        self.configured(|c| c.user = user.to_owned())
+    }
+
+    /// The creation time the fake gives a job it accepts (default: now). Only listed when the caps
+    /// say `created_time`.
+    #[must_use]
+    pub fn with_created_at(self, created_at: impl Fn() -> SystemTime + Send + Sync + 'static) -> Self {
+        self.configured(|c| c.created_at = Arc::new(created_at))
+    }
+
+    /// The longest job name the fake keeps, in characters (default: unlimited).
+    #[must_use]
+    pub fn with_title_limit(self, max_chars: usize) -> Self {
+        self.configured(|c| c.title_max = Some(max_chars))
+    }
+
+    /// What successive `submit` calls do; see [`SubmitStep`]. Used up, `submit` accepts.
+    #[must_use]
+    pub fn with_submit_script(self, script: Vec<SubmitStep>) -> Self {
+        lock(&self.recorded).submit_script = script;
+        self
+    }
+
+    /// Put a job in the fake's queue that this app did not send (a foreign job).
+    pub fn seed_job(&self, job: RemoteJob) {
+        lock(&self.recorded).jobs.push(job);
+    }
+
+    /// Change the state of a job in the fake's queue (by native handle); `false` if there is none.
+    pub fn set_remote_state(&self, native: &str, state: JobState) -> bool {
+        let mut recorded = lock(&self.recorded);
+        match recorded.jobs.iter_mut().find(|job| job.id.native() == native) {
+            Some(job) => {
+                job.state = state;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The fake's queue: every job it accepted (and every seeded one), oldest first.
+    pub fn remote_jobs(&self) -> Vec<RemoteJob> {
+        lock(&self.recorded).jobs.clone()
+    }
+
     /// Everything `submit` received, oldest first.
     pub fn submissions(&self) -> Vec<Submission> {
         lock(&self.recorded).submissions.clone()
@@ -304,7 +416,20 @@ impl Backend for FakeBackend {
     }
 
     fn submit(&self, mut request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-        let number = {
+        // The backend carries the tag where its support says, exactly once.
+        let placement = self.config.tag_support.placement;
+        let tag = request.tag.clone();
+        let mut document_name = None;
+        if let Some(tag) = &tag {
+            match placement {
+                TagPlacement::JobName => request.job.title = tag.apply_to(&request.job.title, self.config.title_max),
+                TagPlacement::DocumentName => document_name = Some(tag.apply_to(&request.job.title, self.config.title_max)),
+                _ => {}
+            }
+        } else if let Some(max) = self.config.title_max {
+            request.job.title = request.job.title.chars().take(max).collect();
+        }
+        let (number, step) = {
             let mut recorded = lock(&self.recorded);
             recorded.submissions.push(Submission {
                 printer: request.job.printer.clone(),
@@ -313,19 +438,46 @@ impl Backend for FakeBackend {
                 job: request.job.clone(),
                 options: request.options.clone(),
                 consented: request.consent.is_some(),
+                tag: tag.clone(),
+                document_name,
             });
-            u32::try_from(recorded.submissions.len()).unwrap_or(u32::MAX)
+            let step = if recorded.submit_script.is_empty() { None } else { Some(recorded.submit_script.remove(0)) };
+            (u32::try_from(recorded.submissions.len()).unwrap_or(u32::MAX), step)
         };
         if let Some(report) = request.progress.as_deref_mut() {
             for event in &self.config.progress {
                 report(*event);
             }
         }
-        if let Some(error) = &self.config.submit_error {
-            return Err(error.clone());
+        let step = match (step, &self.config.submit_error) {
+            (Some(step), _) => step,
+            (None, Some(error)) => SubmitStep::Fail(error.clone()),
+            (None, None) => SubmitStep::Accept,
+        };
+        let lost_reply = match step {
+            SubmitStep::Fail(error) => return Err(error),
+            SubmitStep::LoseReply(error) => Some(error),
+            SubmitStep::Accept => None,
+        };
+        let handle = (self.config.job_handle)(request.job.printer.as_deref(), number);
+        if let Some(native) = &handle {
+            let id = JobId::new(self.config.name, native.clone());
+            let mut remote = RemoteJob::new(id, request.job.title.clone(), JobState::Pending).with_user(self.config.user.clone());
+            if self.config.query_caps.created_time {
+                remote = remote.with_created((self.config.created_at)());
+            }
+            if placement == TagPlacement::Native
+                && let Some(tag) = &tag
+            {
+                remote = remote.with_tag(tag.clone());
+            }
+            lock(&self.recorded).jobs.push(remote);
+        }
+        if let Some(error) = lost_reply {
+            return Err(error);
         }
         let mut submitted = Submitted::new(self.config.name, self.config.message.clone());
-        if let Some(native) = (self.config.job_handle)(request.job.printer.as_deref(), number) {
+        if let Some(native) = handle {
             submitted = submitted.with_job(JobId::new(self.config.name, native));
         }
         if let Some(status) = &self.config.submitted_status {
@@ -363,5 +515,27 @@ impl Backend for FakeBackend {
         }
         lock(&self.recorded).cancels.push(job.native().to_owned());
         Ok(())
+    }
+
+    fn tag_support(&self) -> TagSupport {
+        self.config.tag_support
+    }
+
+    fn job_query_caps(&self) -> JobQueryCaps {
+        self.config.query_caps
+    }
+
+    fn list_jobs(&self, printer_native: &str, filter: &JobFilter) -> Result<Vec<RemoteJob>, PrintError> {
+        let _ = printer_native;
+        if !self.config.query_caps.list {
+            return Err(PrintError::new(ErrorKind::Unsupported, format!("the {} backend cannot list jobs", self.config.name)));
+        }
+        let mut jobs = lock(&self.recorded).jobs.clone();
+        if !self.config.query_caps.history {
+            jobs.retain(|job| !job.state.is_terminal());
+        }
+        // Newest first, as a listing usually is.
+        jobs.reverse();
+        Ok(filter_jobs(jobs, filter))
     }
 }

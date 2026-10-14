@@ -42,6 +42,14 @@
 //! and failures are classified by [`WsdError::classify`]: transient or not, safe to repeat or not
 //! ([`Op`] says whether the failed request was a query or a send), and where it failed. After an
 //! outcome-unknown failure, [`WsdBackend::reconcile`] looks for the job before anything is resent.
+//!
+//! # Tracked jobs
+//!
+//! The backend carries a [`crate::PrintJob`]'s idempotency tag as a suffix of the ticket's job name
+//! (cut so that it fits the 255 characters), lists jobs (`GetActiveJobs`, `GetJobHistory`) for
+//! [`crate::Registry::list_jobs`] and finds an earlier attempt's job through
+//! [`crate::Registry::find_job`], by tag. [`WsdBackend::reconcile`] is the older, WS-Print-only form
+//! (by title and user) and its [`Reconciled`] is not [`crate::Reconciled`].
 
 pub mod adapter;
 pub mod client;

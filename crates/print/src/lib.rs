@@ -22,15 +22,18 @@ mod options;
 #[cfg(any(test, windows))]
 mod progress;
 mod registry;
+mod remote;
 mod retry;
 #[cfg(any(test, windows))]
 mod sheets;
+mod tag;
 #[cfg(feature = "testing")]
 pub mod testing;
 #[cfg(test)]
 mod tests;
 #[cfg(any(test, windows))]
 mod ticket;
+mod tracked;
 mod watch;
 #[cfg(windows)]
 mod windows;
@@ -58,10 +61,16 @@ pub use builtin::SystemSpooler;
 pub use job::{ExpectedTotals, JobId, JobState, JobStatus, ParseJobIdError, ParseJobIdErrorKind, Submitted, WatchSupport};
 pub use options::{ColourMode, JobOptions, Orientation, Quality, Resolution};
 pub use registry::{
-    BackendError, Listing, RegisterError, Registry, cancel_job, job_status, list_printers, namespaced_id, printer_details, register, registry,
-    split_id, submit_job, submit_to_backend,
+    BackendError, BackendInfo, Listing, RegisterError, Registry, cancel_job, job_status, list_printers, namespaced_id, printer_details, register,
+    registry, split_id, submit_job, submit_to_backend,
 };
+pub use remote::{Fingerprint, JobFilter, JobQueryCaps, Reconciled, RemoteJob, filter_jobs, reconcile_jobs};
 pub use retry::{CANCEL_SLICE, Clock, Jitter, ManualClock, Phase, RetryPolicy, RetrySafety, SystemClock, retry};
+pub use tag::{JobTag, TagPlacement, TagPolicy, TagSupport};
+pub use tracked::{
+    Advance, Attempt, AttemptError, AttemptOutcome, BytesSource, DocumentInfo, DocumentSource, FnSource, JobProgress, LifecycleState, LocalJobId,
+    Outcome, PrintJob, PrintJobConfig, RequestRecord, RetryAdvice, SimpleState, Snapshot, TrailEntry, TrailEvent,
+};
 pub use watch::{JobSource, JobWatch, WaitPolicy, WatchOutcome, WatchStep, wait_for_job};
 
 /// A system spooler failure. Document permissions belong to the caller.

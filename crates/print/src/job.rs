@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 use crate::backend::{ErrorKind, PrintError, Receipt};
 use crate::options::JobOptions;
 use crate::registry::{namespaced_id, split_id};
+use crate::tag::JobTag;
 use crate::{Duplex, Job};
 
 /// The typed id of a job a printer has accepted: the owning backend's registry name and that
@@ -337,6 +338,12 @@ pub struct Submitted {
     /// Filled in by the registry from the request's [`JobOptions::expected_pages`]; see
     /// [`ExpectedTotals`]. [`crate::JobWatch::for_submitted`] uses it.
     pub expected: ExpectedTotals,
+    /// Filled in by the registry: the idempotency tag the backend carried for this job, `None` when
+    /// the request had none or the backend cannot carry one.
+    pub tag: Option<JobTag>,
+    /// How the backend sent the request, in its own words, for diagnostics (WS-Print: the ticket
+    /// shape). Not for parsing.
+    pub effective: Option<String>,
 }
 
 impl Submitted {
@@ -352,7 +359,16 @@ impl Submitted {
             watch: WatchSupport::None,
             poll_interval: None,
             expected: ExpectedTotals::default(),
+            tag: None,
+            effective: None,
         }
+    }
+
+    /// A short, backend-specific description of how the request was sent (diagnostics only).
+    #[must_use]
+    pub fn with_effective(mut self, effective: impl Into<String>) -> Self {
+        self.effective = Some(effective.into());
+        self
     }
 
     #[must_use]

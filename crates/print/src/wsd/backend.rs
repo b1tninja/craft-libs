@@ -12,15 +12,25 @@ use super::fault::FaultCode;
 use super::job::{self, PrintOptions};
 use super::model::{self, JobReason, PrinterElements};
 use super::mtom::Transfer;
+use super::ops::JobSection;
 use super::policy::{NetworkLimits, PrinterUrl};
 use super::ticket::{self, Sides, TicketShape};
 use crate::backends::{
     Backend, BackendClass, DocumentFormat, JobHint, PrinterDetails, PrinterRef, PrinterState, PrinterStatus, Progress, SubmitRequest,
 };
-use crate::{ColourMode, Duplex, ErrorKind, Job, JobId, JobOptions, JobStatus, PrintError, Scaling, Submitted, WatchSupport};
+use crate::{
+    ColourMode, Duplex, ErrorKind, Fingerprint, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobStatus, JobTag, PrintError,
+    Reconciled as FoundJobs, RemoteJob, Scaling, Submitted, TagPlacement, TagSupport, WatchSupport, filter_jobs, reconcile_jobs,
+};
 
 /// The registry name and id prefix.
 const NAME: &str = "wsd";
+
+/// The longest job name the ticket carries, in characters.
+const MAX_NAME: usize = 255;
+
+/// How many job summaries without a name `list_jobs` completes with a `GetJobElements` each.
+const MAX_NAME_LOOKUPS: usize = 8;
 
 /// What the registry may be handed: the formats a WS-Print printer can list and this crate can name.
 /// Whether one printer takes one of them is decided against that printer's own list, in
@@ -250,7 +260,7 @@ impl WsdBackend {
     }
 
     /// The options of one job. The returned strings are what could not be applied.
-    fn options(&self, job: &Job, per_job: &JobOptions) -> (PrintOptions, Vec<String>) {
+    fn options(&self, job: &Job, per_job: &JobOptions, tag: Option<&JobTag>) -> (PrintOptions, Vec<String>) {
         let mut notes = Vec::new();
         let config = &*self.config;
         let sides = job.duplex.map(|d| match d {
@@ -271,7 +281,11 @@ impl WsdBackend {
             ColourMode::Mono => ColorMode::Mono,
         };
         let options = PrintOptions {
-            job_name: job.title.chars().take(255).collect(),
+            // The tag, when there is one, is the suffix of the name and survives the length cap.
+            job_name: match tag {
+                Some(tag) => tag.apply_to(&job.title, Some(MAX_NAME)),
+                None => job.title.chars().take(MAX_NAME).collect(),
+            },
             user_name: config.user_name.clone(),
             document_name: None,
             // One copy is the printer's default and needs no setting (a reduced ticket has no room for it).
@@ -438,7 +452,7 @@ impl Backend for WsdBackend {
     /// written is [`crate::RetrySafety::OutcomeUnknown`] (the job may exist) and the backend then
     /// leaves any created job alone; call [`WsdBackend::reconcile`] before submitting again.
     fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-        let SubmitRequest { document, job, options: per_job, consent, cancel, progress } = request;
+        let SubmitRequest { document, job, options: per_job, consent, cancel, progress, tag } = request;
         // The registry checks this too; a caller that holds the backend directly gets the same answer.
         let Some(consent) = consent else {
             return Err(PrintError::new(
@@ -450,7 +464,7 @@ impl Backend for WsdBackend {
             return Err(PrintError::new(ErrorKind::NotFound, "the wsd backend has no default printer: name one (wsd:<url>)"));
         };
         let entry = self.entry(id)?;
-        let (options, notes) = self.options(&job, &per_job);
+        let (options, notes) = self.options(&job, &per_job, tag.as_ref());
         let encoder = PassThrough::new(document.format.mime(), document.bytes);
         let mut progress = progress;
         let mut report = |done: usize, total: usize| {
@@ -469,7 +483,11 @@ impl Backend for WsdBackend {
         if !warnings.is_empty() {
             message.push_str(&format!(" (warnings: {})", warnings.join("; ")));
         }
-        Ok(Submitted::new(NAME, message).with_job(JobId::new(NAME, job_native(&url, accepted.job_id))).with_warnings(warnings))
+        let effective = format!("ticket shape {}; job name {:?}", self.config.ticket_shape.token(), options.job_name);
+        Ok(Submitted::new(NAME, message)
+            .with_job(JobId::new(NAME, job_native(&url, accepted.job_id)))
+            .with_warnings(warnings)
+            .with_effective(effective))
     }
 
     /// WS-Print has no event listener here: callers poll.
@@ -506,6 +524,35 @@ impl Backend for WsdBackend {
     fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {
         let (entry, id) = self.job_target(job)?;
         job::cancel_job_tolerant(&self.client(&entry), id).map_err(|e| e.print_error(Op::Cancel))
+    }
+
+    /// The tag is a suffix of the job name in the ticket (`"title [ref abc123de]"`, cut so that it
+    /// fits the 255 characters), and `GetActiveJobs` / `GetJobHistory` return the name, so a
+    /// listing can match it.
+    fn tag_support(&self) -> TagSupport {
+        TagSupport::new(TagPlacement::JobName, true)
+    }
+
+    /// Active jobs and history, with the user; no creation time (job summaries do not carry one).
+    fn job_query_caps(&self) -> JobQueryCaps {
+        JobQueryCaps { list: true, created_time: false, user: true, tag: true, history: true }
+    }
+
+    /// `GetActiveJobs` and `GetJobHistory` (two idempotent reads; a printer that refuses the
+    /// history with a fault gives the active jobs alone), and for up to a few summaries that lack a
+    /// name one `GetJobElements` to fill in the name and user. Newest first (highest job id).
+    fn list_jobs(&self, printer_native: &str, filter: &JobFilter) -> Result<Vec<RemoteJob>, PrintError> {
+        let entry = self.entry(printer_native)?;
+        Ok(filter_jobs(self.remote_jobs(&entry)?, filter))
+    }
+
+    /// Reconcile by tag (the tag is in the job name), else by title and this backend's user name.
+    fn find_job(&self, printer_native: &str, fingerprint: &Fingerprint) -> Result<FoundJobs, PrintError> {
+        let mut fingerprint = fingerprint.clone();
+        fingerprint.user.get_or_insert_with(|| self.config.user_name.clone());
+        let support = self.tag_support();
+        let jobs = self.list_jobs(printer_native, &fingerprint.filter(support.matchable))?;
+        Ok(reconcile_jobs(jobs, &fingerprint, support))
     }
 }
 
@@ -576,6 +623,50 @@ pub struct JobMatch {
 }
 
 impl WsdBackend {
+    /// Every job the printer lists, neutral, newest first.
+    fn remote_jobs(&self, entry: &Entry) -> Result<Vec<RemoteJob>, PrintError> {
+        let client = self.client(entry);
+        let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
+        let history = match client.get_job_history() {
+            Ok(rows) => rows,
+            Err(WsdError::Fault(_)) => Vec::new(),
+            Err(e) => return Err(e.print_error(Op::Query)),
+        };
+        let url = entry.url.as_url();
+        let mut seen: Vec<u32> = Vec::new();
+        let mut lookups = 0usize;
+        let mut jobs: Vec<(u32, RemoteJob)> = Vec::new();
+        for row in active.into_iter().chain(history) {
+            let id = row.status.job_id;
+            if seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+            let (mut name, mut user) = (row.job_name.clone(), row.user_name.clone());
+            if name.is_empty() && lookups < MAX_NAME_LOOKUPS {
+                // Best effort: a summary without a name is completed from the job's own ticket.
+                lookups += 1;
+                if let Ok(elements) = client.get_job_elements(id, &[JobSection::Ticket])
+                    && let Some(ticket) = elements.ticket
+                {
+                    name = ticket.job_name;
+                    if user.is_empty() {
+                        user = ticket.user_name;
+                    }
+                }
+            }
+            let status = neutral_status(&row.status);
+            let mut remote = RemoteJob::new(JobId::new(NAME, job_native(&url, id)), name, status.state).with_reasons(status.reasons);
+            if !user.is_empty() {
+                remote = remote.with_user(user);
+            }
+            remote.sheets_done = status.sheets_done;
+            jobs.push((id, remote));
+        }
+        jobs.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
+        Ok(jobs.into_iter().map(|(_, job)| job).collect())
+    }
+
     /// The printer and job number of a job handle made by this backend. The printer must still be
     /// added: a request only ever reaches what the app chose. A handle that is not one of ours, or
     /// whose printer was removed, is [`ErrorKind::InvalidRequest`] (not `NotFound`: that means a
@@ -607,7 +698,7 @@ impl WsdBackend {
     pub fn reconcile(&self, printer: &str, job_title: &str) -> Result<Reconciled, PrintError> {
         let entry = self.entry(printer)?;
         let client = self.client(&entry);
-        let name: String = job_title.chars().take(255).collect();
+        let name: String = job_title.chars().take(MAX_NAME).collect();
         let user = self.config.user_name.as_str();
         let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
         // History is best effort when the printer refuses it (a fault), not when the wire fails.

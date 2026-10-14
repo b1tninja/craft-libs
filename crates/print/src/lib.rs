@@ -10,7 +10,7 @@
 //! backends beside it (see the README); the functions of this crate are unchanged.
 //!
 //! With the `wsd` cargo feature (on by default, not for `wasm32`) there is also a WS-Print network
-//! backend, [`wsd::WsdBackend`]: it lists only printers the app adds, discovers nothing and needs
+//! backend, `wsd::WsdBackend`: it lists only printers the app adds, discovers nothing and needs
 //! consent for every job (see the README).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]

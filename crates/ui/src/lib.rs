@@ -6,6 +6,7 @@
 //! accept focused style values and return egui responses; no application engine is required.
 
 pub mod buttons;
+pub mod capability;
 pub mod capture;
 pub mod docking;
 mod focus;

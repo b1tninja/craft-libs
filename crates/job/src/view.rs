@@ -14,13 +14,16 @@ use crate::time::JobTimes;
 /// The last failure, in the terms a UI needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ErrorSummary {
     /// The sentence for a person.
     pub message: String,
     /// The domain's error kind as a stable label (`"busy"`, `"jam"`); the kind types stay in the domain crate.
     pub kind_label: String,
     /// What to do about it, when the domain crate decided.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub retry_advice: Option<RetryAdvice>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub native: Option<NativeCode>,
 }
 
@@ -45,21 +48,30 @@ impl ErrorSummary {
 /// A snapshot of one job for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JobView {
     pub id: JobId,
     pub kind: JobKind,
     pub title: String,
     pub state: JobState,
     /// Device-reported reasons ("media-empty", "cover open"), as text.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub reasons: Vec<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub progress: Option<Progress>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub times: JobTimes,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub documents: JobDocuments,
     /// Attempts made so far (submits for print, acquisitions for scan).
+    #[cfg_attr(feature = "serde", serde(default))]
     pub attempts: u32,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub last_error: Option<ErrorSummary>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub tag: Option<Tag>,
     /// The printer or scanner, by display name.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub device_name: Option<String>,
 }
 

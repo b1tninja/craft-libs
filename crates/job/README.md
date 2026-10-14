@@ -93,6 +93,33 @@ has no scan counterpart today; a print spooler port uses it.
 | `RetrySafety`, `RetryPolicy`, `Jitter`, `Progress`, `ExpectedTotals` | `retryable` on `ScanErrorInfo` | the same names |
 | `RetryPolicy::next_delay` | - | `advise` -> `RetryAdvice` |
 
+## Wire format (optional `serde` feature)
+
+`craft-job = { version = "0.1", features = ["serde"] }` derives `Serialize` and `Deserialize` on the plain
+data types, so an app can write a job journal or print a `JobView` without hand-written JSON. The feature
+is off by default and changes nothing in a default build. The crate itself never reads or writes a file.
+
+* **Names** are lowercase `snake_case` (`needs_attention`, `completed_with_errors`, `not_reported`,
+  `job_name_suffix`). Struct fields keep their Rust names. This is the wire format and is meant to stay
+  stable; new fields and variants are added, not renamed.
+* **Ids and tags are strings**: `JobId`, `DeviceId`, `BackendName` as `"<backend>:<native>"` (read back
+  through `FromStr`, so a bad id is an error), `Tag` as its 8 hex characters.
+* **`Timestamp`** is milliseconds (`u64`). **Durations** (`RetryAdvice::RetryAfter`, `Fingerprint::window`)
+  are whole milliseconds; finer precision is dropped. `RetryAdvice::RetryAfter(1.5 s)` is
+  `{"retry_after":1500}`; `RetryNow` is `"retry_now"`.
+* **`NativeCode`** is `{"domain","code","name"}`. Its `&'static str` fields cannot borrow from the input, so
+  text read back is interned: the well-known domains (`hresult`, `win32`, `sane`, `http`, `ipp`,
+  `wsd-fault`, `cups`, `nserror`) map to literals and anything else is leaked once into a table of at most
+  256 strings of at most 64 bytes each. Beyond that a domain reads as `"other"` and a name as `null`.
+  `IndicatorKey` is its snake_case name; an unknown name reads back as `IndicatorKey::Other(..)` under the
+  same limits (so `Other("jam")` reads back as `Jam`).
+* **Forward compatibility**: unknown fields are ignored; optional fields and collections may be missing
+  (they default); a value this version does not know reads as `JobState::Unknown`,
+  `DeviceState::Unknown`, `DeviceConnection::Unknown`, `Tri::NotReported` or `TagPlacement::None`.
+  `JobKind`, `Severity`, `RetrySafety`, `RetryAdvice`, `TagSupport` and `PaperSource` have no such fallback and
+  fail on an unknown value: a retry rule is not guessed.
+* Round-trip tests live in `tests/serde_roundtrip.rs` (`serde_json` is a dev-dependency only).
+
 ## Migration
 
 craft-print and craft-scan are expected to depend on this crate and `pub use` these names, so

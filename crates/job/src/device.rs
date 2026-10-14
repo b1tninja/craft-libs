@@ -11,10 +11,13 @@ use crate::job::JobKind;
 /// means "unknown", so a plain `bool` would invent information.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Tri {
     On,
     Off,
     #[default]
+    #[cfg_attr(feature = "serde", serde(other))]
     NotReported,
 }
 
@@ -62,6 +65,8 @@ impl From<Option<bool>> for Tri {
 /// How serious an indicator is, in increasing order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Severity {
     #[default]
     Ok,
@@ -73,6 +78,8 @@ pub enum Severity {
 /// Which indicator this is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(into = "String"))]
 pub enum IndicatorKey {
     /// Paper in the feeder (readiness: `On` is good).
     FeederPaper,
@@ -96,6 +103,64 @@ pub enum IndicatorKey {
     SupplyLow,
     /// Anything else, named by the domain crate.
     Other(&'static str),
+}
+
+#[cfg(feature = "serde")]
+impl IndicatorKey {
+    /// The wire name: snake_case for the named keys, the text itself for `Other`.
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::FeederPaper => "feeder_paper",
+            Self::FlatbedReady => "flatbed_ready",
+            Self::DuplexReady => "duplex_ready",
+            Self::CoverOpen => "cover_open",
+            Self::PathCoverOpen => "path_cover_open",
+            Self::Jam => "jam",
+            Self::MultiFeed => "multi_feed",
+            Self::LampError => "lamp_error",
+            Self::Attention => "attention",
+            Self::Offline => "offline",
+            Self::PaperOut => "paper_out",
+            Self::SupplyLow => "supply_low",
+            Self::Other(name) => name,
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+impl From<IndicatorKey> for String {
+    fn from(key: IndicatorKey) -> String {
+        key.wire_name().to_string()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for IndicatorKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+/// A name that is not one of the known keys becomes `Other` (interned and bounded: see the README).
+#[cfg(feature = "serde")]
+impl From<String> for IndicatorKey {
+    fn from(text: String) -> Self {
+        const NAMED: [IndicatorKey; 12] = [
+            IndicatorKey::FeederPaper,
+            IndicatorKey::FlatbedReady,
+            IndicatorKey::DuplexReady,
+            IndicatorKey::CoverOpen,
+            IndicatorKey::PathCoverOpen,
+            IndicatorKey::Jam,
+            IndicatorKey::MultiFeed,
+            IndicatorKey::LampError,
+            IndicatorKey::Attention,
+            IndicatorKey::Offline,
+            IndicatorKey::PaperOut,
+            IndicatorKey::SupplyLow,
+        ];
+        NAMED.into_iter().find(|key| key.wire_name() == text).unwrap_or_else(|| Self::Other(crate::wire::intern_or_other(&text)))
+    }
 }
 
 impl IndicatorKey {
@@ -142,11 +207,13 @@ impl IndicatorKey {
 /// One thing a device says about itself.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Indicator {
     pub key: IndicatorKey,
     pub label: String,
     pub state: Tri,
     pub severity: Severity,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub detail: Option<String>,
 }
 
@@ -183,18 +250,23 @@ impl Indicator {
 /// The overall state of a device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum DeviceState {
     Online,
     Busy,
     Offline,
     Attention,
     #[default]
+    #[cfg_attr(feature = "serde", serde(other))]
     Unknown,
 }
 
 /// How a device is attached. Named apart from craft-scan's `Connection`; the mapping is in the README.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum DeviceConnection {
     Usb,
     Network,
@@ -202,12 +274,15 @@ pub enum DeviceConnection {
     Local,
     Other,
     #[default]
+    #[cfg_attr(feature = "serde", serde(other))]
     Unknown,
 }
 
 /// What the device can do, where it says.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct CapabilitiesSummary {
     pub has_feeder: Tri,
     pub has_flatbed: Tri,
@@ -249,6 +324,8 @@ impl CapabilitiesSummary {
 /// Where paper comes from.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum PaperSource {
     Feeder,
     Glass,
@@ -259,6 +336,8 @@ pub enum PaperSource {
 /// The state of the paper path.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct PaperPathView {
     pub feeder_loaded: Tri,
     pub feeder_capacity: Option<u32>,
@@ -299,9 +378,11 @@ impl PaperPathView {
 /// A consumable (toner, ink), print only in practice.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Supply {
     pub label: String,
     /// 0 to 100, when the device reports a level.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub level_percent: Option<u8>,
     /// `On`: available; `Off`: low or empty; `NotReported`: unknown.
     pub state: Tri,
@@ -323,15 +404,22 @@ impl Supply {
 /// A snapshot of one device for display.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DeviceView {
     pub id: DeviceId,
     pub name: String,
     pub kind: JobKind,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub connection: DeviceConnection,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub state: DeviceState,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub capabilities: CapabilitiesSummary,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub indicators: Vec<Indicator>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub paper: Option<PaperPathView>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub supplies: Vec<Supply>,
 }
 

@@ -232,6 +232,21 @@ represented by `None`, independently of explicit one-sided, long-edge or short-e
 Receipts and backend errors remain unmodified data for the app to display. These controls work
 on WASM too; browser PDF printing remains an app-owned service.
 
+## Device capabilities
+
+`capability::Capability<T>` is plain data for what a device says about one option, in three states
+that a dialog must treat differently: `Supported(Advertised)` (the device published a list or an
+inclusive range, `Choices::List` / `Choices::Range`, and optionally its own default): enable the
+control and offer only that; `Unsupported` (the device published its answer and the option is not in
+it): show the control disabled with a reason and send nothing; `Unknown` (not published, or the query
+failed): enable the control, say it is not confirmed, and send the value as a hint. "Unknown" is
+not "unsupported": options are hints a backend may ignore. `Capability::from_option_list` maps `None`
+to unknown, an empty list to unsupported and a non-empty list to supported; `from_option_range` and
+`list_default_first` (device default first) build the other forms. `allows`, `clamp_to_supported`,
+`is_known`, `is_enabled`, `choices`, `list` and `default_value` read it. The type carries no wording
+and no egui types; the application supplies the reason and the note. It describes capability only:
+a device's status (out of paper, cover open) is a separate, dynamic matter and should only warn.
+
 ## Compatibility and checks
 
 The crate uses egui 0.36 and Rust 1.95 or later. Its production dependency disables egui's default

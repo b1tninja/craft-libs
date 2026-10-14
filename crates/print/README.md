@@ -434,7 +434,9 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   subscribes (WS-Eventing) to job and printer events, so a watch can poll *now* instead of waiting.
   **Nothing listens unless you call it**, and there is no default address: `NotifyConfig::new(bind,
   advertise)` takes the socket to listen on and the numeric local URL the printers are told
-  (`NotifyConfig::loopback()` is for tests). Events are only a **wake-up**: the state of a job always
+  (`NotifyConfig::loopback()` is for tests). `bind` must be one concrete local interface address (loopback,
+  link-local or private): `0.0.0.0`, `::` and the v4-mapped wildcard are refused with a typed error before
+  any socket is opened. `advertise` must be that same address, or a private address the app names for NAT. Events are only a **wake-up**: the state of a job always
   comes from `job_status`, so a lost, duplicated or forged event can cost a request or some latency
   and can never produce a wrong terminal state. While a subscription is healthy (a verified event
   arrived recently) a `JobWatch` polls every 30 seconds as a safety net plus once per wake; when it

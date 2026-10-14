@@ -108,11 +108,23 @@ never reset the stall rule (that needs a changed reading) and never affect the c
   behaviour for existing users.
 * **Explicit bind, explicit advertise.** `NotifyConfig { bind: SocketAddr, advertise: PrinterUrl }`:
   where to listen and which URL the printers are told. There is no default for either and no
-  "listen on every interface" convenience. The advertised address must satisfy the same numeric
-  local-address policy as a printer URL (a loopback, link-local or private literal: we never ask a
-  device to call out to anything else). If `bind` is an unspecified address (`0.0.0.0`) the app
-  said so on purpose; the source rules below still apply. `NotifyConfig::loopback()` binds
-  `127.0.0.1:0` for tests and local simulators.
+  "listen on every interface" convenience. The rules, checked before any socket is opened (by
+  `NotifyConfig::new` / `parse`, and again by `WsdBackend::with_events` / `Events::start` because the
+  fields are public), each refused with `ErrorKind::InvalidRequest`:
+
+  | Address | Rule |
+  |---|---|
+  | `bind` is a wildcard: `0.0.0.0`, `::`, or the v4-mapped `::ffff:0.0.0.0` | **refused**. The app names the one local interface address a printer reaches it on |
+  | `bind` is a concrete address that is not loopback, link-local or private (public, multicast, broadcast, documentation ranges) | refused (the numeric local-address policy of a printer URL) |
+  | `bind` is a loopback, link-local or private address (a v4-mapped form is judged as its IPv4 address) | accepted |
+  | `advertise` breaks the same policy (host name, public address, `https://`, ...) | refused |
+  | `advertise` host equals the `bind` address | accepted (the default shape; the port follows a port-0 bind) |
+  | `advertise` host differs from `bind` and is a **private** address (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`) | accepted: the app's explicit NAT or port-forward address |
+  | `advertise` host differs from `bind` and is loopback or link-local | refused: it cannot be the listener |
+
+  A wildcard bind used to be allowed "because the app said so"; it is no longer, so a listener can never
+  be reachable on an interface the app did not name (a VPN adapter, a public interface), whatever the
+  source rules below do. `NotifyConfig::loopback()` binds `127.0.0.1:0` for tests and local simulators.
 * **One listener per backend**, shared by all its subscriptions (clones of a backend share it).
   It is the only background thread this crate starts, and it lives from `with_events` until the last
   clone of the backend is dropped or `shutdown_events()` is called (both unsubscribe, stop and join).

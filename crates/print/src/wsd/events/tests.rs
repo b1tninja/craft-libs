@@ -80,9 +80,62 @@ fn the_advertised_address_follows_the_local_address_policy() {
     for no in ["http://8.8.8.8:80/", "http://example.com:80/", "https://127.0.0.1:80/", "ftp://127.0.0.1/"] {
         assert!(NotifyConfig::new(bind, no).is_err(), "{no}");
     }
-    for ok in ["http://127.0.0.1:9000/", "http://10.0.0.5:9000", "http://192.168.1.2:80/x", "http://[::1]:9000/"] {
+    for ok in ["http://127.0.0.1:9000/", "http://10.0.0.5:9000", "http://192.168.1.2:80/x"] {
         assert!(NotifyConfig::new(bind, ok).is_ok(), "{ok}");
     }
+}
+
+#[test]
+fn the_advertised_address_is_the_bind_address_or_a_private_one() {
+    let lan = SocketAddr::from(([192, 168, 1, 5], 9000));
+    // The same address, or a private (NAT) address the app names on purpose.
+    for ok in ["http://192.168.1.5:9000/", "http://192.168.1.5:9100/", "http://10.1.2.3:9000/", "http://172.16.0.9:80/"] {
+        assert!(NotifyConfig::new(lan, ok).is_ok(), "{ok}");
+    }
+    // A loopback or link-local address that is not the listener's own cannot be the listener.
+    for no in ["http://127.0.0.1:9000/", "http://169.254.3.4:9000/", "http://[::1]:9000/", "http://[fe80::1]:9000/"] {
+        let e = NotifyConfig::new(lan, no).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidRequest, "{no}");
+        assert!(e.message().contains("neither the listener's address"), "{no}: {e}");
+    }
+    // Loopback and link-local binds advertised as themselves.
+    assert!(NotifyConfig::new("127.0.0.1:0".parse().unwrap(), "http://127.0.0.1:1/").is_ok());
+    assert!(NotifyConfig::new("[::1]:0".parse().unwrap(), "http://[::1]:1/").is_ok());
+    assert!(NotifyConfig::new("[fe80::1]:0".parse().unwrap(), "http://[fe80::1]:1/").is_ok());
+    assert!(NotifyConfig::new("169.254.3.4:0".parse().unwrap(), "http://169.254.3.4:1/").is_ok());
+    assert!(NotifyConfig::new("[fd00::5]:0".parse().unwrap(), "http://[fd00::5]:1/").is_ok());
+}
+
+#[test]
+fn a_wildcard_or_public_bind_is_refused_by_name() {
+    for bind in ["0.0.0.0:0", "0.0.0.0:9000", "[::]:0", "[::]:9000", "[::ffff:0.0.0.0]:9000"] {
+        let e = NotifyConfig::new(bind.parse().unwrap(), "http://127.0.0.1:1/").unwrap_err();
+        assert_eq!((e.kind(), e.retry_safety()), (ErrorKind::InvalidRequest, crate::RetrySafety::Safe), "{bind}");
+        assert!(e.message().contains("wildcard") && e.message().contains("local interface address"), "{bind}: {e}");
+        // The text form goes through the same check.
+        assert!(NotifyConfig::parse(bind, "http://127.0.0.1:1/").is_err(), "{bind}");
+    }
+    for bind in ["8.8.8.8:9000", "203.0.113.9:80", "[2001:db8::1]:9000", "224.0.0.251:5353", "255.255.255.255:9"] {
+        let e = NotifyConfig::new(bind.parse().unwrap(), "http://127.0.0.1:1/").unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidRequest, "{bind}");
+        assert!(e.message().contains("not a loopback, link-local or private address"), "{bind}: {e}");
+    }
+    // A concrete address is accepted, as is a v4-mapped one that names a local address.
+    for bind in ["127.0.0.1:0", "10.0.0.5:9000", "[::ffff:192.168.1.5]:9000"] {
+        let ip = bind.parse::<SocketAddr>().unwrap().ip().to_canonical();
+        let advertise = format!("http://{ip}:1/");
+        assert!(NotifyConfig::new(bind.parse().unwrap(), &advertise).is_ok(), "{bind}");
+    }
+}
+
+#[test]
+fn a_config_whose_public_fields_were_changed_is_checked_again_before_the_socket_opens() {
+    let mut config = NotifyConfig::loopback().unwrap();
+    config.bind = SocketAddr::from(([0, 0, 0, 0], 0));
+    let clock: Arc<dyn Clock> = Arc::new(ManualClock::new());
+    let e = Events::start(config, clock, default_transport(), NetworkLimits::default()).map(|_| ()).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::InvalidRequest);
+    assert!(e.message().contains("wildcard"), "{e}");
 }
 
 fn events() -> Events {

@@ -257,6 +257,33 @@ fn a_bad_bind_address_is_an_error_and_a_public_advertise_address_is_refused() {
 }
 
 #[test]
+fn a_wildcard_bind_is_refused_before_any_socket_is_opened() {
+    // Pick a free port, release it, then ask for a wildcard listener on exactly that port.
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    for bind in [format!("0.0.0.0:{port}"), format!("[::]:{port}"), format!("[::ffff:0.0.0.0]:{port}")] {
+        let refused = NotifyConfig::parse(&bind, "http://127.0.0.1:1/").unwrap_err();
+        assert_eq!(refused.kind(), craft_print::ErrorKind::InvalidRequest, "{bind}");
+        assert!(refused.message().contains("wildcard"), "{bind}: {refused}");
+    }
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err(), "nothing listens after the refusals");
+    // The same through a config whose public fields were changed after it was made: with_events refuses.
+    let mut config = NotifyConfig::new(format!("127.0.0.1:{port}").parse().unwrap(), "http://127.0.0.1:1/").unwrap();
+    config.bind = format!("0.0.0.0:{port}").parse().unwrap();
+    let error = WsdBackend::new().with_events(config).map(|_| ()).unwrap_err();
+    assert_eq!(error.kind(), craft_print::ErrorKind::InvalidRequest);
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err(), "nothing listens after the refusal");
+    // A concrete interface address is accepted and listens there, advertised as itself.
+    let config = NotifyConfig::new(format!("127.0.0.1:{port}").parse().unwrap(), "http://127.0.0.1:1/").unwrap();
+    let backend = WsdBackend::new().with_events(config).unwrap();
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
+    assert_eq!(backend.events_status().unwrap().advertise, "http://127.0.0.1:1");
+    backend.shutdown_events();
+}
+
+#[test]
 fn getting_a_wake_source_sends_nothing_and_the_next_status_call_subscribes() {
     let rig = rig();
     let rx = rig.backend.wake_source(&job_id(1)).unwrap();

@@ -8,6 +8,8 @@
 //!
 //! * [`NotifyConfig`]: where to listen (`bind`) and which URL the printers are told (`advertise`).
 //!   No defaults except [`NotifyConfig::loopback`], which is for tests and local simulators.
+//!   `bind` is one concrete local interface address: a wildcard (`0.0.0.0`, `::`) is refused before
+//!   any socket is opened.
 //! * [`Events`]: the listener thread (the only background thread, joined on shutdown) and the
 //!   subscription manager. Everything that *sends* (`Subscribe`, `Renew`, `Unsubscribe`) is
 //!   caller-driven: [`Events::maintain`], on the injected clock.
@@ -81,10 +83,14 @@ impl Default for EventTuning {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct NotifyConfig {
-    /// The socket to listen on. Port 0 picks one; the advertised port then follows it.
+    /// The socket to listen on: **one concrete local interface address** (loopback, link-local or
+    /// private, the policy of a printer URL). A wildcard (`0.0.0.0`, `::`, `::ffff:0.0.0.0`) is
+    /// refused. Port 0 picks a port; the advertised port then follows it.
     pub bind: SocketAddr,
     /// The URL (scheme, address and port; the path is ignored) the printers are told to call. It
-    /// must pass the numeric local-address policy of a printer URL.
+    /// must pass the numeric local-address policy of a printer URL, and its address must be the
+    /// `bind` address, or a private address when the app advertises another one (NAT, a forwarded
+    /// port).
     pub advertise: PrinterUrl,
     pub tuning: EventTuning,
     follow_port: bool,
@@ -93,8 +99,15 @@ pub struct NotifyConfig {
 impl NotifyConfig {
     /// Listen on `bind` and tell printers `advertise` (`http://<numeric local address>:<port>`).
     /// With port 0 in `bind` the advertised port is replaced by the one the system picked.
+    ///
+    /// Refused with [`ErrorKind::InvalidRequest`], before any socket is opened: a wildcard `bind`
+    /// (`0.0.0.0`, `::`, or the v4-mapped `::ffff:0.0.0.0`: name the interface a printer reaches
+    /// you on), a `bind` that is not a loopback, link-local or private address, an `advertise` that
+    /// breaks the same numeric local-address policy, and an `advertise` address that is neither the
+    /// `bind` address nor a private address (a NAT address the app names on purpose).
     pub fn new(bind: SocketAddr, advertise: &str) -> Result<Self, PrintError> {
         let advertise = PrinterUrl::parse(advertise).map_err(PrintError::from)?;
+        check_addresses(bind, &advertise)?;
         Ok(Self { follow_port: bind.port() == 0, bind, advertise, tuning: EventTuning::default() })
     }
 
@@ -119,6 +132,43 @@ impl NotifyConfig {
         self.tuning = tuning;
         self
     }
+}
+
+fn refused(why: String) -> PrintError {
+    PrintError::new(ErrorKind::InvalidRequest, why).with_phase(crate::Phase::Prepare).with_safety(crate::RetrySafety::Safe)
+}
+
+/// The rules of the listener's addresses; run when a [`NotifyConfig`] is made and again by
+/// [`Events::start`] (its fields are public), always before a socket is opened.
+///
+/// * `bind` is not a wildcard (`0.0.0.0`, `::`, `::ffff:0.0.0.0`) and passes the numeric
+///   local-address policy of a printer URL (loopback, link-local or private).
+/// * `advertise` (already checked by the same policy when parsed) is the `bind` address, or a
+///   private address (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`): the app's explicit NAT or
+///   port-forward address. A loopback or link-local `advertise` that is not the `bind` address could
+///   not be the listener, so it is refused.
+fn check_addresses(bind: SocketAddr, advertise: &PrinterUrl) -> Result<(), PrintError> {
+    let ip = bind.ip().to_canonical();
+    if ip.is_unspecified() {
+        return Err(refused(format!(
+            "the event listener cannot bind the wildcard address {}: name the one local interface address (loopback, link-local or private) that the printers reach you on",
+            bind.ip()
+        )));
+    }
+    if let Err(e) = PrinterUrl::parse(&format!("http://{}/", SocketAddr::new(ip, bind.port().max(1)))) {
+        return Err(refused(format!("the event listener address {} is not a loopback, link-local or private address: {e}", bind.ip())));
+    }
+    let advertised = advertise.host().to_canonical();
+    let private = match advertised {
+        IpAddr::V4(v4) => v4.is_private(),
+        IpAddr::V6(v6) => v6.is_unique_local(),
+    };
+    if advertised != ip && !private {
+        return Err(refused(format!(
+            "the advertised address {advertised} is neither the listener's address {ip} nor a private address: a printer cannot reach a loopback or link-local address that is not the listener's own"
+        )));
+    }
+    Ok(())
 }
 
 /// One printer's subscription, as plain data.
@@ -308,6 +358,7 @@ enum Action {
 impl Events {
     /// Bind the listener and start its thread. This is the only call that opens a socket.
     pub fn start(config: NotifyConfig, clock: Arc<dyn Clock>, transport: SharedTransport, limits: NetworkLimits) -> Result<Self, PrintError> {
+        check_addresses(config.bind, &config.advertise)?;
         let listener = TcpListener::bind(config.bind)
             .map_err(|e| PrintError::new(ErrorKind::Unavailable, format!("cannot listen on {} for printer events: {e}", config.bind)))?;
         listener.set_nonblocking(true).map_err(|e| PrintError::new(ErrorKind::Failed, format!("cannot set up the event listener: {e}")))?;

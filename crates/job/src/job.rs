@@ -43,6 +43,9 @@ pub enum JobState {
     Cancelled,
     /// Stopped by a failure.
     Aborted,
+    /// Given up waiting: the device never reported an outcome. The job may or may not have been
+    /// carried out, so this is terminal but neither a success nor a known failure.
+    Abandoned,
     /// Not finished and stuck until a person acts (paper jam, cover open, feeder empty).
     NeedsAttention,
     /// The device did not say.
@@ -54,7 +57,7 @@ pub enum JobState {
 impl JobState {
     /// Nothing more will happen to the job.
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::CompletedWithErrors | Self::Cancelled | Self::Aborted)
+        matches!(self, Self::Completed | Self::CompletedWithErrors | Self::Cancelled | Self::Aborted | Self::Abandoned)
     }
 
     /// The job finished cleanly. [`Self::CompletedWithErrors`] is terminal but not a success.
@@ -72,6 +75,7 @@ impl JobState {
             Self::CompletedWithErrors => "completed_with_errors",
             Self::Cancelled => "cancelled",
             Self::Aborted => "aborted",
+            Self::Abandoned => "abandoned",
             Self::NeedsAttention => "needs_attention",
             Self::Unknown => "unknown",
         }
@@ -154,7 +158,7 @@ mod tests {
     #[test]
     fn state_classification() {
         use JobState::*;
-        for s in [Completed, CompletedWithErrors, Cancelled, Aborted] {
+        for s in [Completed, CompletedWithErrors, Cancelled, Aborted, Abandoned] {
             assert!(s.is_terminal(), "{s:?}");
         }
         for s in [Pending, Processing, Held, NeedsAttention, Unknown] {
@@ -162,7 +166,7 @@ mod tests {
             assert!(!s.is_success(), "{s:?}");
         }
         assert!(Completed.is_success());
-        assert!(!CompletedWithErrors.is_success() && !Cancelled.is_success() && !Aborted.is_success());
+        assert!(!CompletedWithErrors.is_success() && !Cancelled.is_success() && !Aborted.is_success() && !Abandoned.is_success());
         assert_eq!(JobState::default(), Unknown);
         assert_eq!(CompletedWithErrors.name(), "completed_with_errors");
         assert_eq!(NeedsAttention.name(), "needs_attention");

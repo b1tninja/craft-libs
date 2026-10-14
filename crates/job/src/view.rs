@@ -148,7 +148,7 @@ impl JobView {
 
     /// Whether the UI should draw attention: the job is stuck on a person, or ended badly.
     pub fn needs_attention(&self) -> bool {
-        matches!(self.state, JobState::NeedsAttention | JobState::Aborted | JobState::CompletedWithErrors)
+        matches!(self.state, JobState::NeedsAttention | JobState::Aborted | JobState::Abandoned | JobState::CompletedWithErrors)
     }
 }
 

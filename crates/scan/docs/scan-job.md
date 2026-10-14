@@ -37,6 +37,14 @@ loop {
 // Accept what is there -> finish(..). Stop -> cancel(..). Terminal: take_pages() and use them.
 ```
 
+**Threads.** The job stays on the controlling thread (the GUI's UI thread, the CLI's main thread). The worker
+gets only `plan.settings` (it is `Send`: settings plus the two tokens) and returns the `Result` of `acquire`.
+The controlling thread polls `record_progress`, forwards a stop request (the GUI's button, the CLI's Ctrl-C
+handler setting a flag the main loop turns into `job.cancel(now())`), and calls `finish_attempt` when the worker
+joins. The job itself is never shared across threads and needs no lock. A short-lived CLI run is exactly this loop:
+one process, one job, pages written to the job's output folder as `record_progress` returns them, a small journal
+the app writes, and an exit code from `exit_class()` (section 11).
+
 `begin_attempt_with` is only ever called on the person's say-so (or the app's, on their behalf). The job never
 decides, on its own, to scan on after pages were kept.
 
@@ -88,10 +96,12 @@ through the token therefore loses nothing, as long as the token was the way the 
 | feeder empty, pages in hand, **count short** (mid-job reload) | yes | `Interrupted` | `DoNotRetry`; the person reloads and chooses `Append` |
 | feeder empty, **no pages**, request was `Auto`, glass exists | n/a | `Interrupted`, attempt `FellBackToGlass` | `RetryNow`; next plan has `Source::Glass` |
 | feeder empty, no pages, feeder requested | n/a | `Interrupted` | `DoNotRetry` |
-| busy, **no pages** | n/a | `Interrupted` while the budget lasts, then `Failed` | `RetryAfter`, then `DoNotRetry` |
+| busy, **no pages** (the only automatic retry) | n/a | `Interrupted` while the budget lasts, then `Failed` | `RetryAfter`, then `DoNotRetry` |
 | busy, pages kept | yes | `Interrupted` | `DoNotRetry` (paper position unknown) |
-| link dropped (`Offline`) or an unclassified error, **no pages, nothing in flight** | n/a | as busy | as busy |
-| link dropped or unclassified error **after pages, or mid-page** | yes | `NeedsAttention` | `CheckDeviceFirst` |
+| link dropped (`Offline`), with or without pages | if any | `NeedsAttention` | `CheckDeviceFirst` |
+| unclassified error (`Other`) **after pages, or mid-page** | yes | `NeedsAttention` | `CheckDeviceFirst` |
+| unclassified error, no pages | n/a | `Failed` | `DoNotRetry` |
+| the backend reports `InterruptKind::Cancelled` | yes | `Terminal(CancelledByDevice)` | `DoNotRetry` |
 | validation failure, `Unsupported`, no source | n/a | `Failed` | `DoNotRetry` |
 | `cancel()` | yes | `Terminal(Cancelled)` | `DoNotRetry` |
 | `device_cancelled()` | yes | `Terminal(CancelledByDevice)` | `DoNotRetry` |
@@ -99,11 +109,11 @@ through the token therefore loses nothing, as long as the token was the way the 
 "Reading a failure" is three questions, answered from the existing `InterruptKind`, the page count and whether a
 page was part-way across (`ProgressToken::in_page`):
 
-* **transient** (`Busy`, `Offline`, and not unknown): waiting may cure it.
+* **transient** (`Busy` only): the scanner said it is busy, so it did nothing, and waiting may cure it.
 * **a person can cure it** (`CoverOpen`, `Jam`, `PaperProblem`, `FeederEmpty`, `MultiFeed`, `Attention`,
   `DeviceError`, `BusyOrFeederEmpty`): the job waits in `Interrupted`.
-* **unknown outcome** (`Offline` or `Other` after pages, or mid-page): the transfer may have done more than we were
-  told. `RetrySafety::OutcomeUnknown`; the job waits in `NeedsAttention`.
+* **unknown outcome** (`Offline` always, `Other` after pages or mid-page): the request may have reached the
+  scanner, which may have moved the carriage or fed sheets, even with no page in hand. `RetrySafety::OutcomeUnknown`; the job waits in `NeedsAttention`.
 
 The automatic part is exactly `craft_job::advise`, fed `retryable = transient && nothing kept` and the safety above,
 under `ScanJobConfig::retry` (default `RetryPolicy::default()`; `RetryPolicy::none()` turns it off). Its attempt count
@@ -146,10 +156,12 @@ requests the attempt's `CancelToken` (the worker's transfer stops at the backend
 ends `Cancelled` when `finish_attempt` reports the return, whatever it was: a user who pressed Stop does not get a
 "completed" job even if the last page raced in. Kept pages stay in the job.
 
-`device_cancelled(at)` is the scanner's: the Cancel key on the panel, or the device dropping the job. It is a
-different end because the app must not say "you cancelled it" and a retry is not implied. **No backend reports it
-through `ScanError` today** (there is no `InterruptKind::Cancelled`), so the app calls it when it learns so from
-its own protocol layer. That is a limit, not a design preference.
+`InterruptKind::Cancelled` is the scanner's: the Cancel key on the panel, or the device dropping the job. A backend
+that can tell returns it in a `ScanError` (also inside `Incomplete`, with the pages) and `finish_attempt` ends the job
+`Terminal(CancelledByDevice)`: a different end because the app must not say "you cancelled it" and a retry is not
+implied. If this side asked to stop first, `Cancelled` wins. `device_cancelled(at)` stays for a backend that learns it
+out of band (a status poll while the transfer is running). The kind was added to `InterruptKind`, which is now
+`#[non_exhaustive]`; its wire string is `cancelled`, appended after `device_error`.
 
 ## 8. Idempotency, honestly
 
@@ -189,9 +201,31 @@ per status bit.
 * No persistence. A `ScanJob` lives in the process that made it; page bytes are held in memory (the app may
   `take_pages()` and spill to disk between attempts). Types are plain data; nothing implements `serde`.
 * No reconcile: see section 8.
-* `Resume`, device-cancel detection and a device-side job handle are not there (sections 5, 7, 8).
+* `Resume` and a device-side job handle are not there (sections 5, 8).
 * The job id in `JobView` is `<backend>:local-<n>`, a process-unique number. There is no device job to name.
 * Paper position is never inferred. Whether a jammed sheet was scanned is the person's call.
-* An `Offline` failure before any page is treated as safe to repeat. If the link dropped after the scanner had
-  already started the carriage, that is wrong in the same way a duplicate is; the job cannot tell, and the retry
-  budget bounds the cost. An app that prefers to ask can use `RetryPolicy::none()`.
+* `Offline` is always an unknown outcome, even with no page: the job cannot tell a refused connection from one that
+  dropped after the scanner started, so it never retries it by itself. The price is one question to the person after
+  a plain "scanner unreachable". Only `Busy` is retried automatically.
+
+## 11. Continuing in a later process, and exit codes
+
+A CLI run is short-lived, so it cannot keep a `ScanJob` between `scan` and `scan --continue DIR`. The job is not
+serialisable (it holds tokens and page bytes); the app keeps the pages as files and a small journal of what the
+snapshot said, and seeds a new job from it:
+
+```text
+let job = ScanJob::continuing(original_settings, config, kept_page_infos);   // Interrupted, N pages counted
+let plan = job.begin_attempt_with(now(), Continuation::Append)?;             // asks for pages - N
+```
+
+`settings` is the **original** request (`pages` is the total, 40), `kept` is the `PageInfo` of the pages already on
+disk (it is renumbered 1..n; attempt numbering continues after the highest attempt in it). The job starts
+`Interrupted` with advice `DoNotRetry`, so `begin_attempt` without a continuation is refused and `Append` or
+`Restart` must be named; `finish` accepts what is there. The view reads "12 of 40". `take_pages()` returns only
+pages received since, and `NothingLeft` is returned when everything wanted is already kept. With an empty `kept` it
+is `ScanJob::new`.
+
+For the terminal, `ScanJobSnapshot::summary_line()` gives `Archive: interrupted, 12 of 40 pages, 1 attempt, jam`
+(plain ASCII) and `exit_class()` (also on `ScanJobState`) gives an `ExitClass` with stable names: `completed`,
+`needs_attention` (any state that is not an end, and a partial stack), `failed`, `cancelled` (both cancels).

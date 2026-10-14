@@ -1129,6 +1129,7 @@ impl ScanError {
 
 /// What stopped a scan, for the instruction a caller shows ("close the cover", "clear the jam", ...).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum InterruptKind {
     /// A scanner or ADF cover is open.
     CoverOpen,
@@ -1153,6 +1154,9 @@ pub enum InterruptKind {
     BusyOrFeederEmpty,
     /// A lamp or device fault that a power cycle may clear.
     DeviceError,
+    /// The device ended the scan itself (the Cancel key on its panel, the job dropped on its side). A
+    /// backend that can tell reports this; `ScanJob` ends `CancelledByDevice`. Not a fault.
+    Cancelled,
     /// Anything the backend did not name.
     Other,
 }
@@ -1172,6 +1176,7 @@ impl InterruptKind {
             Self::Busy => "The scanner is busy. Try again in a moment.",
             Self::BusyOrFeederEmpty => BUSY_OR_FEEDER_EMPTY,
             Self::DeviceError => "The scanner reported a device fault. Turning it off and on may clear it.",
+            Self::Cancelled => "The scan was cancelled at the scanner.",
             Self::Other => "The scan failed.",
         }
     }
@@ -1199,7 +1204,7 @@ pub fn interrupt_kind(message: &str) -> InterruptKind {
     if message.contains(BUSY_OR_FEEDER_EMPTY) {
         return InterruptKind::BusyOrFeederEmpty;
     }
-    const ORDER: [InterruptKind; 9] = [
+    const ORDER: [InterruptKind; 10] = [
         InterruptKind::Jam,
         InterruptKind::PaperProblem,
         InterruptKind::CoverOpen,
@@ -1209,6 +1214,7 @@ pub fn interrupt_kind(message: &str) -> InterruptKind {
         InterruptKind::Attention,
         InterruptKind::Busy,
         InterruptKind::DeviceError,
+        InterruptKind::Cancelled,
     ];
     for kind in ORDER {
         if let Some(lead) = kind.lead()

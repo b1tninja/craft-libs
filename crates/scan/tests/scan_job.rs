@@ -7,7 +7,9 @@ mod common;
 use std::time::Duration;
 
 use craft_job::{DeviceConnection, DeviceState, JobKind, JobState, RetryAdvice, RetryPolicy, RetrySafety, Severity, TagSupport, Timestamp, Tri};
-use craft_scan::job::{AttemptOutcome, AttemptPlan, Continuation, Outcome, ScanJob, ScanJobConfig, ScanJobError, ScanJobState, device_view};
+use craft_scan::job::{
+    AttemptOutcome, AttemptPlan, Continuation, ExitClass, Outcome, PageInfo, ScanJob, ScanJobConfig, ScanJobError, ScanJobState, device_view,
+};
 use craft_scan::{
     Acquired, Backend, Cause, HandlingStatus, InterruptKind, NativeCode, Page, Registry, ScanError, ScanSettings, Source, feeder_shortfall_message,
 };
@@ -680,4 +682,92 @@ fn connections_map_one_to_one_except_wsd_which_is_network() {
     assert_eq!(DeviceConnection::from(C::Wsd), DeviceConnection::Network);
     assert_eq!(DeviceConnection::from(C::Other), DeviceConnection::Other);
     assert_eq!(DeviceConnection::from(C::Unknown), DeviceConnection::Unknown);
+}
+
+// ---- device cancel through the error, offline, continuing, exit class ------------------------------------
+
+#[test]
+fn a_device_side_cancel_reported_by_the_backend_ends_cancelled_by_device() {
+    let mut job = ScanJob::new(feeder_request(10), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(scripted(&plan, 3, Source::Feeder, Some(native(InterruptKind::Cancelled))), t(2)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!(snap.state, ScanJobState::Terminal(Outcome::CancelledByDevice));
+    assert_eq!((snap.pages.len(), snap.attempts[0].outcome, snap.cancel_requested), (3, AttemptOutcome::CancelledByDevice, false));
+    assert_eq!(snap.exit_class(), ExitClass::Cancelled);
+    // A client cancel that raced with it still wins: this side asked first.
+    let mut job = ScanJob::new(feeder_request(10), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.cancel(t(2));
+    job.finish_attempt(scripted(&plan, 0, Source::Feeder, Some(native(InterruptKind::Cancelled))), t(3)).expect("finish");
+    assert_eq!(job.state(), ScanJobState::Terminal(Outcome::Cancelled));
+    assert_eq!(InterruptKind::parse("cancelled"), Some(InterruptKind::Cancelled));
+    assert_eq!(craft_scan::interrupt_kind(InterruptKind::Cancelled.sentence()), InterruptKind::Cancelled);
+}
+
+#[test]
+fn offline_before_any_page_is_an_unknown_outcome_and_never_retried() {
+    let eager = RetryPolicy { max_attempts: 50, base: Duration::ZERO, ..RetryPolicy::default() };
+    let mut job = ScanJob::new(feeder_request(3), ScanJobConfig::default().with_retry(eager));
+    job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(Err(native(InterruptKind::Offline)), t(2)).expect("finish");
+    assert_eq!(job.state(), ScanJobState::NeedsAttention);
+    assert_eq!(job.retry_advice(), RetryAdvice::CheckDeviceFirst);
+    assert_eq!(job.snapshot().last_error.map(|f| f.safety), Some(RetrySafety::OutcomeUnknown));
+    // A person who looked may start again by hand; nothing is kept so no continuation is asked for.
+    assert!(job.begin_attempt(t(3)).is_ok());
+}
+
+#[test]
+fn continuing_after_12_of_40_feeder_pages_asks_for_the_28_left() {
+    let kept: Vec<PageInfo> = (1..=12)
+        .map(|n| PageInfo { number: 99 + n, attempt: 1, source: Some(Source::Feeder), format: "jpeg", width: 16, height: 8, dpi: 200, bytes: 1000 })
+        .collect();
+    let request = ScanSettings { device: "sane:x".into(), source: Source::Feeder, pages: 40, ..ScanSettings::default() };
+    let mut job = ScanJob::continuing(request, ScanJobConfig::default().with_title("Archive"), kept);
+    assert_eq!(job.state(), ScanJobState::Interrupted);
+    let view = job.view();
+    assert_eq!(view.state, JobState::NeedsAttention);
+    assert_eq!(view.progress.map(|p| (p.done, p.total)), Some((12, Some(40))));
+    assert_eq!(view.documents.len(), 12);
+    assert_eq!(job.snapshot().pages.iter().map(|p| p.number).collect::<Vec<_>>(), (1..=12).collect::<Vec<_>>());
+    assert_eq!(job.snapshot().summary_line(), "Archive: interrupted, 12 of 40 pages, 1 attempt");
+    assert_eq!(job.snapshot().exit_class(), ExitClass::NeedsAttention);
+    assert_eq!(job.begin_attempt(t(1)).map(|_| ()), Err(ScanJobError::ContinuationRequired { kept: 12 }));
+
+    let plan = job.begin_attempt_with(t(1), Continuation::Append).expect("append");
+    assert_eq!((plan.number, plan.settings.pages, plan.kept_pages), (2, 28, 12));
+    job.finish_attempt(SaneLike::new(28).acquire(&plan.settings), t(2)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!((snap.state, snap.pages.len()), (ScanJobState::Terminal(Outcome::Completed), 40));
+    assert_eq!(snap.exit_class(), ExitClass::Completed);
+    assert_eq!(job.take_pages().expect("taken").len(), 28, "only pages received by this process are held");
+    assert_eq!(job.view().progress.map(|p| (p.done, p.total)), Some((40, Some(40))));
+    // Nothing kept is just a new job.
+    let fresh = ScanJob::continuing(feeder_request(3), ScanJobConfig::default(), Vec::new());
+    assert_eq!(fresh.state(), ScanJobState::Preparing);
+    // Everything already kept: nothing to append, finish instead.
+    let all: Vec<PageInfo> =
+        (1..=3).map(|n| PageInfo { number: n, attempt: 1, source: None, format: "png", width: 1, height: 1, dpi: 100, bytes: 1 }).collect();
+    let mut full = ScanJob::continuing(feeder_request(3), ScanJobConfig::default(), all);
+    assert_eq!(full.begin_attempt_with(t(1), Continuation::Append).map(|_| ()), Err(ScanJobError::NothingLeft { kept: 3 }));
+    assert_eq!(full.finish(t(2)), Ok(Outcome::Completed));
+}
+
+#[test]
+fn exit_classes_follow_the_state() {
+    let class = |s: ScanJobState| s.exit_class();
+    assert_eq!(class(ScanJobState::Terminal(Outcome::Completed)), ExitClass::Completed);
+    assert_eq!(class(ScanJobState::Terminal(Outcome::CompletedWithWarnings)), ExitClass::NeedsAttention);
+    assert_eq!(class(ScanJobState::Terminal(Outcome::Failed)), ExitClass::Failed);
+    assert_eq!(class(ScanJobState::Terminal(Outcome::Cancelled)), ExitClass::Cancelled);
+    assert_eq!(class(ScanJobState::Terminal(Outcome::CancelledByDevice)), ExitClass::Cancelled);
+    for s in [ScanJobState::Preparing, ScanJobState::Acquiring, ScanJobState::Interrupted, ScanJobState::NeedsAttention] {
+        assert_eq!(class(s), ExitClass::NeedsAttention, "{s:?}");
+    }
+    assert_eq!(ExitClass::NeedsAttention.name(), "needs_attention");
+    let mut job = ScanJob::new(feeder_request(2), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(scripted(&plan, 1, Source::Feeder, Some(native(InterruptKind::Jam))), t(2)).expect("finish");
+    assert_eq!(job.snapshot().summary_line(), "Scan: interrupted, 1 of 2 pages, 1 attempt, jam");
 }

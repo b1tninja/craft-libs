@@ -139,11 +139,12 @@ impl InterruptKind {
         InterruptKind::Busy,
         InterruptKind::BusyOrFeederEmpty,
         InterruptKind::DeviceError,
+        InterruptKind::Cancelled,
         InterruptKind::Other,
     ];
 
     /// Wire string (`cover_open`, `jam`, `paper_problem`, `feeder_empty`, `multi_feed`, `offline`,
-    /// `attention`, `busy`, `busy_or_feeder_empty`, `device_error`, `other`).
+    /// `attention`, `busy`, `busy_or_feeder_empty`, `device_error`, `cancelled`, `other`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CoverOpen => "cover_open",
@@ -156,6 +157,7 @@ impl InterruptKind {
             Self::Busy => "busy",
             Self::BusyOrFeederEmpty => "busy_or_feeder_empty",
             Self::DeviceError => "device_error",
+            Self::Cancelled => "cancelled",
             Self::Other => "other",
         }
     }
@@ -610,7 +612,7 @@ mod tests {
         assert_eq!(names(Connection::ALL.iter().map(|v| v.as_str()).collect()), "wsd,usb,other,unknown");
         assert_eq!(
             names(InterruptKind::ALL.iter().map(|v| v.as_str()).collect()),
-            "cover_open,jam,paper_problem,feeder_empty,multi_feed,offline,attention,busy,busy_or_feeder_empty,device_error,other"
+            "cover_open,jam,paper_problem,feeder_empty,multi_feed,offline,attention,busy,busy_or_feeder_empty,device_error,cancelled,other"
         );
         assert_eq!(names(ListDetails::ALL.iter().map(|v| v.as_str()).collect()), "skipped,loaded,error,denied");
         assert_eq!(names(Phase::ALL.iter().map(|v| v.as_str()).collect()), "before_first_page,between_pages,mid_page");

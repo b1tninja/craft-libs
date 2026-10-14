@@ -170,6 +170,47 @@ impl ScanJobState {
     }
 }
 
+/// What a command-line tool maps to an exit code. Stable names; coarser than [`ScanJobState`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ExitClass {
+    /// Every wanted page arrived (or the feeder emptied normally).
+    Completed,
+    /// Not finished, or finished short: a person must look (interrupted, outcome unknown, a partial stack
+    /// accepted or delivered, or still running).
+    NeedsAttention,
+    /// Stopped by a failure.
+    Failed,
+    /// Stopped on purpose, by this side or by the scanner.
+    Cancelled,
+}
+
+impl ExitClass {
+    /// `completed`, `needs_attention`, `failed`, `cancelled`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NeedsAttention => "needs_attention",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl ScanJobState {
+    /// The coarse class: `Terminal(Completed)` is `Completed`, `CompletedWithWarnings` is `NeedsAttention` (pages
+    /// are missing), `Failed` is `Failed`, both cancels are `Cancelled`, every state that is not an end is
+    /// `NeedsAttention`.
+    pub const fn exit_class(self) -> ExitClass {
+        match self {
+            Self::Terminal(Outcome::Completed) => ExitClass::Completed,
+            Self::Terminal(Outcome::Failed) => ExitClass::Failed,
+            Self::Terminal(Outcome::Cancelled | Outcome::CancelledByDevice) => ExitClass::Cancelled,
+            _ => ExitClass::NeedsAttention,
+        }
+    }
+}
+
 /// Why a [`ScanJob`] call was refused. The job is unchanged unless the variant says otherwise.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
@@ -435,6 +476,29 @@ pub struct ScanJobSnapshot {
     pub tag_support: TagSupport,
 }
 
+impl ScanJobSnapshot {
+    /// [`ScanJobState::exit_class`] of the state.
+    pub fn exit_class(&self) -> ExitClass {
+        self.state.exit_class()
+    }
+
+    /// One line for a terminal: `Invoices: interrupted, 12 of 40 pages, 1 attempt, jam`. Plain ASCII, no
+    /// localisation; an app that wants its own wording builds it from the fields.
+    pub fn summary_line(&self) -> String {
+        let pages = match self.expected_pages {
+            Some(total) => format!("{} of {} pages", self.pages.len(), total),
+            None => format!("{} pages", self.pages.len()),
+        };
+        let attempts = if self.attempts_total == 1 { "1 attempt".to_string() } else { format!("{} attempts", self.attempts_total) };
+        let mut line = format!("{}: {}, {pages}, {attempts}", self.title, self.state.name());
+        if let Some(failure) = &self.last_error {
+            line.push_str(", ");
+            line.push_str(failure.info.kind.as_str());
+        }
+        line
+    }
+}
+
 struct Running {
     number: u32,
     requested: Source,
@@ -501,9 +565,11 @@ fn read_failure(kind: InterruptKind, kept: usize, mid_page: bool) -> Reading {
         kind,
         K::CoverOpen | K::Jam | K::PaperProblem | K::FeederEmpty | K::MultiFeed | K::Attention | K::DeviceError | K::BusyOrFeederEmpty
     );
-    // A link that dropped, or a failure nobody classified, after the transfer began delivering.
-    let unknown = matches!(kind, K::Offline | K::Other) && (kept > 0 || mid_page);
-    let transient = !unknown && matches!(kind, K::Busy | K::Offline);
+    // A link that dropped (the request may have reached the scanner, so even with no page in hand the carriage
+    // may have moved), or a failure nobody classified after the transfer began delivering.
+    let unknown = kind == K::Offline || (kind == K::Other && (kept > 0 || mid_page));
+    // Only a scanner that said "busy" is known to have done nothing.
+    let transient = kind == K::Busy;
     Reading { transient, person, unknown }
 }
 
@@ -546,6 +612,27 @@ impl ScanJob {
             fingerprint,
             feeder_ready,
         }
+    }
+
+    /// A job that starts where an earlier run stopped: `kept` describes the pages an earlier process received
+    /// (the app owns the files; the job holds metadata only). It starts `Interrupted` with those pages counted,
+    /// so [`Self::begin_attempt_with`]`(`[`Continuation::Append`]`)` asks for `settings.pages - kept` and the
+    /// view reads "12 of 40". `settings` is the **original** request (`pages` is the total). Pages are renumbered
+    /// 1..n in the order given, and attempt numbering continues after the highest attempt in `kept`. With no kept
+    /// pages this is [`Self::new`]. [`Self::take_pages`] returns only pages received from now on.
+    pub fn continuing(settings: ScanSettings, config: ScanJobConfig, kept: Vec<PageInfo>) -> Self {
+        let mut job = Self::new(settings, config);
+        if kept.is_empty() {
+            return job;
+        }
+        job.attempts_total = kept.iter().map(|p| p.attempt).max().unwrap_or(0);
+        job.infos = kept;
+        for (index, info) in job.infos.iter_mut().enumerate() {
+            info.number = count(index + 1);
+        }
+        job.state = ScanJobState::Interrupted;
+        job.advice = RetryAdvice::DoNotRetry;
+        job
     }
 
     pub fn id(&self) -> LocalJobId {
@@ -846,6 +933,10 @@ impl ScanJob {
             return failed(failure);
         }
         // Auto found the feeder empty before any page: the glass is the answer, no person needed.
+        // The scanner itself ended the job: its own decision, not ours and not a fault.
+        if kind == InterruptKind::Cancelled {
+            return (AttemptOutcome::CancelledByDevice, ScanJobState::Terminal(Outcome::CancelledByDevice), RetryAdvice::DoNotRetry, Some(failure));
+        }
         let resolved = used.unwrap_or(Source::Feeder);
         if auto_fallback_to_glass(running.requested, resolved, self.config.has_glass, kept, error) {
             self.forced_source = Some(Source::Glass);

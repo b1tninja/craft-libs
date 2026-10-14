@@ -14,7 +14,7 @@ use super::codec::{Attribute, DateTime, Group, GroupTag, Limits, Message, Value}
 use super::model::PrinterAttrs;
 use super::policy::PrinterUri;
 use super::protocol::Operation;
-use super::{IppBackend, JobFlow};
+use super::{IppBackend, IppVersion, JobFlow};
 use crate::backends::Backend;
 use crate::{
     BackendClass, BytesSource, CancelToken, ConvertContext, Document, DocumentConverter, DocumentFormat, Duplex, ErrorKind, Fingerprint, Job,
@@ -621,13 +621,20 @@ fn job_status_maps_states_reasons_and_counters() {
     assert_eq!(status_of(job_group(7, 9, &["none"], "x")).unwrap().reasons.len(), 0);
 }
 
+/// A printer that answers a `printer-state` query normally.
+fn printer_state_group() -> Group {
+    Group::new(GroupTag::Printer).with(Attribute::enumeration("printer-state", 3))
+}
+
 #[test]
 fn a_job_the_printer_forgot_is_not_found_and_other_failures_are_not() {
     let script = Script::new();
     let b = backend(&script);
     let r = registry(&b);
     let job = IppBackend::job_id(URI, 7).unwrap();
-    script.status(0x0406).status(0x0407).status(0x0500).push(Step::Fail(TransportKind::ConnectionClosed, Stage::Reply));
+    // not-found and gone for the job, each followed by a healthy printer read: the job is forgotten.
+    script.status(0x0406).ok(vec![printer_state_group()]).status(0x0407).ok(vec![printer_state_group()]);
+    script.status(0x0500).push(Step::Fail(TransportKind::ConnectionClosed, Stage::Reply));
     for _ in 0..2 {
         let e = r.job_status(&job).unwrap_err();
         assert_eq!((e.kind(), e.retry_safety()), (ErrorKind::NotFound, RetrySafety::Safe));
@@ -637,10 +644,89 @@ fn a_job_the_printer_forgot_is_not_found_and_other_failures_are_not() {
     assert_eq!((e.kind(), e.phase()), (ErrorKind::Failed, Some(Phase::Poll)));
     let e = r.job_status(&job).unwrap_err();
     assert_eq!((e.kind(), e.phase(), e.retry_safety()), (ErrorKind::Unavailable, Some(Phase::Poll), RetrySafety::Idempotent));
+    assert_eq!(script.pending(), 0);
     // A handle for a printer that was not added is a bad request, not a forgotten job.
     let foreign = IppBackend::job_id("ipp://127.0.0.1:7777/x", 1).unwrap();
     assert_eq!(r.job_status(&foreign).unwrap_err().kind(), ErrorKind::InvalidRequest);
     assert_eq!(r.job_status(&crate::JobId::new("ipp", "garbage")).unwrap_err().kind(), ErrorKind::InvalidRequest);
+}
+
+#[test]
+fn not_found_for_a_job_is_told_apart_from_a_printer_at_the_wrong_path() {
+    let script = Script::new();
+    let b = backend(&script);
+    let job = IppBackend::job_id(URI, 7).unwrap();
+
+    // 1. The printer answers the follow-up: the job is forgotten.
+    script.status(0x0406).ok(vec![printer_state_group()]);
+    let e = b.job_status(&job).unwrap_err();
+    assert_eq!((e.kind(), e.retry_safety()), (ErrorKind::NotFound, RetrySafety::Safe));
+    assert!(e.message().contains("does not list job 7") && e.message().contains("forget"), "{e}");
+    // The follow-up is one Get-Printer-Attributes for printer-state alone at the same URI.
+    assert_eq!(script.ops(), vec![Operation::GetJobAttributes.code(), Operation::GetPrinterAttributes.code()]);
+    let probe = script.last();
+    let op = probe.group(GroupTag::Operation).unwrap();
+    assert_eq!(op.first_str("printer-uri"), Some(URI));
+    let requested = op.attributes.iter().find(|a| a.name == "requested-attributes").unwrap();
+    assert_eq!(requested.values, vec![Value::Keyword("printer-state".into())]);
+
+    // 2. The printer is not found either (an IPP status, then an HTTP 404): the printer path is wrong.
+    for second in [Step::Http(404, None), reply(0x0406, vec![])] {
+        script.status(0x0406).push(second);
+        let e = b.job_status(&job).unwrap_err();
+        assert_eq!((e.kind(), e.retry_safety()), (ErrorKind::NotFound, RetrySafety::Safe));
+        assert!(e.message().contains("printer was not found at") && e.message().contains("not a forgotten job"), "{e}");
+        assert!(!e.message().contains("does not list job"));
+        let native = e.native().unwrap();
+        assert_eq!((native.domain, native.code, native.name), ("ipp", 0x0406, Some("client-error-not-found")));
+    }
+    // An HTTP 404 for the job request itself takes the same road.
+    script.push(Step::Http(404, None)).push(Step::Http(404, None));
+    assert!(b.job_status(&job).unwrap_err().message().contains("printer was not found at"));
+
+    // 3. The follow-up fails otherwise: unknown, retryable as a read, never a forgotten job.
+    script.status(0x0406).push(Step::Fail(TransportKind::ConnectionClosed, Stage::Reply));
+    let e = b.job_status(&job).unwrap_err();
+    assert_eq!((e.kind(), e.retry_safety(), e.phase()), (ErrorKind::Failed, RetrySafety::Idempotent, Some(Phase::Poll)));
+    assert!(e.message().contains("could not tell"), "{e}");
+    script.status(0x0406).status(0x0507);
+    let e = b.job_status(&job).unwrap_err();
+    assert_eq!((e.kind(), e.retry_safety()), (ErrorKind::Failed, RetrySafety::Idempotent));
+
+    // 4. Other failures of the job read are not probed at all.
+    script.status(0x0500);
+    b.job_status(&job).unwrap_err();
+    assert_eq!(script.pending(), 0, "no request is left over and none was unscripted");
+}
+
+#[test]
+fn not_found_never_loops_and_cancel_and_find_use_the_same_follow_up() {
+    let script = Script::new();
+    let b = backend(&script);
+    let job = IppBackend::job_id(URI, 7).unwrap();
+    let before = script.requests().len();
+    script.status(0x0406).status(0x0406);
+    b.job_status(&job).unwrap_err();
+    assert_eq!(script.requests().len() - before, 2, "one request and one follow-up, then it stops");
+
+    // Cancel: a forgotten job is fine, a missing printer is not, an unreadable printer is unknown.
+    script.status(0x0406).ok(vec![printer_state_group()]);
+    b.cancel_job(&job).unwrap();
+    script.status(0x0406).status(0x0406);
+    let e = b.cancel_job(&job).unwrap_err();
+    assert_eq!((e.kind(), e.retry_safety()), (ErrorKind::NotFound, RetrySafety::Safe));
+    assert!(e.message().contains("printer was not found at"), "{e}");
+    script.status(0x0406).push(Step::Http(503, None));
+    let e = b.cancel_job(&job).unwrap_err();
+    assert_eq!((e.kind(), e.retry_safety()), (ErrorKind::Failed, RetrySafety::Idempotent));
+    assert!(e.message().contains("could not tell"), "{e}");
+
+    // A job listing (find_job) that gets not-found from a wrong path says the printer was not found.
+    script.status(0x0406).status(0x0406);
+    let e = b.list_jobs(URI, &JobFilter::default()).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::NotFound);
+    assert!(e.message().contains("printer was not found at"), "{e}");
+    assert_eq!(script.pending(), 0);
 }
 
 #[test]
@@ -652,7 +738,8 @@ fn cancel_is_tolerant_of_jobs_that_already_ended() {
     script.ok(vec![]);
     r.cancel_job(&job).unwrap();
     assert_eq!(script.last().group(GroupTag::Operation).unwrap().first_i32("job-id"), Some(7));
-    script.status(0x0406);
+    // not-found for the job with a healthy printer: it is gone already.
+    script.status(0x0406).ok(vec![printer_state_group()]);
     r.cancel_job(&job).unwrap();
     // not-possible on a completed job is fine; on a running one it is a refusal.
     script.status(0x0404).ok(vec![job_group(7, 9, &[], "x")]);
@@ -665,6 +752,173 @@ fn cancel_is_tolerant_of_jobs_that_already_ended() {
     script.status(0x0507);
     let e = r.cancel_job(&job).unwrap_err();
     assert_eq!((e.kind(), e.retry_safety()), (ErrorKind::Busy, RetrySafety::Safe));
+}
+
+// ---- IPP version negotiation ---------------------------------------------------------------------
+
+fn versions_of(script: &Script) -> Vec<(u8, u8)> {
+    script.requests().iter().map(|m| (m.major, m.minor)).collect()
+}
+
+fn advertising(versions: &[&str]) -> Group {
+    printer_group().with(Attribute::keywords("ipp-versions-supported", versions))
+}
+
+#[test]
+fn requests_go_out_as_ipp_2_0_by_default_and_the_version_is_in_the_header_bytes() {
+    let script = Script::new();
+    let b = backend(&script);
+    script.ok(vec![printer_group()]);
+    b.printer_details(URI).unwrap();
+    assert_eq!(versions_of(&script), [(2, 0)]);
+    // The wire bytes: version major, minor, then the operation id.
+    let wire = script.last().encode().unwrap();
+    assert_eq!(&wire[..4], &[2, 0, 0x00, 0x0B]);
+    assert_eq!(b.version_of(URI), Some(IppVersion::V2_0));
+    assert_eq!(b.version_of("ipp://127.0.0.1:631/other"), None);
+    // A bare client keeps 1.1 and never falls back on its own.
+    let client = Client::new(script.clone(), PrinterUri::parse(URI).unwrap());
+    script.status(0x0503);
+    client.get_printer_attributes(&[]).unwrap_err();
+    assert_eq!(versions_of(&script)[1..], [(1, 1)]);
+    assert_eq!(script.pending(), 0);
+}
+
+#[test]
+fn a_version_rejection_is_answered_once_at_1_1_and_remembered_for_that_printer() {
+    let script = Script::new();
+    let b = backend(&script);
+    let other = "ipp://127.0.0.2:631/ipp/print";
+    b.add(other).unwrap();
+    script.status(0x0503).ok(vec![printer_group()]);
+    b.printer_details(URI).unwrap();
+    assert_eq!(versions_of(&script), [(2, 0), (1, 1)]);
+    let ids: Vec<u32> = script.requests().iter().map(|m| m.request_id).collect();
+    assert_ne!(ids[0], ids[1], "the repeat is a new request");
+    assert_eq!(b.version_of(URI), Some(IppVersion::V1_1));
+    // Later requests start at 1.1: no second rejection round trip, also from a clone.
+    script.ok(vec![printer_group()]).ok(vec![printer_group()]);
+    b.printer_details(URI).unwrap();
+    b.clone().printer_details(URI).unwrap();
+    assert_eq!(versions_of(&script)[2..], [(1, 1), (1, 1)]);
+    // Another printer of the same backend is still tried at 2.0.
+    assert_eq!(b.version_of(other), Some(IppVersion::V2_0));
+    script.ok(vec![printer_group()]);
+    b.printer_details(other).unwrap();
+    assert_eq!(versions_of(&script)[4..], [(2, 0)]);
+}
+
+#[test]
+fn a_rejection_of_both_versions_is_the_printers_status_and_nothing_loops() {
+    let script = Script::new();
+    let b = backend(&script);
+    script.status(0x0503).status(0x0503);
+    let e = b.printer_details(URI).unwrap_err();
+    assert_eq!(versions_of(&script), [(2, 0), (1, 1)], "one attempt more, no third");
+    assert_eq!((e.kind(), e.retry_safety()), (ErrorKind::Failed, RetrySafety::Safe));
+    let native = e.native().unwrap();
+    assert_eq!((native.domain, native.code, native.name), ("ipp", 0x0503, Some("server-error-version-not-supported")));
+    assert!(e.message().contains("server-error-version-not-supported"), "{e}");
+    // A 1.1 rejection teaches nothing: the next request tries 2.0 again.
+    assert_eq!(b.version_of(URI), Some(IppVersion::V2_0));
+    // A fallback attempt that fails otherwise is that failure, with nothing remembered.
+    script.status(0x0503).push(Step::Fail(TransportKind::Refused, Stage::Connect));
+    let e = b.printer_details(URI).unwrap_err();
+    assert_eq!(e.kind(), ErrorKind::Unavailable);
+    assert_eq!(b.version_of(URI), Some(IppVersion::V2_0));
+    assert_eq!(script.pending(), 0);
+}
+
+#[test]
+fn a_version_the_app_set_is_never_downgraded_unless_the_app_allows_it() {
+    let script = Script::new();
+    let b = backend(&script).with_ipp_version(IppVersion::V2_0);
+    script.status(0x0503);
+    let e = b.printer_details(URI).unwrap_err();
+    assert_eq!(versions_of(&script), [(2, 0)], "one request, no fallback");
+    assert_eq!(e.native().unwrap().code, 0x0503);
+    assert_eq!(b.version_of(URI), Some(IppVersion::V2_0));
+    // An advertised list does not move a pinned version either.
+    script.ok(vec![advertising(&["1.1"])]);
+    b.printer_details(URI).unwrap();
+    script.ok(vec![printer_group()]);
+    b.printer_details(URI).unwrap();
+    assert_eq!(versions_of(&script)[1..], [(2, 0), (2, 0)]);
+    // 1.1 pinned stays 1.1.
+    let old = backend(&script).with_ipp_version(IppVersion::V1_1);
+    script.ok(vec![printer_group()]);
+    old.printer_details(URI).unwrap();
+    assert_eq!((script.last().major, script.last().minor), (1, 1));
+    // With the fallback allowed it downgrades once and remembers.
+    let allowed = backend(&script).with_ipp_version(IppVersion::V2_0).with_version_fallback(true);
+    script.status(0x0503).ok(vec![printer_group()]).ok(vec![printer_group()]);
+    allowed.printer_details(URI).unwrap();
+    allowed.printer_details(URI).unwrap();
+    assert_eq!(versions_of(&script)[4..], [(2, 0), (1, 1), (1, 1)]);
+}
+
+#[test]
+fn the_advertised_versions_pick_the_highest_common_one() {
+    let script = Script::new();
+    for (advertised, want) in [
+        (vec!["1.0", "1.1", "2.0", "2.1", "2.2"], IppVersion::V2_0),
+        (vec!["1.1", "2.0"], IppVersion::V2_0),
+        (vec!["1.0", "1.1"], IppVersion::V1_1),
+        (vec!["1.1"], IppVersion::V1_1),
+    ] {
+        let b = backend(&script);
+        script.ok(vec![advertising(&advertised)]).ok(vec![printer_group()]);
+        b.printer_details(URI).unwrap();
+        assert_eq!(b.version_of(URI), Some(want), "{advertised:?}");
+        b.printer_details(URI).unwrap();
+        assert_eq!((script.last().major, script.last().minor), want.parts(), "{advertised:?}");
+    }
+    // Nothing advertised, or only versions this client does not speak: nothing changes.
+    for advertised in [vec!["1.0"], vec!["2.1"], vec![]] {
+        let b = backend(&script);
+        script.ok(vec![if advertised.is_empty() { printer_group() } else { advertising(&advertised) }]);
+        b.printer_details(URI).unwrap();
+        assert_eq!(b.version_of(URI), Some(IppVersion::V2_0), "{advertised:?}");
+    }
+    assert_eq!(IppVersion::highest_common(&["2.0".into(), "1.1".into()]), Some(IppVersion::V2_0));
+    assert_eq!(IppVersion::from_keyword(" 1.1"), Some(IppVersion::V1_1));
+    assert!(IppVersion::V1_1 < IppVersion::V2_0);
+}
+
+#[test]
+fn a_print_job_rejected_for_its_version_is_sent_again_whole_at_1_1() {
+    let script = Script::new();
+    let b = backend(&script);
+    let r = registry(&b);
+    // The attribute read is rejected at 2.0 and answered at 1.1; the job then goes out at 1.1 directly.
+    script.status(0x0503).ok(vec![printer_group()]).ok(accepted(5));
+    let submitted = r.submit_job(request(job())).unwrap();
+    assert_eq!(versions_of(&script), [(2, 0), (1, 1), (1, 1)]);
+    assert_eq!(script.ops(), [Operation::GetPrinterAttributes.code(), Operation::GetPrinterAttributes.code(), Operation::PrintJob.code()]);
+    assert!(submitted.effective.as_deref().unwrap().starts_with("ipp 1.1 "), "{:?}", submitted.effective);
+    assert_eq!(script.last().data, PDF);
+
+    // The job request itself is the one rejected: the same groups and bytes go again at 1.1.
+    let script = Script::new();
+    let b = IppBackend::new().with_transport(script.clone()).with_job_flow(JobFlow::PrintJob);
+    b.add(URI).unwrap();
+    script.ok(vec![advertising(&["1.1", "2.0"])]).status(0x0503).ok(accepted(6));
+    let submitted = registry(&b).submit_job(request(job())).unwrap();
+    assert_eq!(versions_of(&script), [(2, 0), (2, 0), (1, 1)]);
+    let sent = script.requests();
+    assert_eq!((sent[1].code, sent[2].code), (Operation::PrintJob.code(), Operation::PrintJob.code()));
+    assert_eq!(sent[1].data, sent[2].data);
+    assert_eq!(sent[1].groups, sent[2].groups);
+    assert!(submitted.effective.as_deref().unwrap().starts_with("ipp 1.1 "));
+
+    // Create-Job is rejected the same way; Send-Document then follows at 1.1.
+    let script = Script::new();
+    let b = IppBackend::new().with_transport(script.clone()).with_job_flow(JobFlow::CreateAndSend);
+    b.add(URI).unwrap();
+    script.ok(vec![printer_group()]).status(0x0503).ok(accepted(8)).ok(vec![]);
+    registry(&b).submit_job(request(job())).unwrap();
+    assert_eq!(versions_of(&script), [(2, 0), (2, 0), (1, 1), (1, 1)]);
+    assert_eq!(script.ops()[1..], [Operation::CreateJob.code(), Operation::CreateJob.code(), Operation::SendDocument.code()]);
 }
 
 #[test]

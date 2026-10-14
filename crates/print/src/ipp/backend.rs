@@ -6,7 +6,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, SystemTime};
 
 use super::adapter::{SharedTransport, Transport, default_transport};
-use super::client::{Client, IppVersion, Which};
+use super::client::{Client, IppVersion, VersionMemory, Which};
 use super::error::{IppError, Op};
 use super::model::{self, JobAttrs, PrinterAttrs};
 use super::plan::{self, Plan};
@@ -14,8 +14,8 @@ use super::policy::{NetworkLimits, PrinterUri};
 use super::protocol::{Operation, StatusCode};
 use crate::backends::{Backend, BackendClass, DocumentFormat, JobHint, PrinterDetails, PrinterRef, PrinterStatus, SubmitRequest};
 use crate::{
-    ErrorKind, Fingerprint, FingerprintExt as _, JobFilter, JobId, JobQueryCaps, JobStatus, PrintError, Progress, Reconciled, RemoteJob, Resolution,
-    RetrySafety, Submitted, TagExt as _, TagPlacement, TagSupport, TagSupportExt as _, WatchSupport, filter_jobs, reconcile_jobs,
+    ErrorKind, Fingerprint, FingerprintExt as _, JobFilter, JobId, JobQueryCaps, JobStatus, NativeCode, PrintError, Progress, Reconciled, RemoteJob,
+    Resolution, RetrySafety, Submitted, TagExt as _, TagPlacement, TagSupport, TagSupportExt as _, WatchSupport, filter_jobs, reconcile_jobs,
 };
 
 /// The registry name and id prefix.
@@ -67,7 +67,9 @@ struct Config {
     poll_interval: Duration,
     user_name: String,
     limits: NetworkLimits,
-    version: IppVersion,
+    /// `None`: IPP 2.0 with one fallback to 1.1; `Some`: exactly that version.
+    version: Option<IppVersion>,
+    version_fallback: bool,
     validate_first: bool,
     large_document: usize,
     list_limit: u32,
@@ -81,7 +83,8 @@ impl Default for Config {
             poll_interval: Duration::from_secs(2),
             user_name: "craft".into(),
             limits: NetworkLimits::default(),
-            version: IppVersion::V1_1,
+            version: None,
+            version_fallback: false,
             validate_first: false,
             large_document: 8 << 20,
             list_limit: 100,
@@ -105,6 +108,8 @@ pub struct IppBackend {
     counter: Arc<AtomicU32>,
     /// The largest `multiple-operation-time-out` any printer published, in seconds; 0 when none did.
     open_job_secs: Arc<AtomicU64>,
+    /// The IPP version each printer speaks, learned from its advertisement or from a rejection.
+    versions: Arc<VersionMemory>,
 }
 
 impl fmt::Debug for IppBackend {
@@ -136,6 +141,7 @@ impl IppBackend {
             config: Arc::default(),
             counter: Arc::new(AtomicU32::new(1)),
             open_job_secs: Arc::default(),
+            versions: Arc::default(),
         }
     }
 
@@ -258,10 +264,31 @@ impl IppBackend {
         self.configured(|c| c.limits = limits)
     }
 
-    /// The IPP version of the requests (default 1.1, which every printer speaks).
+    /// Pin the IPP version of the requests. By default the backend speaks IPP 2.0 (every IPP
+    /// Everywhere printer supports it) and falls back to 1.1 once, per printer, when a printer
+    /// answers `server-error-version-not-supported`; see [`Self::version_of`]. A version set here is
+    /// fixed: it is never downgraded unless the app also calls [`Self::with_version_fallback`].
     #[must_use]
     pub fn with_ipp_version(self, version: IppVersion) -> Self {
-        self.configured(|c| c.version = version)
+        self.configured(|c| c.version = Some(version))
+    }
+
+    /// Let a version pinned with [`Self::with_ipp_version`] fall back to IPP 1.1 (once per request,
+    /// remembered per printer) when the printer answers `server-error-version-not-supported`. Without
+    /// a pinned version the fallback is always on and this changes nothing. A version-rejected
+    /// request creates nothing on the printer, so repeating it at 1.1 is safe even for `Print-Job`,
+    /// `Create-Job` and `Send-Document`.
+    #[must_use]
+    pub fn with_version_fallback(self, fallback: bool) -> Self {
+        self.configured(|c| c.version_fallback = fallback)
+    }
+
+    /// The IPP version the next request to this printer is sent at: the pinned version, or 2.0, in
+    /// either case lowered to what is known of the printer (its `ipp-versions-supported`, or an
+    /// earlier rejection) when fallback is allowed. `None` when the printer is not added.
+    pub fn version_of(&self, uri: &str) -> Option<IppVersion> {
+        let entry = self.entry(uri).ok()?;
+        Some(self.client(&entry).version())
     }
 
     /// The most jobs one `Get-Jobs` asks for (default 100; two requests per listing).
@@ -284,12 +311,20 @@ impl IppBackend {
         Client::new(Arc::clone(&self.transport), entry.uri.clone())
             .with_limits(self.config.limits)
             .with_user(&self.config.user_name)
-            .with_version(self.config.version)
+            .with_version(self.config.version.unwrap_or(IppVersion::V2_0))
+            .with_fallback(self.config.version.is_none() || self.config.version_fallback)
+            .with_memory(Arc::clone(&self.versions))
             .with_counter(Arc::clone(&self.counter))
     }
 
-    /// Remember a printer's `multiple-operation-time-out` for [`Backend::open_job_timeout`].
-    fn learn(&self, attrs: &PrinterAttrs) {
+    /// Remember a printer's `multiple-operation-time-out` for [`Backend::open_job_timeout`], and the
+    /// highest IPP version it advertises (2.0, then 1.1) when this backend may lower its version.
+    fn learn(&self, entry: &Entry, attrs: &PrinterAttrs) {
+        if (self.config.version.is_none() || self.config.version_fallback)
+            && let Some(best) = IppVersion::highest_common(&attrs.versions)
+        {
+            self.versions.lower(&entry.uri.canonical(), best);
+        }
         if let Some(secs) = attrs.multiple_operation_timeout.filter(|s| *s > 0) {
             self.open_job_secs.fetch_max(u64::from(secs), Ordering::Relaxed);
         }
@@ -454,6 +489,70 @@ fn forgotten(entry: &Entry, job_id: i32, cause: &IppError) -> PrintError {
     .with_safety(RetrySafety::Safe)
 }
 
+/// The printer (or its path) answering "not found": `client-error-not-found`, `client-error-gone`,
+/// or the HTTP 404/410 of a server that does not know the path.
+fn is_not_found(error: &IppError) -> bool {
+    matches!(error.status(), Some(StatusCode::NOT_FOUND | StatusCode::GONE)) || matches!(error, IppError::Http { status: 404 | 410, .. })
+}
+
+/// What one extra `Get-Printer-Attributes` (`printer-state` only) says about a "not found" that a
+/// job request got.
+enum Probe {
+    /// The printer answers normally: it is the job that it does not know.
+    JobForgotten,
+    /// The printer is not found at that address or path either.
+    PrinterMissing,
+    /// The extra read failed for another reason; this is that failure.
+    Unknown(IppError),
+}
+
+fn not_found_native() -> NativeCode {
+    NativeCode { domain: "ipp", code: i64::from(StatusCode::NOT_FOUND.0), name: StatusCode::NOT_FOUND.name() }
+}
+
+/// The printer is not at that address: a "not found" for the printer, not for a job.
+fn printer_missing(entry: &Entry, what: &str, op: Op) -> PrintError {
+    let phase = if op == Op::Status { crate::Phase::Poll } else { crate::Phase::Reply };
+    PrintError::new(
+        ErrorKind::NotFound,
+        format!(
+            "the printer was not found at {}: it answers not-found to a printer query too, so the address or path is wrong (this is not a forgotten {what})",
+            entry.uri.canonical()
+        ),
+    )
+    .with_phase(phase)
+    .with_safety(RetrySafety::Safe)
+    .with_native(not_found_native())
+}
+
+/// The printer said not-found, and the follow-up read failed, so the cause is unknown. Reading
+/// again is harmless, so this is retryable as a read.
+fn could_not_tell(entry: &Entry, what: &str, original: &IppError, probe: &IppError, op: Op) -> PrintError {
+    let phase = original.print_error(op).phase().unwrap_or(crate::Phase::Reply);
+    PrintError::new(
+        ErrorKind::Failed,
+        format!(
+            "the printer at {} answered not-found for {what}, but could not tell whether the {what} is forgotten or the printer address is wrong: the follow-up printer read failed ({probe})",
+            entry.uri.canonical()
+        ),
+    )
+    .with_phase(phase)
+    .with_safety(RetrySafety::Idempotent)
+    .with_native(not_found_native())
+}
+
+impl IppBackend {
+    /// One cheap `Get-Printer-Attributes` (`printer-state`) at the same printer URI. Asked once per
+    /// "not found", never repeated.
+    fn probe(&self, client: &Client<SharedTransport>) -> Probe {
+        match client.get_printer_attributes(&["printer-state"]) {
+            Ok(_) => Probe::JobForgotten,
+            Err(e) if is_not_found(&e) => Probe::PrinterMissing,
+            Err(e) => Probe::Unknown(e),
+        }
+    }
+}
+
 impl Backend for IppBackend {
     fn name(&self) -> &'static str {
         NAME
@@ -490,7 +589,7 @@ impl Backend for IppBackend {
     fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
         let entry = self.entry(native_id)?;
         let attrs = self.client(&entry).get_printer_attributes(&[]).map_err(|e| e.print_error(Op::Query))?;
-        self.learn(&attrs);
+        self.learn(&entry, &attrs);
         Ok(details_of(&entry, &attrs))
     }
 
@@ -533,7 +632,7 @@ impl Backend for IppBackend {
         };
         check_cancel()?;
         let attrs = client.get_printer_attributes(&[]).map_err(|e| e.print_error(Op::Query))?;
-        self.learn(&attrs);
+        self.learn(&entry, &attrs);
         report(1, 3);
         check_cancel()?;
         let name = self.job_name(&job.title, tag.as_ref());
@@ -591,8 +690,8 @@ impl Backend for IppBackend {
         }
         let effective = format!(
             "ipp {}.{} {}; job name {:?}",
-            self.config.version.parts().0,
-            self.config.version.parts().1,
+            client.version().parts().0,
+            client.version().parts().1,
             if create_and_send { "create-job + send-document" } else { "print-job" },
             job_request.job_name
         );
@@ -629,9 +728,14 @@ impl Backend for IppBackend {
     /// message says what that usually means: printers forget finished jobs.
     fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
         let (entry, id) = self.job_target(job)?;
-        match self.client(&entry).get_job_attributes(id) {
+        let client = self.client(&entry);
+        match client.get_job_attributes(id) {
             Ok(attrs) => Ok(neutral_status(&attrs)),
-            Err(e) if matches!(e.status(), Some(StatusCode::NOT_FOUND | StatusCode::GONE)) => Err(forgotten(&entry, id, &e)),
+            Err(e) if is_not_found(&e) => Err(match self.probe(&client) {
+                Probe::JobForgotten => forgotten(&entry, id, &e),
+                Probe::PrinterMissing => printer_missing(&entry, &format!("job {id}"), Op::Status),
+                Probe::Unknown(probe) => could_not_tell(&entry, &format!("job {id}"), &e, &probe, Op::Status),
+            }),
             Err(e) => {
                 let mut error = e.print_error(Op::Status);
                 if error.kind() == ErrorKind::NotFound {
@@ -652,7 +756,11 @@ impl Backend for IppBackend {
         let client = self.client(&entry);
         match client.cancel_job(id) {
             Ok(()) => Ok(()),
-            Err(e) if matches!(e.status(), Some(StatusCode::NOT_FOUND | StatusCode::GONE)) => Ok(()),
+            Err(e) if is_not_found(&e) => match self.probe(&client) {
+                Probe::JobForgotten => Ok(()),
+                Probe::PrinterMissing => Err(printer_missing(&entry, &format!("job {id}"), Op::Cancel)),
+                Probe::Unknown(probe) => Err(could_not_tell(&entry, &format!("job {id}"), &e, &probe, Op::Cancel)),
+            },
             Err(e) if e.status() == Some(StatusCode::NOT_POSSIBLE) => match client.get_job_attributes(id) {
                 Ok(attrs) if model::neutral_state(&attrs).is_terminal() => Ok(()),
                 Err(g) if matches!(g.status(), Some(StatusCode::NOT_FOUND | StatusCode::GONE)) => Ok(()),
@@ -698,7 +806,17 @@ impl IppBackend {
         let client = self.client(entry);
         let limit = self.config.list_limit;
         let my_jobs = user.is_some();
-        let active = client.get_jobs(Which::NotCompleted, user, my_jobs, limit).map_err(|e| e.print_error(Op::Query))?;
+        let active = match client.get_jobs(Which::NotCompleted, user, my_jobs, limit) {
+            Ok(rows) => rows,
+            Err(e) if is_not_found(&e) => {
+                return Err(match self.probe(&client) {
+                    Probe::JobForgotten => e.print_error(Op::Query),
+                    Probe::PrinterMissing => printer_missing(entry, "job listing", Op::Query),
+                    Probe::Unknown(probe) => could_not_tell(entry, "job listing", &e, &probe, Op::Query),
+                });
+            }
+            Err(e) => return Err(e.print_error(Op::Query)),
+        };
         let history = match client.get_jobs(Which::Completed, user, my_jobs, limit) {
             Ok(rows) => rows,
             // A printer that keeps no history says so with a status; the active jobs are the answer.

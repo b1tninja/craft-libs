@@ -347,6 +347,17 @@ let submitted = craft_print::submit_job(request)?; // returns when the printer h
   (title, user, state, creation time), so a lost reply is reconciled by tag before anything is resent.
 * **Errors** carry `NativeCode { domain: "ipp", code, name }` (HTTP failures `"http"`) and the retry facts of
   the status table in [docs/ipp.md](docs/ipp.md), pinned by the table tests in `ipp::error`.
+* **IPP version.** Requests go out as IPP 2.0 (every IPP Everywhere printer speaks it). A printer that
+  answers `server-error-version-not-supported` gets the same request once more at 1.1 (a rejected request
+  creates nothing, so this is safe for `Print-Job`, `Create-Job` and `Send-Document` too), and 1.1 is
+  remembered for that printer for the life of the backend (clones share it). The printer's own
+  `ipp-versions-supported` is used when it was read (highest of 2.0 and 1.1). `with_ipp_version` pins a version
+  that is never downgraded unless the app also calls `with_version_fallback(true)`; `version_of(uri)` says what
+  the next request to a printer will use.
+* **Not found.** When a job read or cancel gets `client-error-not-found`, one `Get-Printer-Attributes`
+  (`printer-state`) tells a forgotten job (the printer answers) from a printer at a wrong address or path (it
+  answers not-found too: `ErrorKind::NotFound` saying the printer was not found) or "could not tell" (the extra
+  read failed: `Failed`, `Idempotent`). Never repeated; see [docs/ipp.md](docs/ipp.md).
 * **Not implemented:** TLS, authentication, IPP subscriptions (events) and discovery.
 * **Tests.** Printer-free: the codec on static byte vectors (round trips, truncations, hostile input), request
   builders against expected bytes, canned replies through a small scripted transport (a mock transport,

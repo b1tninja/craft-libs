@@ -3,8 +3,9 @@
 //! a non-success status becomes [`IppError::Status`], a success that ignored attributes carries
 //! them as warnings.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use super::adapter::{NetworkLimits, Request, Transport};
 use super::codec::{Attribute, Group, GroupTag, Limits, Message, Value};
@@ -16,8 +17,8 @@ use super::protocol::{Operation, StatusCode};
 /// The media type of every request.
 pub const CONTENT_TYPE: &str = "application/ipp";
 
-/// The IPP version a client speaks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The IPP version a client speaks. Ordered: 1.1 is lower than 2.0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IppVersion {
     V1_1,
     V2_0,
@@ -29,6 +30,44 @@ impl IppVersion {
             Self::V1_1 => (1, 1),
             Self::V2_0 => (2, 0),
         }
+    }
+
+    /// The version spelled as `ipp-versions-supported` spells it (`"2.0"`); `None` for any other
+    /// version (1.0, 2.1, 2.2: this client speaks 1.1 and 2.0 only).
+    pub fn from_keyword(text: &str) -> Option<Self> {
+        match text.trim() {
+            "1.1" => Some(Self::V1_1),
+            "2.0" => Some(Self::V2_0),
+            _ => None,
+        }
+    }
+
+    /// The highest version this client speaks that a printer's `ipp-versions-supported` lists
+    /// (2.0, else 1.1); `None` when the list names neither (or is empty).
+    pub fn highest_common(advertised: &[String]) -> Option<Self> {
+        advertised.iter().filter_map(|v| Self::from_keyword(v)).max()
+    }
+}
+
+/// The IPP version each printer turned out to speak: shared by the clients of one backend, keyed by
+/// the printer's canonical URI, and only ever lowered (a printer that rejected 2.0 is not asked 2.0
+/// again for the life of the memory).
+#[derive(Debug, Default)]
+pub struct VersionMemory {
+    versions: RwLock<HashMap<String, IppVersion>>,
+}
+
+impl VersionMemory {
+    /// The version learned for a printer, if any.
+    pub fn get(&self, printer: &str) -> Option<IppVersion> {
+        self.versions.read().unwrap_or_else(PoisonError::into_inner).get(printer).copied()
+    }
+
+    /// Note that a printer speaks at most `version`; a version already known to be lower stays.
+    pub fn lower(&self, printer: &str, version: IppVersion) {
+        let mut versions = self.versions.write().unwrap_or_else(PoisonError::into_inner);
+        let entry = versions.entry(printer.to_owned()).or_insert(version);
+        *entry = (*entry).min(version);
     }
 }
 
@@ -135,6 +174,8 @@ pub struct Client<T> {
     codec: Limits,
     user: String,
     version: IppVersion,
+    fallback: bool,
+    memory: Option<Arc<VersionMemory>>,
     next_id: Arc<AtomicU32>,
 }
 
@@ -147,6 +188,8 @@ impl<T: Transport> Client<T> {
             codec: Limits::default(),
             user: "craft".to_owned(),
             version: IppVersion::V1_1,
+            fallback: false,
+            memory: None,
             next_id: Arc::new(AtomicU32::new(1)),
         }
     }
@@ -167,6 +210,31 @@ impl<T: Transport> Client<T> {
     pub fn with_version(mut self, version: IppVersion) -> Self {
         self.version = version;
         self
+    }
+
+    /// Allow one downgrade to IPP 1.1 when the printer answers `server-error-version-not-supported`
+    /// to a higher version. A version-rejected request creates nothing (the printer refuses it
+    /// before acting), so repeating it at 1.1 is safe even for `Print-Job`, `Create-Job` and
+    /// `Send-Document`. At most one extra attempt per request; off by default.
+    #[must_use]
+    pub fn with_fallback(mut self, fallback: bool) -> Self {
+        self.fallback = fallback;
+        self
+    }
+
+    /// Share what is learned about printers' versions (see [`VersionMemory`]). With fallback on, a
+    /// version learned for this printer lowers the version of every later request.
+    #[must_use]
+    pub fn with_memory(mut self, memory: Arc<VersionMemory>) -> Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// The version the next request is sent at: the configured one, lowered to what was learned for
+    /// this printer when fallback is allowed.
+    pub fn version(&self) -> IppVersion {
+        let learned = if self.fallback { self.memory.as_ref().and_then(|m| m.get(&self.uri.canonical())) } else { None };
+        learned.map_or(self.version, |known| known.min(self.version))
     }
 
     /// Share one request-id counter between clients of the same backend.
@@ -193,7 +261,7 @@ impl<T: Transport> Client<T> {
     /// `attributes-natural-language` first (RFC 8011 section 4.1.4), then the printer URI, a job id
     /// when there is one, and the user.
     pub fn request(&self, operation: Operation, job_id: Option<i32>, extra: Vec<Attribute>) -> Message {
-        let (major, minor) = self.version.parts();
+        let (major, minor) = self.version().parts();
         let mut group = Group::new(GroupTag::Operation)
             .with(Attribute::new("attributes-charset", Value::Charset("utf-8".into())))
             .with(Attribute::new("attributes-natural-language", Value::NaturalLanguage("en".into())))
@@ -206,8 +274,33 @@ impl<T: Transport> Client<T> {
         Message::new(major, minor, operation.code(), self.next_request_id()).with_group(group)
     }
 
-    /// Send a request and read the reply.
+    /// Send a request and read the reply. With fallback allowed ([`Self::with_fallback`]) and a
+    /// request above 1.1, a `server-error-version-not-supported` answer is followed by exactly one
+    /// more attempt at 1.1 (and 1.1 is remembered for the printer); whatever that attempt answers,
+    /// including the same status again, is the result. There is no further retry.
     pub fn exchange(&self, message: &Message) -> Result<Reply> {
+        match self.exchange_once(message) {
+            Err(IppError::Status { code: StatusCode::VERSION_NOT_SUPPORTED, .. }) if self.fallback && (message.major, message.minor) > (1, 1) => {
+                let (major, minor) = IppVersion::V1_1.parts();
+                let mut again = message.clone();
+                (again.major, again.minor, again.request_id) = (major, minor, self.next_request_id());
+                let result = self.exchange_once(&again);
+                // An answer from the printer other than the same rejection shows it speaks 1.1.
+                let answered = match &result {
+                    Ok(_) => true,
+                    Err(IppError::Status { code, .. }) => *code != StatusCode::VERSION_NOT_SUPPORTED,
+                    Err(_) => false,
+                };
+                if answered && let Some(memory) = &self.memory {
+                    memory.lower(&self.uri.canonical(), IppVersion::V1_1);
+                }
+                result
+            }
+            other => other,
+        }
+    }
+
+    fn exchange_once(&self, message: &Message) -> Result<Reply> {
         let body = message.encode()?;
         if body.len() > self.limits.max_request {
             return Err(IppError::TooLarge("the request", self.limits.max_request));

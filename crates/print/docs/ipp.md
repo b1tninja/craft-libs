@@ -29,7 +29,27 @@ whose request id matches.
 
 Every request starts with `attributes-charset` (utf-8), `attributes-natural-language` (en), `printer-uri`,
 then `job-id` where the operation names one, then `requesting-user-name` (default `craft`, never the account
-name; `with_user_name`). IPP version 1.1 (`with_ipp_version` for 2.0).
+name; `with_user_name`). The IPP version is negotiated, see below.
+
+### IPP version
+
+The default is **IPP 2.0** (every IPP Everywhere printer supports it). Version rules, per printer:
+
+| Situation | What is sent | Remembered |
+|---|---|---|
+| nothing known | 2.0 | |
+| the printer's `ipp-versions-supported` was read (`printer_details`, the first step of every submit) | the highest of 2.0 and 1.1 it lists (versions this client does not speak, such as 1.0 or 2.1, are ignored; a list naming neither changes nothing) | yes, per printer, never raised |
+| the printer answers `server-error-version-not-supported` to a 2.0 request | **the same request once more at 1.1**; no third attempt | 1.1 for that printer, for the life of the backend (clones share it) |
+| the printer rejects 1.1 too | the second failure is the result: `Failed`, `Safe`, `NativeCode { ipp, 0x0503, server-error-version-not-supported }` | nothing |
+| the fallback attempt fails for another reason | that failure | nothing |
+| `with_ipp_version(v)` | exactly `v`, always; an advertised list does not move it | |
+| `with_ipp_version(v)` and `with_version_fallback(true)` | `v`, lowered to 1.1 once on a rejection (and to what is advertised) | as above |
+
+Why the downgrade is safe even for `Print-Job`, `Create-Job` and `Send-Document`: a printer that does not
+support the request's version-number rejects the message before it acts on it, so a version-rejected request
+creates nothing and sending it again at 1.1 cannot produce two jobs. The repeat is a new request id with the
+same attributes and document bytes. `IppBackend::version_of(uri)` says which version the next request to a
+printer uses; `Submitted::effective` names the version the job went out at.
 
 | Step | Operation | Notes |
 |---|---|---|
@@ -101,8 +121,25 @@ strict mode the request carries `ipp-attribute-fidelity` so that the printer ref
 positive. A job the printer answers `client-error-not-found` or `client-error-gone` for is
 `ErrorKind::NotFound` ("printers forget finished jobs"; a watch reports it as forgotten).
 
-`cancel_job` is `Cancel-Job`; `not-found` and `gone` are success (nothing to cancel), and `not-possible` is
-confirmed with a `Get-Job-Attributes` and is success only when the job is terminal or gone.
+`cancel_job` is `Cancel-Job`; `not-possible` is confirmed with a `Get-Job-Attributes` and is success only
+when the job is terminal or gone. `not-found` is disambiguated, see below.
+
+### Not found: the job or the printer?
+
+A wrong printer path looks like a forgotten job (many servers answer `client-error-not-found`, or HTTP
+404/410, for an unknown path). So when `job_status`, `cancel_job` or the job listing behind `list_jobs` /
+`find_job` gets `client-error-not-found`, `client-error-gone` or HTTP 404/410, the backend sends **one**
+`Get-Printer-Attributes` with `requested-attributes` = `printer-state` to the same printer URI (never
+repeated, never looped):
+
+| The extra read | Verdict | `job_status` | `cancel_job` | job listing |
+|---|---|---|---|---|
+| answers normally | the job is forgotten | `ErrorKind::NotFound`, `Safe`, "printers forget finished jobs" (a watch reports it as forgotten) | success | the original error |
+| is also not-found / gone / HTTP 404 or 410 | the printer path is wrong | `ErrorKind::NotFound`, `Safe`, "the printer was not found at <uri> ... not a forgotten job", `NativeCode { ipp, 0x0406, client-error-not-found }` | the same error | the same error |
+| fails for another reason | could not tell | `ErrorKind::Failed`, `Idempotent` (a read may be repeated), message says "could not tell", the original not-found as the native code | the same | the same |
+
+Note: `JobWatch` keys on `ErrorKind::NotFound` alone, so a watch still reports the wrong-path verdict as a
+forgotten job; the error itself carries the difference.
 
 ## Listing
 

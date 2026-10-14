@@ -137,8 +137,7 @@ pub enum Outcome {
     Aborted,
     /// Nothing conclusive was heard for too long ([`Staleness::ceiling`]) or a person dismissed
     /// the row ([`PrintJob::dismiss`]). **Not a failure**: the device may still print it. Shown
-    /// as [`JobState::Unknown`] with the reason `abandoned-no-outcome` (`craft-job` has no
-    /// abandoned state).
+    /// as [`JobState::Abandoned`] with the reason `abandoned-no-outcome`.
     Abandoned,
 }
 
@@ -622,7 +621,8 @@ impl Snapshot {
     /// `Accepted` (nothing followed) is [`JobState::Unknown`]; `Watching` is the printer's own state
     /// (a stopped printer is [`JobState::NeedsAttention`]); [`LifecycleState::NeedsAttention`] (the
     /// outcome of a send is unknown) is [`JobState::NeedsAttention`]; the endings are `Completed`
-    /// (also [`Outcome::CompletedWithWarnings`]), `Cancelled`, `Aborted` ([`Outcome::Aborted`] and
+    /// (also [`Outcome::CompletedWithWarnings`]), `Cancelled`, `Abandoned` ([`Outcome::Abandoned`],
+    /// not a failure, with the reason `abandoned-no-outcome`), `Aborted` ([`Outcome::Aborted`] and
     /// a [`Outcome::Failed`] that is not the next case) and `CompletedWithErrors` (a `Failed`
     /// whose job the printer completed with errors).
     pub fn view(&self) -> JobView {
@@ -675,7 +675,7 @@ impl Snapshot {
             LifecycleState::NeedsAttention => JobState::NeedsAttention,
             LifecycleState::Terminal(Outcome::Completed | Outcome::CompletedWithWarnings) => JobState::Completed,
             LifecycleState::Terminal(Outcome::Cancelled) => JobState::Cancelled,
-            LifecycleState::Terminal(Outcome::Abandoned) => JobState::Unknown,
+            LifecycleState::Terminal(Outcome::Abandoned) => JobState::Abandoned,
             LifecycleState::Terminal(Outcome::Aborted) => JobState::Aborted,
             LifecycleState::Terminal(Outcome::Failed) => {
                 if self.attempts.last().and_then(|attempt| attempt.remote_end) == Some(JobState::CompletedWithErrors) {

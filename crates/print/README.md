@@ -178,8 +178,8 @@ let view = print.snapshot();                 // cheap and immutable: for the UI,
 
 * **Lifecycle** (separate from the printer's `JobState`): `Preparing`, `Submitting`, `Accepted`,
   `Watching(JobState)`, `RetryScheduled { attempt, next_at }`, `NeedsAttention` (the outcome of a send is
-  unknown) and `Terminal(Completed | CompletedWithWarnings | Failed | Cancelled | Aborted)` (the lifecycle
-  keeps `CompletedWithWarnings`; the printer's `JobState` does not).
+  unknown) and `Terminal(Completed | CompletedWithWarnings | Failed | Cancelled | Aborted | Abandoned)` (the lifecycle
+  keeps `CompletedWithWarnings`; the printer's `JobState` does not; `view()` shows `Abandoned` as `craft_job::JobState::Abandoned`).
 * **Retry.** Safe, transient failures are retried automatically under a `RetryPolicy` (on by default, at
   most 3 attempts, the device's `retry_after` honoured; `with_retry(None)` turns it off). An
   `OutcomeUnknown` failure is **never** retried automatically: the print waits in `NeedsAttention`, and

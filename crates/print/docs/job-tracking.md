@@ -117,7 +117,7 @@ component can list prints and scans. No I/O; it is the snapshot reshaped.
 | `id` | the current remote job's `JobId` once a document was accepted; before that, and after a manual `retry()` cleared the remote job, a local id `local:print-<n>` |
 | `kind` | `JobKind::Print` |
 | `title` | the title the app gave, **without** the tag suffix (the tag is its own field) |
-| `state` | `Preparing`, `Submitting`, `RetryScheduled` -> `Pending`; `Accepted` (nothing followed) -> `Unknown`; `Watching(s)` -> `s`; `NeedsAttention` (outcome of a send unknown) -> `NeedsAttention`; `Terminal(Completed or CompletedWithWarnings)` -> `Completed`; `Cancelled` -> `Cancelled`; `Aborted` -> `Aborted`; `Abandoned` -> `Unknown` (with the reason `abandoned-no-outcome`); `Failed` -> `CompletedWithErrors` when the printer completed the job with errors, otherwise `Aborted` |
+| `state` | `Preparing`, `Submitting`, `RetryScheduled` -> `Pending`; `Accepted` (nothing followed) -> `Unknown`; `Watching(s)` -> `s`; `NeedsAttention` (outcome of a send unknown) -> `NeedsAttention`; `Terminal(Completed or CompletedWithWarnings)` -> `Completed`; `Cancelled` -> `Cancelled`; `Aborted` -> `Aborted`; `Abandoned` -> `Abandoned` (terminal, not a success, counted by `needs_attention`; the reason `abandoned-no-outcome` is kept); `Failed` -> `CompletedWithErrors` when the printer completed the job with errors, otherwise `Aborted` |
 | `reasons` | the printer's reasons, then the print's warnings (so "completed with warnings" shows here) |
 | `progress` | `Progress { done: sheets done, total: sheets total }`; pages when no sheets are reported; `None` before any reading. Expected totals from the options fill a missing total |
 | `times` | `created` (wall clock at creation), `started` (wall clock of the first send), `finished` (creation plus the job clock's offset at the ending; cleared by a manual `retry()`) |
@@ -313,7 +313,7 @@ them is a failure and **none resends**: a device that goes quiet may still print
 | `stall_after_processing` | 10 min with a completely unchanged reading (`JobStatus::same_as`: state, reasons, warnings, sheet and page counters) while `Processing` | `NeedsAttention`, `Stalled`, reason `stalled`; any change in the reading ends it |
 | `stall_after_pending` | 30 min unchanged while `Pending` (queued behind other jobs) | the same |
 | held, stopped | never | an explicit hold has no timeout; jams and paper-out arrive at once in the printer's own reasons |
-| `ceiling` | 3 h from acceptance without a terminal state | `Terminal(Abandoned)`, advice `CheckDeviceFirst`; `view()` has `JobState::Unknown` and the reason `abandoned-no-outcome` (`craft-job` has no abandoned state) |
+| `ceiling` | 3 h from acceptance without a terminal state | `Terminal(Abandoned)`, advice `CheckDeviceFirst`; `view()` has `JobState::Abandoned` and the reason `abandoned-no-outcome` |
 | `dismiss()` / `dismiss_and_cancel(&Registry)` | by a person | the same end as the ceiling, earlier; the second first asks the device to cancel the job if the print has one (the cancel error is returned, the row is dismissed anyway) |
 | `reconcile_after` | 65 s, or the backend's `Backend::open_job_timeout` (WS-Print 65 s; the IPP-like fake 240 s) | after a send whose outcome is unknown, `retry_advice()` stays `CheckDeviceFirst` until the device has had its own window to end the half-made job; `PrintJob::reconcile_wait()` says how long is left |
 

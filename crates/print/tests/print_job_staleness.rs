@@ -194,7 +194,8 @@ fn a_held_or_stopped_job_never_stalls_and_every_row_gives_up_at_the_ceiling() {
         (Some(StaleReason::Abandoned), SimpleState::Abandoned, RetryAdvice::CheckDeviceFirst)
     );
     let view = job.view();
-    assert_eq!(view.state, JobState::Unknown, "craft-job has no abandoned state");
+    assert_eq!(view.state, JobState::Abandoned);
+    assert!(view.is_terminal() && view.needs_attention() && !view.state.is_success());
     assert!(view.reasons.iter().any(|r| r == "abandoned-no-outcome"));
     assert!(job.advance(&rig.registry).next_in.is_none(), "the row is done");
     assert_eq!(fake.submissions().len(), 1);
@@ -217,6 +218,7 @@ fn a_person_can_dismiss_a_row_and_optionally_cancel_at_the_device() {
     assert_eq!(job.state(), LifecycleState::Terminal(Outcome::Abandoned));
     assert!(fake.cancels().is_empty());
     assert!(job.view().reasons.iter().any(|r| r == "abandoned-no-outcome"));
+    assert_eq!(job.view().state, JobState::Abandoned);
     job.dismiss();
     assert_eq!(job.state(), LifecycleState::Terminal(Outcome::Abandoned));
 

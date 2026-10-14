@@ -16,7 +16,9 @@
 //! (`JobView::Running`), reports **accepted** (`JobUpdate::Accepted`, `JobView::Accepted`: the printer
 //! has the document; nothing says it has printed), may report what the printer says
 //! (`JobUpdate::Status`), and finally answers with the result. A printer that cannot report ends with
-//! [`Outcome::AcceptedUnknown`]: sent, outcome unknown. All of it arrives over `mpsc` receivers that
+//! [`Outcome::AcceptedUnknown`]: sent, outcome unknown. Sheet totals are optional: a printer that
+//! reports sheets done and no total gets "N sheets" until the app's page count ([`Draft::expected_pages`])
+//! supplies an estimated total, when the bar becomes determinate; a total the printer reports wins. All of it arrives over `mpsc` receivers that
 //! [`State::poll`] drains once per frame, so nothing blocks the UI thread.
 
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -257,6 +259,11 @@ impl Stage {
 }
 
 /// What the printer says about an accepted job.
+///
+/// The total is optional because many printers report sheets completed and never a total. While it
+/// is unknown the UI shows "N sheets" (an indeterminate figure, no bar); when it is known, from the
+/// printer or from the page count the app expects ([`Draft::expected_pages`]), it shows a
+/// determinate bar. A total the printer reports always wins over an expected one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Progress {
     pub stage: Stage,
@@ -264,6 +271,27 @@ pub struct Progress {
     pub sheets_total: Option<u32>,
     /// The printer's reasons, as received.
     pub notes: Vec<String>,
+}
+
+impl Progress {
+    /// `done / total` in `0.0..=1.0` when both counters are known and the total is not zero;
+    /// `None` is "indeterminate".
+    pub fn fraction(&self) -> Option<f32> {
+        match (self.sheets_done, self.sheets_total) {
+            (Some(done), Some(total)) if total > 0 => Some(done.min(total) as f32 / total as f32),
+            _ => None,
+        }
+    }
+
+    /// Fill in a total the printer did not report (or reported as zero) with `expected`; a total
+    /// that is known stays as it is.
+    #[must_use]
+    pub fn with_expected_total(mut self, expected: Option<u32>) -> Self {
+        if !self.sheets_total.is_some_and(|total| total > 0) {
+            self.sheets_total = expected.filter(|total| *total > 0);
+        }
+        self
+    }
 }
 
 /// What a [`SendJob`] worker reports before its result.
@@ -309,6 +337,9 @@ pub struct Request {
     pub orientation: Option<Orientation>,
     pub quality: Option<Quality>,
     pub media_size: Option<String>,
+    /// The page count the app set in [`Draft::expected_pages`], for the host to pass on (a
+    /// `craft-print` worker puts it in `JobOptions::expected_pages`). `None` when the app did not say.
+    pub expected_pages: Option<u32>,
 }
 
 /// Why Print is not available yet (nothing is worded for a missing tick: the box is in plain view).
@@ -343,9 +374,16 @@ pub struct Draft {
     pub sides: Option<Sides>,
     pub orientation: Option<Orientation>,
     pub quality: Option<Quality>,
+    /// How many pages the document has, when the app knows. Set it before [`State::start_job`]: it
+    /// goes to the host in [`Request::expected_pages`] and, as an estimate of the sheets
+    /// ([`Draft::expected_sheets`]), becomes the total of the progress bar when the printer reports
+    /// none. The model never changes it.
+    pub expected_pages: Option<u32>,
     /// The person's yes to this one print. Never on by default, never kept.
     pub confirmed: bool,
     pub job: JobView,
+    /// The sheet total estimated when the current job started (settings cannot change under it).
+    job_expected_sheets: Option<u32>,
 }
 
 impl Default for Draft {
@@ -359,8 +397,10 @@ impl Default for Draft {
             sides: None,
             orientation: None,
             quality: None,
+            expected_pages: None,
             confirmed: false,
             job: JobView::Idle,
+            job_expected_sheets: None,
         }
     }
 }
@@ -438,6 +478,15 @@ impl Draft {
         self.printer().and_then(|p| p.caps.copies).map_or(1, |(_, max)| max.clamp(1, 9999))
     }
 
+    /// The sheets the job should use, estimated from [`Self::expected_pages`]: halved (rounded up)
+    /// for a two-sided job, times the copies. An estimate: the printer's own counting can differ,
+    /// and what it reports wins. `None` without a page count (or with zero pages).
+    pub fn expected_sheets(&self) -> Option<u32> {
+        let pages = self.expected_pages.filter(|pages| *pages > 0)?;
+        let per_sheet = if matches!(self.sides, Some(Sides::LongEdge | Sides::ShortEdge)) { 2 } else { 1 };
+        Some(pages.div_ceil(per_sheet).saturating_mul(self.copies.clamp(1, self.max_copies())))
+    }
+
     /// Start a query: returns the generation its answer must carry. Clears the confirmation.
     pub fn begin_query(&mut self) -> u64 {
         self.generation += 1;
@@ -512,12 +561,14 @@ impl Draft {
             orientation: self.orientation.filter(|o| self.offered_orientations().contains(o)),
             quality: self.quality.filter(|q| self.offered_qualities().contains(q)),
             media_size,
+            expected_pages: self.expected_pages.filter(|pages| *pages > 0),
         }
     }
 
     /// A job starts: the confirmation is spent.
     pub fn job_started(&mut self) {
         self.confirmed = false;
+        self.job_expected_sheets = self.expected_sheets();
         self.job = JobView::Running { canceling: false };
     }
 
@@ -535,6 +586,7 @@ impl Draft {
     /// The printer accepted the document. Ignored unless a job is being sent; a cancel already
     /// pressed is kept.
     pub fn job_accepted(&mut self, progress: Progress) {
+        let progress = progress.with_expected_total(self.job_expected_sheets);
         if let JobView::Running { canceling } = self.job {
             self.job = JobView::Accepted { canceling, progress };
         }
@@ -543,6 +595,7 @@ impl Draft {
     /// A newer status of the accepted job. A status that arrives before the acceptance is taken as
     /// the acceptance; one that arrives after the job ended is dropped.
     pub fn job_progress(&mut self, progress: Progress) {
+        let progress = progress.with_expected_total(self.job_expected_sheets);
         match &mut self.job {
             JobView::Accepted { progress: shown, .. } => *shown = progress,
             JobView::Running { canceling } => self.job = JobView::Accepted { canceling: *canceling, progress },
@@ -988,12 +1041,14 @@ impl State {
                         cancel = self.cancel_job();
                     }
                 });
-                match (progress.sheets_done, progress.sheets_total) {
-                    (Some(done), Some(total)) if total > 0 => {
+                match (progress.fraction(), progress.sheets_done, progress.sheets_total) {
+                    // Known total: a determinate bar.
+                    (Some(fraction), Some(done), Some(total)) => {
                         let text = fill(&fill(labels.sheets_progress, "done", &done.to_string()), "total", &total.to_string());
-                        ui.add(egui::ProgressBar::new(done.min(total) as f32 / total as f32).text(text));
+                        ui.add(egui::ProgressBar::new(fraction).text(text));
                     }
-                    (Some(done), _) if done > 0 => {
+                    // Unknown total: the count alone, no bar that could never fill.
+                    (_, Some(done), _) if done > 0 => {
                         ui.label(egui::RichText::new(fill(labels.sheets, "n", &done.to_string())).small().weak());
                     }
                     _ => {}

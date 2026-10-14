@@ -299,13 +299,61 @@ craft-print = { version = "0.1", features = ["testing"] }
   the tag in a native attribute) are presets for the two shapes of backend a `PrintJob` meets;
   `with_submit_script(vec![SubmitStep::LoseReply(error), ..])` makes a send whose reply is lost (the job
   exists, the call fails), `seed_job` adds a foreign job and `remote_jobs()` shows the fake's queue.
-* `craft_print::wsd::testing` (needs `wsd` too) is an in-memory WS-Print printer:
+* `craft_print::wsd::testing` (needs `wsd` too) is an in-memory WS-Print printer (there is no IPP equivalent: the fake IPP printer is fakeprint):
   `FakePrinter::new(FakeConfig { .. })` (formats, sides, copies, colour, media, qualities,
   resolutions, how jobs end
   with `Ending`, faults, HTTP errors), `MemTransport(printer)` for
   `WsdBackend::with_transport` (no sockets), `printer_server(printer)` for a loopback HTTP server,
   and the stored `FakeJob`s (ticket and document) and the request log (`actions()`) to assert on.
   The crate's own tests use exactly these types.
+
+## IPP backend (cargo feature `ipp`)
+
+`craft_print::ipp::IppBackend` prints to network printers over the Internet Printing Protocol
+(RFC 8010/8011, PWG 5100.x) on plain HTTP. It is a `BackendClass::Network` backend registered as `ipp`;
+its printers are `ipp:<printer uri>` and its jobs `ipp:<printer uri>#<job id>` (typed:
+`IppBackend::job_id(uri, n)` and `parse_job_id`).
+
+```no_run
+use craft_print::ipp::IppBackend;
+use craft_print::{Document, Job, SubmitRequest, UserConfirmed};
+
+let ipp = IppBackend::new();
+ipp.add_named("ipp://10.0.0.30/ipp/print", "Front office")?; // the app chose this printer; port 631
+craft_print::register(Box::new(ipp.clone()))?;
+let job = Job { printer: Some("ipp:ipp://10.0.0.30:631/ipp/print".into()), ..Job::default() };
+let request = SubmitRequest::new(Document::pdf(b"%PDF-1.7"), job).with_consent(UserConfirmed::interactive());
+let submitted = craft_print::submit_job(request)?; // returns when the printer has accepted the job
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+* **Safety stance.** As for `wsd`: nothing discovers or connects until the app adds a printer and asks;
+  every job needs a `UserConfirmed`; a request can only reach an added printer. URIs are `ipp://` or
+  `http://` with a numeric loopback, link-local or private address (port 631 unless named); host names,
+  public addresses, redirects and proxies are refused (`craft-wsd`'s policy), and `ipps://` and
+  `https://` are refused with a clear error because there is no TLS. Replies are read by a strict,
+  bounded codec (size, group, attribute, value and nesting caps). `ipp/adapter.rs` is the only file that
+  names `craft-wsd`.
+* **Operations.** `Get-Printer-Attributes`, `Validate-Job` (optional, `with_validate_first`), `Print-Job`,
+  `Create-Job` + `Send-Document` (large documents, or printers without `Print-Job`; `JobFlow`),
+  `Get-Job-Attributes`, `Get-Jobs` and `Cancel-Job`. `submit` returns once the printer has accepted the job;
+  following it is `job_status` (one `Get-Job-Attributes`), polled every 2 s by default.
+* **Settings.** Copies, two-sided, orientation, quality (draft/normal/high; photo is high plus the
+  printer's `photo` content optimisation where it lists one), resolution, media and colour become job
+  attributes. A setting the printer lists as unsupported is dropped with a warning in `Submitted::warnings`, or
+  refused in strict mode (`with_strict`, which also sends `ipp-attribute-fidelity`); attributes the printer
+  itself ignores come back as warnings too. The tables both ways are in [docs/ipp.md](docs/ipp.md).
+* **Tracking.** The idempotency tag is a suffix of `job-name`; `list_jobs` / `find_job` read `Get-Jobs`
+  (title, user, state, creation time), so a lost reply is reconciled by tag before anything is resent.
+* **Errors** carry `NativeCode { domain: "ipp", code, name }` (HTTP failures `"http"`) and the retry facts of
+  the status table in [docs/ipp.md](docs/ipp.md), pinned by the table tests in `ipp::error`.
+* **Not implemented:** TLS, authentication, IPP subscriptions (events) and discovery.
+* **Tests.** Printer-free: the codec on static byte vectors (round trips, truncations, hostile input), request
+  builders against expected bytes, canned replies through a small scripted transport (a mock transport,
+  not a printer), the status and retry tables, and registry-level tests (routing, consent, format
+  negotiation, conversion, tracking and reconcile). The fake printer is fakeprint; protocol-level
+  verification against it is done through the Python bindings in a separate harness (outside this repo).
+  There is deliberately no in-memory IPP printer in this crate.
 
 ## WS-Print backend (cargo feature `wsd`)
 
@@ -332,6 +380,7 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
 
 | Feature | Default | Adds | Notes |
 | --- | --- | --- | --- |
+| `ipp` | on | `craft-wsd` (the same git dependency as `wsd`; its plain-HTTP transport and URL policy) and nothing else: the IPP codec is this crate's own | Not built for `wasm32`. No TLS (`ipps://` is refused), no authentication, no discovery. See [docs/ipp.md](docs/ipp.md). |
 | `wsd` | on | `craft-wsd` (git, see below) and `roxmltree`; through `craft-wsd`: `thiserror` and `ureq` (plain HTTP, no TLS, no proxy, no redirects) | Not built for `wasm32`. `--no-default-features` is the CUPS/Windows crate with none of them. |
 
 * **Safety stance.** Nothing in this feature discovers or connects until the app adds a printer.

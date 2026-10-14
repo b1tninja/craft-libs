@@ -27,7 +27,7 @@
 //! ```
 //!
 //! For the WS-Print backend see `craft_print::wsd::testing` (an in-memory WS-Print printer; needs
-//! the `wsd` feature too).
+//! the `wsd` feature too). There is no in-memory IPP printer: the fake IPP printer is fakeprint.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};

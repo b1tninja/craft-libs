@@ -125,7 +125,7 @@ never reset the stall rule (that needs a changed reading) and never affect the c
   3. it is a well-formed `POST` to `/n/<token>` or `/e/<token>` over HTTP/1.1 with a `Content-Length`
      within the cap (64 KiB), a SOAP content type and a header block within its caps, read within a
      total deadline (3 seconds). No chunked bodies, no pipelining, `Connection: close`;
-  4. `<token>` is the **unguessable per-subscription identifier** (128 random bits as hex), compared in
+  4. `<token>` is the **unguessable per-subscription identifier** (two random UUIDs, 64 hex digits, from std's randomly keyed hasher), compared in
      constant time against every subscription (no early exit), **and the source address equals that
      subscription's printer**;
   5. the envelope parses (bounded XML, no DTD), carries the subscription's identifier as a
@@ -172,10 +172,26 @@ renewal, back-off and quiet-window behaviour are tested without sleeping.
 * `craft_print::wsd::events` (`NotifyConfig`, `Events`, `Wake`, `EventStats`): the listener, the
   subscription manager and the mapping from verified events to wakes. The `craft-wsd` types it uses
   are reached through `wsd/adapter.rs` only.
-* `WsdBackend::with_events`, `maintain_events`, `shutdown_events`, `events()`; `watch_support()` is
-  `Events` while at least one subscription is healthy, otherwise `Poll`.
+* `WsdBackend::with_events`, `maintain_events`, `shutdown_events`, `events()`, `events_status()`
+  (plain data: where it listens, per-printer `subscribed` / `healthy` / watchers / seconds since the last
+  event, and the counters); `watch_support()` is `Events` while at least one subscription is healthy,
+  otherwise `Poll`. The configuration (`NotifyConfig::new` / `parse`), the status and the counters are
+  plain owned data, with explicit start (`with_events`) and stop (`shutdown_events`), so a language
+  binding can wrap them.
 
-## 6. Not done
+## 6. Verification
+
+* In this repository, without any printer: the listener against static hostile byte vectors sent by a
+  test client over a loopback socket (forged token, wrong identifier, malformed and oversized
+  messages, wrong namespace, unsubscribed types, duplicates, floods, a stalled sender), the
+  subscription manager against canned `craft-wsd` WS-Eventing replies from a scripted transport,
+  lease, renewal, expiry, back-off and `SubscriptionEnd` flows on the injected clock, `JobWatch` and
+  `PrintJob` on the trait-level fake backend, and listener shutdown.
+* The fake printer is `fakeprint`. Eventing against it (the six events delivered to this listener,
+  a lost event caught by the safety poll, a forged event ignored, `SubscriptionEnd`) is verified through
+  the Python bindings in a separate harness, outside this repository.
+
+## 7. Not done
 
 * No `SetEventRate` call, no `GetStatus` health probe beyond what `Renew` tells us, no IPv6 scope
   handling, no HTTPS (the listener and the printer URLs are plain HTTP on a local network, like the

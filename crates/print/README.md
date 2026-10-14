@@ -383,8 +383,7 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   `ErrorKind::Cancelled`. A failed send whose outcome is unknown (the connection closed or timed
   out after the document was written) leaves the created job alone: cancelling could abort a job
   that is printing.
-* **Following a job.** `watch_support()` is `Poll` (events through WS-Eventing would need an inbound
-  listener and a lease; that is a documented future option and nothing listens) and
+* **Following a job.** `watch_support()` is `Poll` (push status is opt-in, see "Push status" below; nothing listens unless the app asks) and
   `recommended_poll_interval()` is two seconds (`with_poll_interval`). `job_status` is one
   `GetJobElements`: the nine WS-Print job states map to `Pending`, `Held`, `Processing` (also
   `Started` and `Terminating`), `NeedsAttention` (a stopped job), `Completed` (with
@@ -431,6 +430,24 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   `craft-wsd` reports transport failures as a typed kind and stage (connect failures, timeouts,
   redirects, a closed connection), so nothing is read from text; a `Retry-After` the printer sends
   becomes the error's `retry_after`.
+* **Push status (opt-in).** `WsdBackend::with_events(NotifyConfig)` starts one inbound listener and
+  subscribes (WS-Eventing) to job and printer events, so a watch can poll *now* instead of waiting.
+  **Nothing listens unless you call it**, and there is no default address: `NotifyConfig::new(bind,
+  advertise)` takes the socket to listen on and the numeric local URL the printers are told
+  (`NotifyConfig::loopback()` is for tests). Events are only a **wake-up**: the state of a job always
+  comes from `job_status`, so a lost, duplicated or forged event can cost a request or some latency
+  and can never produce a wrong terminal state. While a subscription is healthy (a verified event
+  arrived recently) a `JobWatch` polls every 30 seconds as a safety net plus once per wake; when it
+  is not (subscribe failed, renewal failed, `SubscriptionEnd`, silence) it polls as before.
+  The listener accepts only connections from a subscribed printer's address, requires an
+  unguessable per-subscription path and `wse:Identifier`, caps sizes, time and rate, and answers a
+  bare status. Housekeeping (`Subscribe`, `Renew`, `Unsubscribe`) is caller-driven on an injectable
+  clock: `Backend::job_status` does it, or call `maintain_events()`; `shutdown_events()` (or dropping
+  the last clone) unsubscribes, stops and joins the listener thread, the only background thread.
+  `events_status()` returns plain data (listen address, per-printer health, counters). It needs the
+  printer to reach the client: a firewall or NAT in between silently leaves you with polling. Design
+  and exposure rules: [docs/events.md](docs/events.md). Verified without a printer and against
+  `fakeprint` through a separate harness; not yet against real printers.
 * **Lower layers** are public for apps that need them: `wsd::client::Client` (one method per
   operation: `GetPrinterElements`, `CreatePrintJob`, `SendDocument`, `GetJobElements`,
   `GetActiveJobs`, `GetJobHistory`, `CancelJob`), `wsd::job::submit_document` (the accepted

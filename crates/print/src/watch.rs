@@ -24,8 +24,8 @@ use craft_job::{ExpectedTotals, Jitter, JobId, JobState, RetryAdvice, RetryPolic
 use crate::backend::{CancelToken, ErrorKind, PrintError};
 use crate::job::{ExpectedTotalsExt as _, JobStatus, Submitted, WatchSupport};
 use crate::registry::Registry;
-use crate::wake::WakeReceiver;
 use crate::retry::{CANCEL_SLICE, Clock, JitterExt as _, SystemClock, advise_error};
+use crate::wake::WakeReceiver;
 
 /// Where a watch gets status from and sends cancels to. The [`Registry`] is one (by job id); a
 /// test can supply its own.

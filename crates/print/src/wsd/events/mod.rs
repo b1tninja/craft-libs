@@ -37,7 +37,6 @@ pub const SUBSCRIBED: [Event; 5] =
 /// The numbers the listener and the manager run on. The defaults are what the design note says;
 /// tests (and apps with a reason) change them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct EventTuning {
     /// The lease asked for in `Subscribe` and `Renew`. Default 10 minutes.
     pub lease: Duration,
@@ -100,6 +99,16 @@ impl NotifyConfig {
         Ok(Self { follow_port: bind.port() == 0, bind, advertise, tuning: EventTuning::default() })
     }
 
+    /// [`Self::new`] from text (`"192.168.1.5:9000"`, `"http://192.168.1.5:9000"`), for callers that
+    /// hold strings (a settings file, a language binding).
+    pub fn parse(bind: &str, advertise: &str) -> Result<Self, PrintError> {
+        let bind = bind
+            .trim()
+            .parse::<SocketAddr>()
+            .map_err(|e| PrintError::new(ErrorKind::InvalidRequest, format!("the event listener address {bind:?} is not an ip:port: {e}")))?;
+        Self::new(bind, advertise)
+    }
+
     /// `127.0.0.1` on a system-picked port, advertised as such: for tests and for simulators on the
     /// same machine. A real printer cannot call it.
     pub fn loopback() -> Result<Self, PrintError> {
@@ -111,6 +120,34 @@ impl NotifyConfig {
         self.tuning = tuning;
         self
     }
+}
+
+/// One printer's subscription, as plain data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionInfo {
+    /// The printer's native id (its canonical URL).
+    pub printer: String,
+    /// `Subscribe` succeeded and the lease has not run out.
+    pub subscribed: bool,
+    /// Subscribed and trusted: a verified event arrived within the quiet window (see `docs/events.md`).
+    pub healthy: bool,
+    /// Watches that hold the subscription.
+    pub watchers: usize,
+    /// Consecutive failed `Subscribe` attempts or ends, driving the back-off.
+    pub failures: u32,
+    /// Whole seconds since the last verified event, if one ever arrived.
+    pub seconds_since_event: Option<u64>,
+}
+
+/// The listener and its subscriptions as plain data (for a UI, a log or a language binding).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventsStatus {
+    /// Where the listener is bound.
+    pub listen: String,
+    /// The URL printers are told.
+    pub advertise: String,
+    pub subscriptions: Vec<SubscriptionInfo>,
+    pub stats: EventStats,
 }
 
 /// What a verified event turns into: whose watch to bring forward. It carries no status.
@@ -194,10 +231,7 @@ const MAX_RECEIVERS: usize = 64;
 
 impl Sub {
     fn healthy(&self, now: Duration, quiet: Duration) -> bool {
-        self.handle.is_some()
-            && !self.degraded
-            && now < self.expires_at
-            && self.last_event.is_some_and(|at| now.saturating_sub(at) <= quiet)
+        self.handle.is_some() && !self.degraded && now < self.expires_at && self.last_event.is_some_and(|at| now.saturating_sub(at) <= quiet)
     }
 
     fn publish_health(&self, now: Duration, quiet: Duration) {
@@ -325,6 +359,25 @@ impl Events {
             unsubscribed_type: get(&c.unsubscribed_type),
             ended: get(&c.ended),
         }
+    }
+
+    /// The listener, its subscriptions and counters as plain data. Takes the clock's `now`, sends nothing.
+    pub fn status(&self) -> EventsStatus {
+        let now = self.shared.clock.now();
+        let quiet = self.shared.tuning.quiet_window;
+        let subscriptions = lock(&self.shared.state)
+            .subs
+            .iter()
+            .map(|s| SubscriptionInfo {
+                printer: s.printer.as_url(),
+                subscribed: s.handle.is_some() && now < s.expires_at,
+                healthy: s.healthy(now, quiet),
+                watchers: s.receivers.iter().filter(|r| r.tx.is_connected()).count(),
+                failures: s.failures,
+                seconds_since_event: s.last_event.map(|at| now.saturating_sub(at).as_secs()),
+            })
+            .collect();
+        EventsStatus { listen: self.local.to_string(), advertise: self.shared.advertise.clone(), subscriptions, stats: self.stats() }
     }
 
     /// Whether the subscription for this printer is established and trusted right now.
@@ -519,9 +572,7 @@ impl Events {
 
     fn subscribe(&self, printer: &PrinterUrl, token: &str) -> Result<Subscription, WsdError> {
         let base = &self.shared.advertise;
-        let sink = |kind: &str| {
-            EndpointRef::new(format!("{base}/{kind}/{token}")).with_parameter(ReferenceParameter::new(WSE, "Identifier", token))
-        };
+        let sink = |kind: &str| EndpointRef::new(format!("{base}/{kind}/{token}")).with_parameter(ReferenceParameter::new(WSE, "Identifier", token));
         let uris: Vec<String> = SUBSCRIBED.iter().map(|e| e.uri()).collect();
         let refs: Vec<&str> = uris.iter().map(String::as_str).collect();
         let mut request = SubscribeRequest::new(sink("n"));

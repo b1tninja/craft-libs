@@ -7,8 +7,8 @@ use std::time::Duration;
 use super::adapter::{SharedTransport, Transport, default_transport};
 use super::client::Client;
 use super::encoder::{ColorMode, PassThrough};
-use super::events::{Events, NotifyConfig};
 use super::error::{Op, WsdError};
+use super::events::{Events, NotifyConfig};
 use super::fault::FaultCode;
 use super::job::{self, PrintOptions};
 use super::model::{self, JobReason, PrinterElements};
@@ -18,9 +18,9 @@ use super::policy::{NetworkLimits, PrinterUrl};
 use super::ticket::{self, Sides, TicketShape};
 use crate::backends::{Backend, BackendClass, DocumentFormat, JobHint, PrinterDetails, PrinterRef, PrinterState, PrinterStatus, SubmitRequest};
 use crate::{
-    Clock, SystemClock, ColourMode, Duplex, ErrorKind, Fingerprint, FingerprintExt as _, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobStatus, PrintError,
-    Progress, Reconciled as FoundJobs, RemoteJob, Resolution, Scaling, Submitted, Tag, TagExt as _, TagPlacement, TagSupport, TagSupportExt as _,
-    WakeReceiver, WatchSupport, filter_jobs, reconcile_jobs,
+    Clock, ColourMode, Duplex, ErrorKind, Fingerprint, FingerprintExt as _, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobStatus, PrintError,
+    Progress, Reconciled as FoundJobs, RemoteJob, Resolution, Scaling, Submitted, SystemClock, Tag, TagExt as _, TagPlacement, TagSupport,
+    TagSupportExt as _, WakeReceiver, WatchSupport, filter_jobs, reconcile_jobs,
 };
 
 /// The registry name and id prefix.
@@ -220,6 +220,11 @@ impl WsdBackend {
     /// The listener and subscription manager, when [`Self::with_events`] was called.
     pub fn events(&self) -> Option<&Events> {
         self.events.as_deref()
+    }
+
+    /// The listener and subscriptions as plain data; `None` without [`Self::with_events`].
+    pub fn events_status(&self) -> Option<super::events::EventsStatus> {
+        self.events.as_deref().map(Events::status)
     }
 
     /// Do the push housekeeping that is due (subscribe, renew, release); see [`Events::maintain`].

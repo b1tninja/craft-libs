@@ -9,11 +9,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Instant;
 
-use super::{
-    Event, IpAddr, Shared, Sub, SUBSCRIBED, TcpListener, backoff, bump, ct_eq, lock, Arc, Duration, Ordering,
-};
-use crate::wsd::adapter::{Incoming, Notification, WSE, WireError};
+use super::{Arc, Duration, Event, IpAddr, Ordering, SUBSCRIBED, Shared, Sub, TcpListener, backoff, bump, ct_eq, lock};
 use crate::wsd::adapter::wse;
+use crate::wsd::adapter::{Incoming, Notification, WSE, WireError};
 use crate::wsd::ns::WPRT;
 
 const MAX_HEAD: usize = 8 * 1024;

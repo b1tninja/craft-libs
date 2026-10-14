@@ -108,12 +108,8 @@ fn a_request_from_another_address_than_the_tokens_printer_is_forged() {
     let printer = PrinterUrl::parse("http://127.0.0.1:5357/print").unwrap();
     let _rx = events.register(&printer, 1).unwrap();
     let token = events.token_for(&printer).unwrap();
-    let request = Request {
-        method: "POST".into(),
-        path: format!("/n/{token}"),
-        content_type: Some("application/soap+xml".into()),
-        body: b"<x/>".to_vec(),
-    };
+    let request =
+        Request { method: "POST".into(), path: format!("/n/{token}"), content_type: Some("application/soap+xml".into()), body: b"<x/>".to_vec() };
     // From the printer's address the body is merely malformed ...
     assert_eq!(ingest(&events.shared, "127.0.0.1".parse().unwrap(), &request), 400);
     // ... from any other address the token does not work at all.

@@ -42,9 +42,7 @@ impl WakeSender {
         let Some(shared) = self.0.upgrade() else { return false };
         // Saturating: the count is only "at least this many", never an unbounded queue.
         let mut current = shared.pending.load(Ordering::Acquire);
-        while let Err(seen) =
-            shared.pending.compare_exchange_weak(current, current.saturating_add(1), Ordering::AcqRel, Ordering::Acquire)
-        {
+        while let Err(seen) = shared.pending.compare_exchange_weak(current, current.saturating_add(1), Ordering::AcqRel, Ordering::Acquire) {
             current = seen;
         }
         shared.total.fetch_add(1, Ordering::Relaxed);

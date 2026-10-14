@@ -1932,3 +1932,41 @@ fn kind_name(kind: ErrorKind) -> &'static str {
         ErrorKind::Failed => "failed",
     }
 }
+
+#[cfg(test)]
+mod news_tests {
+    use super::*;
+    use crate::{BytesSource, DocumentFormat};
+
+    fn job() -> PrintJob {
+        PrintJob::new(Job::default(), BytesSource::new(DocumentFormat::Pdf, b"%PDF-1.7".to_vec()))
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn the_silence_clock_starts_at_the_last_good_read_without_events() {
+        let mut job = job();
+        job.last_news = Some(secs(100));
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(100));
+        job.last_news = None;
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(10));
+    }
+
+    #[test]
+    fn an_event_is_news_but_postpones_the_silence_by_at_most_twice_the_limit() {
+        let mut job = job();
+        job.last_news = Some(secs(100));
+        // A recent event moves the anchor forward ...
+        job.last_event = Some(secs(130));
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(130));
+        // ... but never beyond the last good read plus twice the silence.
+        job.last_event = Some(secs(100 + 500));
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(220));
+        // An event older than the read changes nothing.
+        job.last_event = Some(secs(50));
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(100));
+    }
+}

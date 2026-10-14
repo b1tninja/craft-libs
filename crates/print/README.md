@@ -50,9 +50,52 @@ let receipt = craft_print::submit_to_backend(SubmitRequest::new(Document::pdf(&p
   Duplex, colour, scaling and driver options in a `Job` are hints a backend may ignore, and
   `honoured` tells a UI which ones it applies. `status` is `None` when the backend cannot say
   before a job (CUPS and the Windows spooler report after the fact).
-* **Documents** are bytes plus a `DocumentFormat` (`Pdf`, `PwgRaster`, `PostScript`,
-  `OctetStream`). A backend declares `accepted_formats()`; the registry refuses anything else
-  with `ErrorKind::UnsupportedFormat` before calling it.
+* **Documents** are bytes plus a `DocumentFormat`: `Pdf`, `PwgRaster`, `PostScript`, `OctetStream`,
+  `Jpeg`, `Png`, `Tiff`, `PlainText`, `Xps` (`application/vnd.ms-xpsdocument`) and `OpenXps`
+  (`application/oxps`). `mime()`, `from_mime()` (parameters and case ignored), `extension()`,
+  `from_extension()`, `sniff(bytes)` (magic numbers; plain text by content; XPS is a ZIP and is never
+  sniffed) and `detect(file_name, bytes)` (bytes first, then the extension) turn files into
+  formats; `DocumentFormat::negotiate(&preference, &printer_formats)` picks the first preferred
+  format a printer lists (`negotiate_default` uses `DEFAULT_PREFERENCE`: PDF, PWG raster, Open XPS,
+  XPS, PostScript, TIFF, PNG, JPEG, text, then the printer's own language). A backend declares
+  `accepted_formats()` and, when printers differ, `formats_per_printer()` plus
+  `PrinterDetails::formats`. The built-in spooler stays **PDF only**: CUPS is handed the PDF and the
+  Windows job is drawn from it by the in-box PDF renderer, and the crate has no image, text or XPS
+  renderer to offer instead; an app that wants to print a JPEG on the spooler registers a converter
+  that makes PDF from it.
+
+### Formats and conversion
+
+This crate has no renderer, so the app that owns one says how to make a format a printer takes:
+
+* **`DocumentConverter`** (`targets(from)`, `convert(document, target, &ConvertContext) ->
+  OwnedDocument`), registered with `Registry::set_converter` (or `craft_print::set_converter`).
+  `ConvertContext` carries the chosen `resolution`, whether to render in `colour`, and the media,
+  orientation, duplex, page count and cancel token of the request.
+* **`craft_print::pwg`** is the neutral PWG raster **encoder** for pages the converter has already
+  rendered (`RasterPage`, `PwgOptions`, `encode`). It needs no feature and builds for wasm32;
+  `craft_print::wsd::pwg` re-exports it.
+* **The registry decides.** A document in a format the printer accepts is sent as it is and the
+  converter is not asked. Otherwise the best target the converter makes and the printer lists is
+  chosen (`ConversionPolicy::preference`, default `DocumentFormat::DEFAULT_PREFERENCE`), the
+  resolution is the request's `JobOptions::resolution` if set, else the printer's listed
+  `PrinterDetails::resolutions` entry nearest `ConversionPolicy::target_dpi` (default 300; distance
+  is summed over both axes, ties go to the higher one, nothing listed means 300 square; see
+  `choose_resolution`), the converter runs and its output is sent. For a raster target the chosen
+  resolution is also put into the job so the ticket and the raster agree.
+  `Submitted::conversion` records what was done. With no converter, no format in common, or an
+  unsupported source the call fails with `ErrorKind::UnsupportedFormat` and a message that lists the
+  document's format and what the printer accepts (and what the converter can make); a converter
+  failure is reported as it was, marked `Phase::Prepare` and `RetrySafety::Safe` (nothing was
+  sent). A network backend is not contacted for any of this without a `UserConfirmed`.
+* **Cost.** For a backend with `formats_per_printer()` (WS-Print) and a converter registered, the
+  decision needs the printer's list: one read-only `printer_details` call per print. An app that
+  has just shown the printer's details passes them to `Registry::submit_job_with_details` and no
+  extra request is made. A backend with an exact list (the spooler) costs nothing.
+* **Backend-wide settings stay backend-wide.** The ticket shape, strict mode, transfer and limits
+  of a network backend are configuration of the backend, not of a job. An app that wants different
+  ones for one print builds a backend for that print (`backend.clone().with_*`, clones share the
+  printer list) and registers it in a registry of its own, as pdfcraft does for each invocation.
 * **Consent.** `UserConfirmed` is a marker with no policy of its own (`attest(Option<bool>)`
   errors unless `Some(true)`; `interactive()` for a Print button the person just pressed). Local
   backends (`BackendClass::Local`, the default) ignore it; a `BackendClass::Network` backend only
@@ -120,6 +163,9 @@ match watch.tick(registry) {
   the `with_*` methods; the struct is `#[non_exhaustive]`. A backend applies what it can;
   `PrinterDetails::honoured` lists the `JobHint`s it applies (`Media`, `Orientation`, `Quality`,
   `Resolution` and `Colour` joined `Copies`, ...). The built-in spooler honours the colour choice only.
+  `Quality` is `Draft`, `Normal`, `High` or `Photo` (hint only; `Quality::from_name`/`ALL`). A backend
+  maps it to the printer's own setting when the printer offers a matching value and drops it with a
+  warning otherwise.
 * `Registry::submit_job` accepts them, so an app needs no backend-specific entry point. Settings that
   are backend-wide configuration (a network backend's ticket shape, strict mode, transfer) stay on
   the backend: an app that wants different ones per invocation builds a backend for that invocation

@@ -55,6 +55,9 @@ mod spooler {
             id: printer.name.clone(),
             name: printer.name,
             default: printer.default,
+            // PDF only, on purpose: CUPS is handed the PDF and Windows draws it with the in-box PDF
+            // renderer; there is no image, text or XPS renderer here to accept more. Other formats
+            // reach the spooler as PDF through the app's `DocumentConverter`.
             formats: vec![crate::DocumentFormat::Pdf],
             options,
             two_sided: printer.two_sided,

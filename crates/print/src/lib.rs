@@ -17,10 +17,12 @@
 
 mod backend;
 mod builtin;
+pub mod convert;
 mod job;
 mod options;
 #[cfg(any(test, windows))]
 mod progress;
+pub mod pwg;
 mod registry;
 mod retry;
 #[cfg(any(test, windows))]
@@ -55,11 +57,12 @@ pub use backend::{
 };
 #[cfg(any(windows, all(unix, not(target_arch = "wasm32"))))]
 pub use builtin::SystemSpooler;
+pub use convert::{Conversion, ConversionPolicy, ConvertContext, DocumentConverter, OwnedDocument, choose_resolution};
 pub use job::{ExpectedTotals, JobId, JobState, JobStatus, ParseJobIdError, ParseJobIdErrorKind, Submitted, WatchSupport};
 pub use options::{ColourMode, JobOptions, Orientation, Quality, Resolution};
 pub use registry::{
     BackendError, Listing, RegisterError, Registry, cancel_job, job_status, list_printers, namespaced_id, printer_details, register, registry,
-    split_id, submit_job, submit_to_backend,
+    set_converter, split_id, submit_job, submit_to_backend,
 };
 pub use retry::{CANCEL_SLICE, Clock, Jitter, ManualClock, Phase, RetryPolicy, RetrySafety, SystemClock, retry};
 pub use watch::{JobSource, JobWatch, WaitPolicy, WatchOutcome, WatchStep, wait_for_job};

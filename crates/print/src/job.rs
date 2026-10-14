@@ -10,6 +10,7 @@
 use std::time::{Duration, SystemTime};
 
 use crate::backend::{ErrorKind, PrintError, Receipt};
+use crate::convert::Conversion;
 use crate::options::JobOptions;
 use crate::registry::{namespaced_id, split_id};
 use crate::{Duplex, Job};
@@ -337,6 +338,9 @@ pub struct Submitted {
     /// Filled in by the registry from the request's [`JobOptions::expected_pages`]; see
     /// [`ExpectedTotals`]. [`crate::JobWatch::for_submitted`] uses it.
     pub expected: ExpectedTotals,
+    /// Filled in by the registry when the app's [`DocumentConverter`](crate::DocumentConverter)
+    /// had to make the document the printer accepts; `None` when it was sent as it was.
+    pub conversion: Option<Conversion>,
 }
 
 impl Submitted {
@@ -352,6 +356,7 @@ impl Submitted {
             watch: WatchSupport::None,
             poll_interval: None,
             expected: ExpectedTotals::default(),
+            conversion: None,
         }
     }
 

@@ -32,9 +32,11 @@
 //! * **Status is optional.** `None` is "cannot say", not "all clear". Spoolers report after the
 //!   fact; a network protocol can report state up front.
 //! * **Documents are bytes plus a declared format.** A backend declares what it accepts with
-//!   [`Backend::accepted_formats`]; the registry refuses anything else before the backend is called
-//!   ([`ErrorKind::UnsupportedFormat`]). A backend that converts (for example PDF to raster) does
-//!   so inside `submit`.
+//!   [`Backend::accepted_formats`] (and, when printers differ, [`PrinterDetails::formats`] and
+//!   [`Backend::formats_per_printer`]). When the document's format is not accepted the registry
+//!   asks the app's [`DocumentConverter`](crate::DocumentConverter), if one is registered, for a
+//!   format the printer takes, and refuses with [`ErrorKind::UnsupportedFormat`] when there is no
+//!   way. A backend itself never converts: it sends what the registry hands it.
 //! * **Consent.** A backend whose [`Backend::class`] is [`BackendClass::Network`] only receives
 //!   requests that carry a [`UserConfirmed`]; the registry enforces it so a backend cannot forget.
 //! * **Errors are neutral**: choose an [`ErrorKind`] and attach the native code with
@@ -49,7 +51,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::job::{JobId, JobState, JobStatus, Submitted, WatchSupport};
-use crate::options::JobOptions;
+use crate::options::{JobOptions, Resolution};
 use crate::retry::{Phase, RetrySafety};
 use crate::{Error, Job, PrinterOption};
 
@@ -219,6 +221,11 @@ impl From<Error> for PrintError {
 }
 
 /// The format of the bytes in a [`Document`].
+///
+/// The names are the formats a printer commonly lists; whether one printer takes one is decided
+/// against that printer's own list ([`PrinterDetails::formats`], [`Self::negotiate`]). The crate
+/// does not convert between them: that is a [`DocumentConverter`](crate::DocumentConverter) the app
+/// registers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DocumentFormat {
@@ -230,20 +237,181 @@ pub enum DocumentFormat {
     PostScript,
     /// `application/octet-stream`: the printer's own page description language.
     OctetStream,
+    /// `image/jpeg`.
+    Jpeg,
+    /// `image/png`.
+    Png,
+    /// `image/tiff`.
+    Tiff,
+    /// `text/plain`.
+    PlainText,
+    /// `application/vnd.ms-xpsdocument`: XPS, the Windows print format.
+    Xps,
+    /// `application/oxps`: Open XPS (ECMA-388), the standardised XPS package.
+    OpenXps,
 }
 
 impl DocumentFormat {
+    /// Every format this crate names.
+    pub const ALL: [DocumentFormat; 10] = [
+        Self::Pdf,
+        Self::PwgRaster,
+        Self::PostScript,
+        Self::OctetStream,
+        Self::Jpeg,
+        Self::Png,
+        Self::Tiff,
+        Self::PlainText,
+        Self::Xps,
+        Self::OpenXps,
+    ];
+
+    /// The order [`Self::negotiate_default`] and the registry's conversion prefer, best first:
+    /// PDF (small, vector, what the apps make), PWG raster (the baseline every driverless printer
+    /// takes, and the one the app controls pixel for pixel), then the XPS family, PostScript, the
+    /// image formats and plain text. The printer's own language ([`Self::OctetStream`]) is last: it
+    /// can be sent but nothing here can produce it.
+    pub const DEFAULT_PREFERENCE: [DocumentFormat; 10] = [
+        Self::Pdf,
+        Self::PwgRaster,
+        Self::OpenXps,
+        Self::Xps,
+        Self::PostScript,
+        Self::Tiff,
+        Self::Png,
+        Self::Jpeg,
+        Self::PlainText,
+        Self::OctetStream,
+    ];
+
     pub const fn mime(self) -> &'static str {
         match self {
             Self::Pdf => "application/pdf",
             Self::PwgRaster => "image/pwg-raster",
             Self::PostScript => "application/postscript",
             Self::OctetStream => "application/octet-stream",
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Tiff => "image/tiff",
+            Self::PlainText => "text/plain",
+            Self::Xps => "application/vnd.ms-xpsdocument",
+            Self::OpenXps => "application/oxps",
         }
+    }
+
+    /// The format a MIME type names. Parameters (`; charset=utf-8`), surrounding blanks and ASCII
+    /// case are ignored; a type this crate has no name for is `None`. Besides the strings of
+    /// [`Self::mime`] two common misspellings are recognised: `image/jpg` and `application/x-pdf`.
+    pub fn from_mime(mime: &str) -> Option<Self> {
+        let essence = mime.split(';').next().unwrap_or("").trim();
+        if essence.eq_ignore_ascii_case("image/jpg") {
+            return Some(Self::Jpeg);
+        }
+        if essence.eq_ignore_ascii_case("application/x-pdf") {
+            return Some(Self::Pdf);
+        }
+        Self::ALL.into_iter().find(|f| f.mime().eq_ignore_ascii_case(essence))
+    }
+
+    /// The usual file extension, lowercase, without the dot. [`Self::OctetStream`] has no
+    /// meaningful one and answers `bin`.
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Pdf => "pdf",
+            Self::PwgRaster => "pwg",
+            Self::PostScript => "ps",
+            Self::OctetStream => "bin",
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::Tiff => "tif",
+            Self::PlainText => "txt",
+            Self::Xps => "xps",
+            Self::OpenXps => "oxps",
+        }
+    }
+
+    /// The format a file extension (with or without the dot, any case) stands for. `bin` is not
+    /// guessed to be anything; `None` for what is not known.
+    pub fn from_extension(extension: &str) -> Option<Self> {
+        match extension.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+            "pdf" => Some(Self::Pdf),
+            "pwg" | "ras" => Some(Self::PwgRaster),
+            "ps" | "eps" => Some(Self::PostScript),
+            "jpg" | "jpeg" | "jpe" => Some(Self::Jpeg),
+            "png" => Some(Self::Png),
+            "tif" | "tiff" => Some(Self::Tiff),
+            "txt" | "text" => Some(Self::PlainText),
+            "xps" => Some(Self::Xps),
+            "oxps" => Some(Self::OpenXps),
+            _ => None,
+        }
+    }
+
+    /// The format the first bytes of a file reveal: the magic numbers of PDF, JPEG, PNG, TIFF
+    /// (classic and BigTIFF), PWG raster and PostScript, and plain text when the first 4 KiB are
+    /// valid UTF-8 without control characters other than tab, line breaks and form feed. XPS is a
+    /// ZIP package that looks like any other, so it is never sniffed: use [`Self::from_extension`].
+    /// `None` for anything else (including an empty file).
+    pub fn sniff(bytes: &[u8]) -> Option<Self> {
+        let starts = |magic: &[u8]| bytes.starts_with(magic);
+        if starts(b"%PDF-") {
+            Some(Self::Pdf)
+        } else if starts(&[0xFF, 0xD8, 0xFF]) {
+            Some(Self::Jpeg)
+        } else if starts(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+            Some(Self::Png)
+        } else if starts(b"II*\0") || starts(b"MM\0*") || starts(b"II+\0") || starts(b"MM\0+") {
+            Some(Self::Tiff)
+        } else if starts(b"RaS2") {
+            Some(Self::PwgRaster)
+        } else if starts(b"%!PS") {
+            Some(Self::PostScript)
+        } else if is_plain_text(bytes) {
+            Some(Self::PlainText)
+        } else {
+            None
+        }
+    }
+
+    /// The format of a file: what its bytes reveal ([`Self::sniff`]), else what its name says
+    /// ([`Self::from_extension`] of the part after the last dot). The bytes win because a wrongly
+    /// named file would otherwise be sent as the wrong thing.
+    pub fn detect(file_name: Option<&str>, bytes: &[u8]) -> Option<Self> {
+        Self::sniff(bytes).or_else(|| file_name.and_then(|name| name.rsplit_once('.')).and_then(|(_, extension)| Self::from_extension(extension)))
+    }
+
+    /// The first format of `preference` that `accepted` lists. `preference` is best first and
+    /// decides; `accepted` is usually [`PrinterDetails::formats`] of the printer (an empty list
+    /// accepts nothing here: when a backend publishes no list, use its
+    /// [`accepted_formats`](Backend::accepted_formats)).
+    pub fn negotiate(preference: &[DocumentFormat], accepted: &[DocumentFormat]) -> Option<DocumentFormat> {
+        preference.iter().copied().find(|format| accepted.contains(format))
+    }
+
+    /// [`Self::negotiate`] with [`Self::DEFAULT_PREFERENCE`].
+    pub fn negotiate_default(accepted: &[DocumentFormat]) -> Option<DocumentFormat> {
+        Self::negotiate(&Self::DEFAULT_PREFERENCE, accepted)
     }
 }
 
-/// Document bytes and their declared format. The crate does not sniff or convert.
+/// Text the printer can take as `text/plain`: UTF-8 (a character cut at the end of the 4 KiB window
+/// is fine) and no control characters beyond tab, line feed, carriage return and form feed.
+fn is_plain_text(bytes: &[u8]) -> bool {
+    let window = bytes.get(..4096).unwrap_or(bytes);
+    let text = match std::str::from_utf8(window) {
+        Ok(text) => text,
+        // Only a character that the window cut in two is acceptable; `valid_up_to` is on a boundary.
+        Err(error) if error.error_len().is_none() && window.len() < bytes.len() => {
+            std::str::from_utf8(window.get(..error.valid_up_to()).unwrap_or(&[])).unwrap_or("")
+        }
+        Err(_) => return false,
+    };
+    !text.is_empty() && text.chars().all(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r' | '\x0c'))
+}
+
+/// Document bytes and their declared format. Constructing one does not look at the bytes (see
+/// [`DocumentFormat::sniff`] and [`Document::detect`]) and nothing here converts them (see
+/// [`DocumentConverter`](crate::DocumentConverter)).
 #[derive(Clone, Copy, Debug)]
 pub struct Document<'a> {
     pub format: DocumentFormat,
@@ -257,6 +425,12 @@ impl<'a> Document<'a> {
 
     pub fn pdf(bytes: &'a [u8]) -> Self {
         Self::new(DocumentFormat::Pdf, bytes)
+    }
+
+    /// The document with the format its bytes (or, failing that, `file_name`'s extension) reveal;
+    /// `None` when neither does. See [`DocumentFormat::detect`].
+    pub fn detect(file_name: Option<&str>, bytes: &'a [u8]) -> Option<Self> {
+        DocumentFormat::detect(file_name, bytes).map(|format| Self::new(format, bytes))
     }
 }
 
@@ -385,6 +559,10 @@ pub struct PrinterDetails {
     /// Paper names the printer offers; empty when not published.
     pub paper: Vec<String>,
     pub max_copies: Option<u32>,
+    /// The resolutions the printer lists, as it lists them; empty when not published. A
+    /// [`DocumentConverter`](crate::DocumentConverter) renders at one of these (see
+    /// [`choose_resolution`](crate::choose_resolution)).
+    pub resolutions: Vec<Resolution>,
     /// Which [`Job`] settings this backend applies. `None`: not published, treat as unknown.
     pub honoured: Option<Vec<JobHint>>,
     pub status: Option<PrinterStatus>,
@@ -508,8 +686,20 @@ pub trait Backend: Send + Sync {
     }
 
     /// The formats [`Backend::submit`] takes. Defaults to PDF.
+    ///
+    /// For a backend whose printers differ ([`Self::formats_per_printer`]) this is the superset it
+    /// can name and the printer's own list is [`PrinterDetails::formats`].
     fn accepted_formats(&self) -> &[DocumentFormat] {
         &[DocumentFormat::Pdf]
+    }
+
+    /// Whether which formats are accepted depends on the printer: when `true`,
+    /// [`Self::accepted_formats`] is only what the backend can name and the registry asks
+    /// [`Self::printer_details`] (its [`PrinterDetails::formats`]) before it decides whether a
+    /// [`DocumentConverter`](crate::DocumentConverter) is needed. Defaults to `false`: the list is
+    /// exact and no extra request is made.
+    fn formats_per_printer(&self) -> bool {
+        false
     }
 
     /// The printers the backend lists. Opens none of them.
@@ -564,6 +754,79 @@ pub trait Backend: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_format_round_trips_through_its_mime_type_and_extension() {
+        let mut mimes = std::collections::HashSet::new();
+        for format in DocumentFormat::ALL {
+            assert!(mimes.insert(format.mime()), "{} twice", format.mime());
+            assert_eq!(DocumentFormat::from_mime(format.mime()), Some(format));
+            assert_eq!(DocumentFormat::from_mime(&format!(" {}; q=1", format.mime().to_ascii_uppercase())), Some(format));
+            if format != DocumentFormat::OctetStream {
+                assert_eq!(DocumentFormat::from_extension(format.extension()), Some(format));
+                assert_eq!(DocumentFormat::from_extension(&format!(".{}", format.extension().to_ascii_uppercase())), Some(format));
+            }
+        }
+        assert_eq!(DocumentFormat::DEFAULT_PREFERENCE.len(), DocumentFormat::ALL.len());
+        assert!(DocumentFormat::ALL.iter().all(|f| DocumentFormat::DEFAULT_PREFERENCE.contains(f)));
+        assert_eq!(DocumentFormat::Jpeg.mime(), "image/jpeg");
+        assert_eq!(DocumentFormat::Xps.mime(), "application/vnd.ms-xpsdocument");
+        assert_eq!(DocumentFormat::OpenXps.mime(), "application/oxps");
+        assert_eq!(DocumentFormat::from_mime("image/jpg"), Some(DocumentFormat::Jpeg));
+        assert_eq!(DocumentFormat::from_mime("application/x-pdf"), Some(DocumentFormat::Pdf));
+        assert_eq!(DocumentFormat::from_mime("application/vnd.hp-pcl"), None);
+        assert_eq!(DocumentFormat::from_extension("jpeg"), Some(DocumentFormat::Jpeg));
+        assert_eq!(DocumentFormat::from_extension("bin"), None);
+    }
+
+    #[test]
+    fn the_first_bytes_reveal_the_format() {
+        let sniff = DocumentFormat::sniff;
+        assert_eq!(sniff(b"%PDF-1.7\n"), Some(DocumentFormat::Pdf));
+        assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10]), Some(DocumentFormat::Jpeg));
+        assert_eq!(sniff(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0]), Some(DocumentFormat::Png));
+        assert_eq!(sniff(b"II*\0\x08\0\0\0"), Some(DocumentFormat::Tiff));
+        assert_eq!(sniff(b"MM\0*\0\0\0\x08"), Some(DocumentFormat::Tiff));
+        assert_eq!(sniff(b"II+\0"), Some(DocumentFormat::Tiff));
+        assert_eq!(sniff(b"RaS2\0\0"), Some(DocumentFormat::PwgRaster));
+        assert_eq!(sniff(b"%!PS-Adobe-3.0\n"), Some(DocumentFormat::PostScript));
+        assert_eq!(sniff("Gr\u{fc}\u{df}e,\n\ttext\r\n".as_bytes()), Some(DocumentFormat::PlainText));
+        assert_eq!(sniff(b"PK\x03\x04"), None, "a ZIP package could be XPS or anything else");
+        assert_eq!(sniff(b""), None);
+        assert_eq!(sniff(b"\0\x01\x02binary"), None);
+        assert_eq!(sniff(&[0xC3]), None, "an invalid UTF-8 byte at the very end is not text");
+        // A character cut by the 4 KiB window is still text; one that is broken inside is not.
+        let mut cut = "a".repeat(4095).into_bytes();
+        cut.extend_from_slice("\u{e9}".as_bytes());
+        assert_eq!(sniff(&cut), Some(DocumentFormat::PlainText));
+        let mut broken = "a".repeat(100).into_bytes();
+        broken.push(0xFF);
+        broken.extend_from_slice(b"more");
+        assert_eq!(sniff(&broken), None);
+    }
+
+    #[test]
+    fn detection_prefers_the_bytes_and_falls_back_to_the_name() {
+        assert_eq!(DocumentFormat::detect(Some("scan.png"), b"%PDF-1.4"), Some(DocumentFormat::Pdf));
+        assert_eq!(DocumentFormat::detect(Some("page.XPS"), b"PK\x03\x04"), Some(DocumentFormat::Xps));
+        assert_eq!(DocumentFormat::detect(Some("noextension"), b"PK\x03\x04"), None);
+        assert_eq!(DocumentFormat::detect(None, b"\0\0"), None);
+        let document = Document::detect(Some("a.oxps"), b"PK\x03\x04").unwrap();
+        assert_eq!((document.format, document.bytes.len()), (DocumentFormat::OpenXps, 4));
+        assert!(Document::detect(None, b"\0").is_none());
+    }
+
+    #[test]
+    fn negotiation_follows_the_preference_and_the_printers_list() {
+        use DocumentFormat::*;
+        assert_eq!(DocumentFormat::negotiate(&[Jpeg, Pdf], &[Pdf, Jpeg]), Some(Jpeg));
+        assert_eq!(DocumentFormat::negotiate(&[Pdf, Jpeg], &[Jpeg, Png]), Some(Jpeg));
+        assert_eq!(DocumentFormat::negotiate(&[Pdf], &[Jpeg]), None);
+        assert_eq!(DocumentFormat::negotiate(&[Pdf], &[]), None);
+        assert_eq!(DocumentFormat::negotiate_default(&[Png, PwgRaster, Jpeg]), Some(PwgRaster));
+        assert_eq!(DocumentFormat::negotiate_default(&[Jpeg, Tiff, Xps]), Some(Xps));
+        assert_eq!(DocumentFormat::negotiate_default(&[OctetStream, PlainText]), Some(PlainText));
+    }
 
     #[test]
     fn progress_totals_are_optional_and_a_reported_one_wins() {

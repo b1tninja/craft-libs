@@ -11,6 +11,7 @@ pub const HRESULT_DOMAIN: &str = "hresult";
 /// HRESULT), `"win32"`, `"sane"`, `"http"`, `"ipp"`, `"wsd-fault"`, `"cups"`, `"nserror"`. `name`
 /// is the symbolic name when the backend knows one (`WIA_ERROR_BUSY`, `SANE_STATUS_NO_DOCS`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct NativeCode {
     pub domain: &'static str,
     pub code: i64,

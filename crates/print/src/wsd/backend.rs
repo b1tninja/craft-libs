@@ -512,6 +512,12 @@ impl Backend for WsdBackend {
         Some(self.config.poll_interval)
     }
 
+    /// A WS-Print printer aborts a job that got no document within 60 seconds of `CreatePrintJob`
+    /// (`DocumentTimeoutError`); five seconds more for the printer's own clock.
+    fn open_job_timeout(&self) -> Option<Duration> {
+        Some(Duration::from_secs(65))
+    }
+
     /// One `GetJobElements`. A job the printer does not list is [`ErrorKind::NotFound`] and the
     /// message says what that usually means: printers forget finished jobs, so a job that was
     /// accepted and is now unknown most likely finished.

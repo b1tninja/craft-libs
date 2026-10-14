@@ -75,6 +75,8 @@ pub struct BackendInfo {
     pub watch: WatchSupport,
     pub tag_support: TagSupport,
     pub query_caps: JobQueryCaps,
+    /// See [`Backend::open_job_timeout`].
+    pub open_job_timeout: Option<std::time::Duration>,
 }
 
 /// The print backends of a process. The free functions of this crate's [`registry`] use one global
@@ -439,6 +441,7 @@ impl Registry {
             watch: backend.watch_support(),
             tag_support: backend.tag_support(),
             query_caps: backend.job_query_caps(),
+            open_job_timeout: backend.open_job_timeout(),
         })
     }
 

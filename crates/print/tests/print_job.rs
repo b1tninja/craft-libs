@@ -11,7 +11,7 @@ use craft_print::testing::{FakeBackend, SubmitStep};
 use craft_print::{
     AttemptOutcome, BytesSource, DocumentFormat, ErrorKind, Fingerprint, FnSource, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobState,
     JobStatus, LifecycleState, ManualClock, Outcome, Phase, PrintError, PrintJob, PrintJobConfig, Reconciled, Registry, RemoteJob, RetryAdvice,
-    RetryPolicy, RetrySafety, SimpleState, Tag, TagPlacement, TagPolicy, TagSupport, Timestamp, TrailEvent, UserConfirmed, WatchSupport,
+    RetryPolicy, RetrySafety, SimpleState, Staleness, Tag, TagPlacement, TagPolicy, TagSupport, Timestamp, TrailEvent, UserConfirmed, WatchSupport,
 };
 
 const PDF: &[u8] = b"%PDF-1.7";
@@ -67,6 +67,7 @@ fn print_job(rig: &Rig, printer: &str) -> PrintJob {
     PrintJob::new(job_for(printer), source())
         .with_clock(Arc::new(rig.clock.clone()))
         .with_wall_clock(|| at(1_000))
+        .with_config(PrintJobConfig { staleness: Staleness::disabled(), ..PrintJobConfig::default() })
         .with_consent(UserConfirmed::interactive())
 }
 

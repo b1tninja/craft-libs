@@ -737,6 +737,17 @@ pub trait Backend: Send + Sync {
         Ok(JobStatus::new(JobState::Unknown))
     }
 
+    /// How long the device keeps a job open while it waits for the document of a request whose
+    /// reply was lost, plus a small margin: after this the device has given up on the half-made
+    /// job on its own (WS-Print aborts it with `DocumentTimeoutError`, IPP printers wait their
+    /// `multiple-operation-time-out`, 60 to 240 seconds, and then end it as
+    /// `submission-interrupted`). [`crate::PrintJob`] waits this long after a send whose outcome
+    /// is unknown before it advises resending. `None` (the default): the job uses
+    /// [`crate::Staleness::reconcile_after`].
+    fn open_job_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// Ask the device to cancel an accepted job. Cancelling a job that already ended is not an
     /// error. The default is [`ErrorKind::Unsupported`].
     fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {

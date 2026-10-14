@@ -135,6 +135,11 @@ pub enum Outcome {
     Cancelled,
     /// The printer gave up on it.
     Aborted,
+    /// Nothing conclusive was heard for too long ([`Staleness::ceiling`]) or a person dismissed
+    /// the row ([`PrintJob::dismiss`]). **Not a failure**: the device may still print it. Shown
+    /// as [`JobState::Unknown`] with the reason `abandoned-no-outcome` (`craft-job` has no
+    /// abandoned state).
+    Abandoned,
 }
 
 impl Outcome {
@@ -145,6 +150,7 @@ impl Outcome {
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Aborted => "aborted",
+            Self::Abandoned => "abandoned",
         }
     }
 
@@ -207,6 +213,8 @@ pub enum SimpleState {
     DoneWithWarnings,
     Failed,
     Cancelled,
+    /// Ended without an outcome: nothing was heard for too long, or a person dismissed it.
+    Abandoned,
 }
 
 impl SimpleState {
@@ -225,6 +233,7 @@ impl SimpleState {
             Self::DoneWithWarnings => "done_with_warnings",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Abandoned => "abandoned",
         }
     }
 }
@@ -247,6 +256,7 @@ fn simplify(state: LifecycleState) -> SimpleState {
         LifecycleState::Terminal(Outcome::CompletedWithWarnings) => SimpleState::DoneWithWarnings,
         LifecycleState::Terminal(Outcome::Failed | Outcome::Aborted) => SimpleState::Failed,
         LifecycleState::Terminal(Outcome::Cancelled) => SimpleState::Cancelled,
+        LifecycleState::Terminal(Outcome::Abandoned) => SimpleState::Abandoned,
     }
 }
 
@@ -391,6 +401,100 @@ pub struct NativeInfo {
     pub error_native: Option<NativeCode>,
 }
 
+/// Why a print that was accepted needs a look although the device never said anything bad.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum StaleReason {
+    /// No status read succeeded for [`Staleness::silence_after`]. Probing goes on; a successful
+    /// read ends this on its own.
+    NoNews,
+    /// The device keeps reporting the same thing ([`Staleness::stall_after_processing`] and
+    /// [`Staleness::stall_after_pending`]). Probing goes on; any change ends this.
+    Stalled,
+    /// The print ended as [`Outcome::Abandoned`].
+    Abandoned,
+}
+
+impl StaleReason {
+    /// The reason token in a [`JobView`]: `no-news-since:<unix seconds of the last good read>`
+    /// (`no-news-since:unknown` when none succeeded), `stalled` and `abandoned-no-outcome`.
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::NoNews => "no-news-since",
+            Self::Stalled => "stalled",
+            Self::Abandoned => "abandoned-no-outcome",
+        }
+    }
+}
+
+/// When a print that was accepted but is not heard from needs a person, and when a row gives up.
+/// Time is the job's [`Clock`]. A timeout is **never** a failure and never causes a resend: the
+/// device may still print. See `docs/job-tracking.md`, section 9, for the sources of the numbers;
+/// those beyond the protocol figures are judgement. [`Self::disabled`] gives the behaviour
+/// before this existed: following stops at [`WaitPolicy::max_wait`] and the print stays
+/// `Accepted`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Staleness {
+    /// `false`: nothing here applies (see [`Self::disabled`]).
+    pub enabled: bool,
+    /// The first gap between status reads when neither the config's watch nor the backend names
+    /// one. Default 2 s.
+    pub poll_initial: Duration,
+    /// The longest gap between reads while the status does not change. Default 15 s (well under
+    /// the 60 s a printer must remember finished jobs, so a short job is not missed).
+    pub poll_cap: Duration,
+    /// This long without one successful read: `NeedsAttention` ([`StaleReason::NoNews`]).
+    /// Default 3 min.
+    pub silence_after: Option<Duration>,
+    /// The gap between probes once the print needs attention for lack of news or a stall, so a
+    /// printer that comes back is noticed. Default 30 s.
+    pub probe_interval: Duration,
+    /// This long with a completely unchanged reading while the device says `Processing`:
+    /// `NeedsAttention` ([`StaleReason::Stalled`]). Default 10 min.
+    pub stall_after_processing: Option<Duration>,
+    /// The same for `Pending` (queued behind other jobs). Default 30 min. A held job and a stopped
+    /// one never time out: a person or the printer's own reasons speak for them.
+    pub stall_after_pending: Option<Duration>,
+    /// From acceptance, after this long without a terminal state the print ends as
+    /// [`Outcome::Abandoned`]. Default 3 h (the CUPS `MaxJobTime` default).
+    pub ceiling: Option<Duration>,
+    /// After a send whose outcome is unknown, wait this long before advising a resend, unless the
+    /// backend names its own ([`crate::backends::Backend::open_job_timeout`]). Default 65 s.
+    pub reconcile_after: Duration,
+}
+
+impl Default for Staleness {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_initial: Duration::from_secs(2),
+            poll_cap: Duration::from_secs(15),
+            silence_after: Some(Duration::from_secs(3 * 60)),
+            probe_interval: Duration::from_secs(30),
+            stall_after_processing: Some(Duration::from_secs(10 * 60)),
+            stall_after_pending: Some(Duration::from_secs(30 * 60)),
+            ceiling: Some(Duration::from_secs(3 * 60 * 60)),
+            reconcile_after: Duration::from_secs(65),
+        }
+    }
+}
+
+impl Staleness {
+    /// No timeouts and no waiting before a resend is advised: following stops at the watch's
+    /// `max_wait` and the print stays `Accepted` (refresh resumes it).
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            silence_after: None,
+            stall_after_processing: None,
+            stall_after_pending: None,
+            ceiling: None,
+            reconcile_after: Duration::ZERO,
+            ..Self::default()
+        }
+    }
+}
+
 /// How a [`PrintJob`] behaves; the default is what an app wants unless it has a reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrintJobConfig {
@@ -406,6 +510,8 @@ pub struct PrintJobConfig {
     pub attempt_cap: usize,
     /// Allowance for the printer's clock differing from ours when a reconcile narrows by time.
     pub reconcile_slack: Duration,
+    /// When an accepted print that is not heard from needs attention or is abandoned.
+    pub staleness: Staleness,
 }
 
 impl Default for PrintJobConfig {
@@ -417,6 +523,7 @@ impl Default for PrintJobConfig {
             trail_cap: 64,
             attempt_cap: 16,
             reconcile_slack: Duration::from_secs(120),
+            staleness: Staleness::default(),
         }
     }
 }
@@ -462,6 +569,11 @@ pub struct Snapshot {
     /// What the registry's converter made of it for the accepted attempt, when it ran.
     pub conversion: Option<Conversion>,
     pub advice: RetryAdvice,
+    /// Why the print needs a look or was abandoned, when the cause is silence, a stall or a
+    /// dismissal ([`Staleness`]).
+    pub stale: Option<StaleReason>,
+    /// The wall-clock time of the last successful status read.
+    pub last_news: Option<Timestamp>,
     /// What the last reconcile found, until the next attempt.
     pub reconciled: Option<Reconciled>,
     pub native: Option<NativeInfo>,
@@ -522,6 +634,14 @@ impl Snapshot {
         for text in self.reasons.iter().chain(&self.warnings) {
             view = view.with_reason(text.clone());
         }
+        if let Some(reason) = self.stale {
+            let token = match (reason, self.last_news) {
+                (StaleReason::NoNews, Some(at)) => format!("{}:{}", reason.token(), at.secs()),
+                (StaleReason::NoNews, None) => format!("{}:unknown", reason.token()),
+                (other, _) => other.token().to_owned(),
+            };
+            view = view.with_reason(token);
+        }
         let p = &self.progress;
         let progress = match (p.sheets_done, p.pages_done) {
             (Some(done), _) => Some(Progress::new(done, p.sheets_total)),
@@ -555,6 +675,7 @@ impl Snapshot {
             LifecycleState::NeedsAttention => JobState::NeedsAttention,
             LifecycleState::Terminal(Outcome::Completed | Outcome::CompletedWithWarnings) => JobState::Completed,
             LifecycleState::Terminal(Outcome::Cancelled) => JobState::Cancelled,
+            LifecycleState::Terminal(Outcome::Abandoned) => JobState::Unknown,
             LifecycleState::Terminal(Outcome::Aborted) => JobState::Aborted,
             LifecycleState::Terminal(Outcome::Failed) => {
                 if self.attempts.last().and_then(|attempt| attempt.remote_end) == Some(JobState::CompletedWithErrors) {
@@ -636,6 +757,14 @@ pub struct PrintJob {
     auto_failures: u32,
     reconciled: Option<Reconciled>,
     info: Option<BackendInfo>,
+    watchable: bool,
+    accepted_at: Option<Duration>,
+    last_news: Option<Duration>,
+    last_news_wall: Option<SystemTime>,
+    changed_at: Option<Duration>,
+    stale: Option<StaleReason>,
+    probe_at: Option<Duration>,
+    unknown_since: Option<Duration>,
 }
 
 impl std::fmt::Debug for PrintJob {
@@ -693,6 +822,14 @@ impl PrintJob {
             auto_failures: 0,
             reconciled: None,
             info: None,
+            watchable: false,
+            accepted_at: None,
+            last_news: None,
+            last_news_wall: None,
+            changed_at: None,
+            stale: None,
+            probe_at: None,
+            unknown_since: None,
         }
     }
 
@@ -841,11 +978,180 @@ impl PrintJob {
 
     fn next_in(&self) -> Option<Duration> {
         match self.state {
-            LifecycleState::Terminal(_) | LifecycleState::NeedsAttention => None,
+            LifecycleState::Terminal(_) => None,
+            LifecycleState::NeedsAttention if self.stale.is_none() => None,
             LifecycleState::Preparing | LifecycleState::Submitting => Some(Duration::ZERO),
             LifecycleState::RetryScheduled { next_at, .. } => Some(next_at.saturating_sub(self.now())),
-            LifecycleState::Accepted | LifecycleState::Watching(_) => self.watch.as_ref().and_then(JobWatch::next_poll_in),
+            LifecycleState::Accepted | LifecycleState::Watching(_) | LifecycleState::NeedsAttention => {
+                let poll = if self.probing() {
+                    Some(self.probe_at.map_or(Duration::ZERO, |at| at.saturating_sub(self.now())))
+                } else {
+                    self.watch.as_ref().and_then(JobWatch::next_poll_in)
+                };
+                match (poll, self.stale_deadline()) {
+                    (Some(poll), Some(deadline)) => Some(poll.min(deadline)),
+                    (poll, deadline) => poll.or(deadline.filter(|_| self.watchable)),
+                }
+            }
         }
+    }
+
+    /// Whether this print is followed by single probes the job schedules itself (the watch ended
+    /// or the print needs attention for lack of news) instead of by a [`JobWatch`].
+    fn probing(&self) -> bool {
+        self.stale.is_some() || (self.config.staleness.enabled && self.watchable && self.remote.is_some() && self.watch.is_none())
+    }
+
+    /// The time until the next staleness rule would fire, for [`Advance::next_in`].
+    fn stale_deadline(&self) -> Option<Duration> {
+        let st = self.config.staleness;
+        if !st.enabled || !self.watchable || self.remote.is_none() {
+            return None;
+        }
+        let accepted = self.accepted_at?;
+        let now = self.now();
+        let mut due: Vec<Duration> = Vec::new();
+        if let Some(ceiling) = st.ceiling {
+            due.push(accepted.saturating_add(ceiling));
+        }
+        if self.stale.is_none() {
+            if let Some(silence) = st.silence_after {
+                due.push(self.last_news.unwrap_or(accepted).max(accepted).saturating_add(silence));
+            }
+            if let LifecycleState::Watching(printer) = self.state
+                && let Some(stall) = self.stall_threshold(printer)
+            {
+                due.push(self.changed_at.unwrap_or(accepted).saturating_add(stall));
+            }
+        }
+        due.into_iter().min().map(|at| at.saturating_sub(now))
+    }
+
+    fn stall_threshold(&self, printer: JobState) -> Option<Duration> {
+        match printer {
+            JobState::Processing => self.config.staleness.stall_after_processing,
+            JobState::Pending => self.config.staleness.stall_after_pending,
+            _ => None,
+        }
+    }
+
+    /// The watch policy: the config's, with the staleness polling cadence and ceiling when enabled.
+    fn watch_policy(&self, recommended: Option<Duration>) -> WaitPolicy {
+        let st = self.config.staleness;
+        if !st.enabled {
+            return self.config.watch;
+        }
+        let mut policy = self.config.watch;
+        policy.interval = policy.interval.or(recommended).or(Some(st.poll_initial));
+        policy.max_interval = st.poll_cap;
+        policy.max_wait = st.ceiling.unwrap_or(policy.max_wait).max(policy.max_wait);
+        policy
+    }
+
+    /// Apply the staleness rules at `now`. Returns whether the lifecycle state changed.
+    fn check_staleness(&mut self) -> bool {
+        let st = self.config.staleness;
+        if !st.enabled || !self.watchable || self.remote.is_none() {
+            return false;
+        }
+        if !matches!(self.state, LifecycleState::Accepted | LifecycleState::Watching(_))
+            && !(self.state == LifecycleState::NeedsAttention && self.stale.is_some())
+        {
+            return false;
+        }
+        let Some(accepted) = self.accepted_at else {
+            return false;
+        };
+        let now = self.now();
+        if st.ceiling.is_some_and(|ceiling| now.saturating_sub(accepted) >= ceiling) {
+            self.note("no outcome was heard before the ceiling; the row is abandoned (the printer may still print it)");
+            return self.abandon();
+        }
+        if self.stale.is_some() {
+            return false;
+        }
+        let quiet = now.saturating_sub(self.last_news.unwrap_or(accepted).max(accepted));
+        if st.silence_after.is_some_and(|silence| quiet >= silence) {
+            self.note("no status read succeeded for a while; probing on");
+            return self.go_stale(StaleReason::NoNews, now);
+        }
+        if let LifecycleState::Watching(printer) = self.state
+            && let Some(stall) = self.stall_threshold(printer)
+            && now.saturating_sub(self.changed_at.unwrap_or(accepted)) >= stall
+        {
+            self.note("the printer keeps reporting the same thing; probing on");
+            return self.go_stale(StaleReason::Stalled, now);
+        }
+        false
+    }
+
+    fn go_stale(&mut self, reason: StaleReason, now: Duration) -> bool {
+        self.stale = Some(reason);
+        self.watch = None;
+        self.probe_at = Some(now.saturating_add(self.config.staleness.probe_interval));
+        self.set_state(LifecycleState::NeedsAttention);
+        true
+    }
+
+    /// End the row without an outcome: the device may still print it.
+    fn abandon(&mut self) -> bool {
+        self.watch = None;
+        self.stale = Some(StaleReason::Abandoned);
+        self.set_state(LifecycleState::Terminal(Outcome::Abandoned))
+    }
+
+    /// End the row now without an outcome (a person dismissed it, or lost interest). Nothing is
+    /// sent to the device and nothing is cancelled: it may still print. The state becomes
+    /// `Terminal(Outcome::Abandoned)`; it can still be [`Self::retry`]ed on purpose. Does nothing
+    /// to a print that already ended.
+    pub fn dismiss(&mut self) {
+        if self.state.is_terminal() {
+            return;
+        }
+        self.cancel.cancel();
+        self.note("dismissed by the user");
+        self.abandon();
+    }
+
+    /// [`Self::dismiss`], and first ask the device to cancel the job when it has one that is ours
+    /// (the backend must support cancel). `Err` is the cancel that did not work; the row is
+    /// dismissed either way, because the person asked to be rid of it.
+    pub fn dismiss_and_cancel(&mut self, registry: &Registry) -> Result<(), PrintError> {
+        let result = match (self.state, self.remote.clone()) {
+            (LifecycleState::Terminal(_), _) => return Ok(()),
+            (LifecycleState::Accepted | LifecycleState::Watching(_) | LifecycleState::NeedsAttention, Some(remote)) => {
+                let result = registry.cancel_job(&remote);
+                match &result {
+                    Ok(()) => self.note("cancel requested before dismissing"),
+                    Err(error) => self.note(format!("cancel failed: {error}; dismissing anyway")),
+                }
+                result
+            }
+            _ => Ok(()),
+        };
+        self.dismiss();
+        result
+    }
+
+    /// The wait after a send whose outcome is unknown before a resend is advised.
+    fn reconcile_window(&self) -> Duration {
+        let st = self.config.staleness;
+        if !st.enabled {
+            return Duration::ZERO;
+        }
+        self.info.and_then(|info| info.open_job_timeout).unwrap_or(st.reconcile_after)
+    }
+
+    /// How much longer to wait before a resend is advised after a send whose outcome is unknown
+    /// (the device's own window to give up on the half-made job, see
+    /// [`crate::backends::Backend::open_job_timeout`]). `None` when not waiting.
+    pub fn reconcile_wait(&self) -> Option<Duration> {
+        if self.state != LifecycleState::NeedsAttention || self.stale.is_some() {
+            return None;
+        }
+        let since = self.unknown_since?;
+        let left = since.saturating_add(self.reconcile_window()).saturating_sub(self.now());
+        (!left.is_zero()).then_some(left)
     }
 
     fn step(&self, changed: bool) -> Advance {
@@ -893,6 +1199,7 @@ impl PrintJob {
                 }
             }
             LifecycleState::Accepted | LifecycleState::Watching(_) => self.follow(registry),
+            LifecycleState::NeedsAttention if self.stale.is_some() => self.follow(registry),
             LifecycleState::NeedsAttention | LifecycleState::Terminal(_) => self.step(false),
         }
     }
@@ -1005,10 +1312,12 @@ impl PrintJob {
         for warning in &submitted.warnings {
             self.warn(warning.clone());
         }
+        let policy = self.watch_policy(submitted.poll_interval);
         self.watch = match (&submitted.job, submitted.watch.is_watchable()) {
-            (Some(_), true) => JobWatch::for_submitted(&submitted, self.config.watch).map(|watch| watch.with_clock(Arc::clone(&self.clock))),
+            (Some(_), true) => JobWatch::for_submitted(&submitted, policy).map(|watch| watch.with_clock(Arc::clone(&self.clock))),
             _ => None,
         };
+        self.start_following(submitted.job.is_some() && submitted.watch.is_watchable(), now);
         let changed = self.set_state(LifecycleState::Accepted);
         match submitted.status {
             Some(status) => {
@@ -1017,6 +1326,18 @@ impl PrintJob {
             }
             None => self.step(changed),
         }
+    }
+
+    /// A remote job was accepted (or adopted): the staleness clocks start now.
+    fn start_following(&mut self, watchable: bool, now: Duration) {
+        self.watchable = watchable;
+        self.accepted_at = Some(now);
+        self.last_news = None;
+        self.last_news_wall = None;
+        self.changed_at = Some(now);
+        self.stale = None;
+        self.probe_at = None;
+        self.unknown_since = None;
     }
 
     fn fail_attempt(&mut self, error: PrintError) -> Advance {
@@ -1035,6 +1356,7 @@ impl PrintJob {
             LifecycleState::Terminal(Outcome::Cancelled)
         } else if error.outcome_unknown() {
             // The request may have arrived: never resent on its own.
+            self.unknown_since = Some(now);
             LifecycleState::NeedsAttention
         } else {
             self.auto_failures = self.auto_failures.saturating_add(1);
@@ -1053,14 +1375,54 @@ impl PrintJob {
     }
 
     fn follow(&mut self, registry: &Registry) -> Advance {
+        let mut changed = self.check_staleness();
+        if self.state.is_terminal() {
+            return self.step(changed);
+        }
+        if self.probing() {
+            changed |= self.probe(registry).changed;
+            changed |= self.check_staleness();
+            return self.step(changed);
+        }
         let Some(mut watch) = self.watch.take() else {
-            return self.step(false);
+            return self.step(changed);
         };
         let step = watch.tick(registry);
         if !matches!(step, WatchStep::Done(_)) {
             self.watch = Some(watch);
         }
-        self.handle_step(step)
+        changed |= self.handle_step(step).changed;
+        changed |= self.check_staleness();
+        self.step(changed)
+    }
+
+    /// One status read on the job's own schedule: used while the print needs attention for lack of
+    /// news, and after a watch gave up. A good read ends the silence; a bad one is only noted.
+    fn probe(&mut self, registry: &Registry) -> Advance {
+        let now = self.now();
+        if self.probe_at.is_some_and(|at| now < at) {
+            return self.step(false);
+        }
+        self.probe_at = Some(now.saturating_add(self.config.staleness.probe_interval));
+        let Some(remote) = self.remote.clone() else {
+            return self.step(false);
+        };
+        let policy = self.watch_policy(None);
+        let mut watch = match registry.job_watch(&remote, policy) {
+            Ok(watch) => watch.with_clock(Arc::clone(&self.clock)).with_expected(self.expected),
+            Err(error) => {
+                self.note(format!("cannot follow the job: {error}"));
+                return self.step(false);
+            }
+        };
+        let step = watch.poll_status(registry);
+        let keep = matches!(step, WatchStep::Update(_));
+        let advance = self.handle_step(step);
+        if keep && self.stale.is_none() && !self.state.is_terminal() {
+            self.watch = Some(watch);
+            self.probe_at = None;
+        }
+        advance
     }
 
     fn handle_step(&mut self, step: WatchStep) -> Advance {
@@ -1095,6 +1457,14 @@ impl PrintJob {
             WatchOutcome::NoStatus => {
                 self.set_state(LifecycleState::Accepted);
             }
+            WatchOutcome::TimedOut { .. } if self.config.staleness.enabled && self.watchable => {
+                self.note("the watch ran out; probing on");
+                self.probe_at = Some(self.now().saturating_add(self.config.staleness.probe_interval));
+            }
+            WatchOutcome::Failed(error) if self.config.staleness.enabled && self.watchable => {
+                self.note(format!("status reads keep failing ({error}); probing on"));
+                self.probe_at = Some(self.now().saturating_add(self.config.staleness.probe_interval));
+            }
             WatchOutcome::TimedOut { .. } => {
                 self.warn("stopped following the job; it may still be running at the printer");
                 self.set_state(LifecycleState::Accepted);
@@ -1113,6 +1483,12 @@ impl PrintJob {
     fn absorb_status(&mut self, mut status: JobStatus) -> bool {
         self.expected.apply(&mut status);
         let new_reading = !self.last_printer.as_ref().is_some_and(|last| last.same_as(&status));
+        let now = self.now();
+        self.last_news = Some(now);
+        self.last_news_wall = Some((self.wall)());
+        if new_reading {
+            self.changed_at = Some(now);
+        }
         if new_reading {
             self.record(TrailEvent::Printer { state: status.state, reasons: status.reasons.clone(), sheets_done: status.sheets_done });
         }
@@ -1144,6 +1520,13 @@ impl PrintJob {
             self.end_remote(state, outcome);
             return true;
         }
+        if self.stale == Some(StaleReason::Stalled) && !new_reading {
+            // Still the same thing: the print keeps needing a look.
+            return false;
+        }
+        if self.stale.take().is_some() {
+            self.note("news again; following the job");
+        }
         let target = match state {
             JobState::Unknown if !matches!(self.state, LifecycleState::Watching(_)) => LifecycleState::Accepted,
             JobState::Unknown => self.state,
@@ -1161,13 +1544,15 @@ impl PrintJob {
             self.note("the job was cancelled at the printer");
         }
         self.watch = None;
+        self.stale = None;
         self.set_state(LifecycleState::Terminal(outcome));
     }
 
     /// Read the job's status now, ignoring the schedule (a person pressed Refresh). Resumes a watch
     /// that stopped (timed out or failed). Does nothing in other states.
     pub fn refresh(&mut self, registry: &Registry) -> Advance {
-        if !matches!(self.state, LifecycleState::Accepted | LifecycleState::Watching(_)) {
+        let stale_attention = self.state == LifecycleState::NeedsAttention && self.stale.is_some();
+        if !matches!(self.state, LifecycleState::Accepted | LifecycleState::Watching(_)) && !stale_attention {
             return self.step(false);
         }
         let Some(remote) = self.remote.clone() else {
@@ -1175,7 +1560,7 @@ impl PrintJob {
         };
         let mut watch = match self.watch.take() {
             Some(watch) => watch,
-            None => match registry.job_watch(&remote, self.config.watch) {
+            None => match registry.job_watch(&remote, self.watch_policy(None)) {
                 Ok(watch) => watch.with_clock(Arc::clone(&self.clock)).with_expected(self.expected),
                 Err(error) => {
                     self.note(format!("cannot follow the job: {error}"));
@@ -1187,7 +1572,12 @@ impl PrintJob {
         if !matches!(step, WatchStep::Done(_)) {
             self.watch = Some(watch);
         }
-        self.handle_step(step)
+        let advance = self.handle_step(step);
+        if self.stale.is_some() {
+            // Still no better: keep probing on the slow schedule.
+            self.watch = None;
+        }
+        advance
     }
 
     /// Cancel the print, in whatever state it is (see `docs/job-tracking.md`, section 6). Before the
@@ -1205,6 +1595,7 @@ impl PrintJob {
                 Ok(())
             }
             LifecycleState::Accepted | LifecycleState::Watching(_) => self.cancel_remote(registry),
+            LifecycleState::NeedsAttention if self.stale.is_some() && self.remote.is_some() => self.cancel_remote(registry),
             LifecycleState::NeedsAttention => self.cancel_unknown(registry),
         }
     }
@@ -1330,7 +1721,8 @@ impl PrintJob {
         self.reconciled = None;
         self.remote = Some(job.clone());
         self.watch =
-            registry.job_watch(job, self.config.watch).ok().map(|watch| watch.with_clock(Arc::clone(&self.clock)).with_expected(self.expected));
+            registry.job_watch(job, self.watch_policy(None)).ok().map(|watch| watch.with_clock(Arc::clone(&self.clock)).with_expected(self.expected));
+        self.start_following(self.watch.is_some(), now);
         self.set_state(LifecycleState::Accepted);
         let mut status = JobStatus::new(found.state);
         status.reasons = found.reasons;
@@ -1351,8 +1743,14 @@ impl PrintJob {
                 self.set_state(LifecycleState::RetryScheduled { attempt, next_at: now });
                 Ok(())
             }
-            LifecycleState::Terminal(Outcome::Failed | Outcome::Aborted | Outcome::Cancelled) | LifecycleState::NeedsAttention => {
+            LifecycleState::Terminal(Outcome::Failed | Outcome::Aborted | Outcome::Cancelled | Outcome::Abandoned)
+            | LifecycleState::NeedsAttention => {
                 self.note("retry requested");
+                self.stale = None;
+                self.accepted_at = None;
+                self.probe_at = None;
+                self.unknown_since = None;
+                self.watchable = false;
                 self.cancel = CancelToken::new();
                 self.cancel_requested = false;
                 self.ended_with_errors = false;
@@ -1385,13 +1783,18 @@ impl PrintJob {
                 }
             }
             LifecycleState::RetryScheduled { next_at, .. } => RetryAdvice::RetryAfter(next_at.saturating_sub(self.now())),
+            LifecycleState::NeedsAttention if self.stale.is_some() => RetryAdvice::CheckDeviceFirst,
             LifecycleState::NeedsAttention => match &self.reconciled {
+                // The device gave up on a half-made job on its own: nothing will print.
+                Some(Reconciled::Found(job)) if job.state == JobState::Aborted && gave_up_waiting(&job.reasons) => RetryAdvice::RetryNow,
                 Some(Reconciled::Found(_)) => RetryAdvice::DoNotRetry,
-                Some(Reconciled::NotFound) if self.info.is_some_and(|info| info.query_caps.history) => RetryAdvice::RetryNow,
+                Some(Reconciled::NotFound) if self.info.is_some_and(|info| info.query_caps.history) && self.reconcile_wait().is_none() => {
+                    RetryAdvice::RetryNow
+                }
                 _ => RetryAdvice::CheckDeviceFirst,
             },
             LifecycleState::Terminal(Outcome::Completed | Outcome::CompletedWithWarnings | Outcome::Cancelled) => RetryAdvice::DoNotRetry,
-            LifecycleState::Terminal(Outcome::Aborted) => RetryAdvice::CheckDeviceFirst,
+            LifecycleState::Terminal(Outcome::Aborted | Outcome::Abandoned) => RetryAdvice::CheckDeviceFirst,
             LifecycleState::Terminal(Outcome::Failed) => match &self.last_error {
                 _ if self.ended_with_errors => RetryAdvice::CheckDeviceFirst,
                 Some(error) if error.is_retryable() && error.safety.allows_automatic_retry() => match error.retry_after {
@@ -1456,6 +1859,8 @@ impl PrintJob {
             document: self.request.document,
             conversion: self.request.conversion.clone(),
             advice: self.retry_advice(),
+            stale: self.stale,
+            last_news: self.last_news_wall.and_then(Timestamp::from_system_time),
             reconciled: self.reconciled.clone(),
             native: has_native.then_some(native),
             elapsed: self.now().saturating_sub(self.created),
@@ -1466,6 +1871,15 @@ impl PrintJob {
             trail_dropped: self.trail_dropped,
         }
     }
+}
+
+/// Whether a job's reasons say the device ended a half-made job on its own (WS-Print
+/// `DocumentTimeoutError`; IPP `submission-interrupted`, `aborted-by-system`, `document-timeout`).
+fn gave_up_waiting(reasons: &[String]) -> bool {
+    reasons.iter().any(|reason| {
+        let reason = reason.to_ascii_lowercase();
+        reason.contains("timeout") || reason.contains("time-out") || reason.contains("submission-interrupted") || reason.contains("aborted-by-system")
+    })
 }
 
 fn kind_name(kind: ErrorKind) -> &'static str {

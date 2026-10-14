@@ -47,19 +47,20 @@ loop {
 | `Accepted` | the printer took the document; no status is being followed (the backend cannot report, the watch ended, or it has not been polled yet) | poll, `refresh`, end |
 | `Watching(JobState)` | following the remote job; carries the printer's last reported state | the printer's end state |
 | `RetryScheduled { attempt, next_at }` | a safe, transient failure; the next attempt is due at `next_at` (on the job's clock) | `advance` once due, `retry`, `cancel` |
-| `NeedsAttention` | the outcome of a send is unknown (the request may have arrived). Nothing is resent. | `reconcile`, then `accept` or `retry`, or `cancel` |
+| `NeedsAttention` | the outcome of a send is unknown (the request may have arrived), or an accepted job is not heard from or stalled (`Snapshot::stale`, section 9). Nothing is resent. | `reconcile`, then `accept` or `retry`, or `cancel`; for silence and stalls, news from the printer, `dismiss` or `cancel` |
 | `Terminal(Completed)` | printed | none |
 | `Terminal(CompletedWithWarnings)` | printed, with a printer warning (`JobStatus::warnings` on a `Completed` reading), or the printer forgot the job so it most likely printed | none |
 | `Terminal(Failed)` | refused, retries used up, a non-transient error, or completed with errors | manual `retry` |
 | `Terminal(Cancelled)` | we cancelled it, or someone cancelled it at the printer | manual `retry` |
 | `Terminal(Aborted)` | the printer gave up on it | manual `retry` |
+| `Terminal(Abandoned)` | no outcome was heard before the ceiling, or a person dismissed the row; **not a failure**, the printer may still print it (section 9) | manual `retry` |
 
 A `Terminal` state is final for *this attempt chain*; `retry()` is the explicit act of starting a new
 attempt, which keeps the history. `NeedsAttention` is deliberately a state of its own and not a kind of
 failure: the print may be on its way.
 
 For a UI the state is also reduced to `SimpleState` (Preparing, Sending, Queued, Held, Printing,
-PrinterNeedsAttention, Retrying, NeedsAttention, Sent, Done, DoneWithWarnings, Failed, Cancelled).
+PrinterNeedsAttention, Retrying, NeedsAttention, Sent, Done, DoneWithWarnings, Failed, Cancelled, Abandoned).
 
 ## 2. What it remembers
 
@@ -116,7 +117,7 @@ component can list prints and scans. No I/O; it is the snapshot reshaped.
 | `id` | the current remote job's `JobId` once a document was accepted; before that, and after a manual `retry()` cleared the remote job, a local id `local:print-<n>` |
 | `kind` | `JobKind::Print` |
 | `title` | the title the app gave, **without** the tag suffix (the tag is its own field) |
-| `state` | `Preparing`, `Submitting`, `RetryScheduled` -> `Pending`; `Accepted` (nothing followed) -> `Unknown`; `Watching(s)` -> `s`; `NeedsAttention` (outcome of a send unknown) -> `NeedsAttention`; `Terminal(Completed or CompletedWithWarnings)` -> `Completed`; `Cancelled` -> `Cancelled`; `Aborted` -> `Aborted`; `Failed` -> `CompletedWithErrors` when the printer completed the job with errors, otherwise `Aborted` |
+| `state` | `Preparing`, `Submitting`, `RetryScheduled` -> `Pending`; `Accepted` (nothing followed) -> `Unknown`; `Watching(s)` -> `s`; `NeedsAttention` (outcome of a send unknown) -> `NeedsAttention`; `Terminal(Completed or CompletedWithWarnings)` -> `Completed`; `Cancelled` -> `Cancelled`; `Aborted` -> `Aborted`; `Abandoned` -> `Unknown` (with the reason `abandoned-no-outcome`); `Failed` -> `CompletedWithErrors` when the printer completed the job with errors, otherwise `Aborted` |
 | `reasons` | the printer's reasons, then the print's warnings (so "completed with warnings" shows here) |
 | `progress` | `Progress { done: sheets done, total: sheets total }`; pages when no sheets are reported; `None` before any reading. Expected totals from the options fill a missing total |
 | `times` | `created` (wall clock at creation), `started` (wall clock of the first send), `finished` (creation plus the job clock's offset at the ending; cleared by a manual `retry()`) |
@@ -293,7 +294,46 @@ adapters do in this change.
 
 * No persistence: a `PrintJob` lives in the process that made it. The types are plain data and do
   not implement `serde` traits; adding that behind a feature later does not change them.
-* No threads or timers: the caller advances the job.
+* No threads or timers: the caller advances the job (the staleness rules run inside `advance`).
 * No IPP client, no CUPS or Windows-spooler listing (section 7: not testable here).
 * No change to the older `Registry::submit` / `submit_job` / `JobWatch` behaviour; a `PrintJob` is
   built on them.
+
+## 9. Timeouts: a job that is accepted and then not heard from
+
+Before this section a failed or timed-out watch left the print `Accepted`, "settled and untracked", for
+ever. `PrintJobConfig::staleness` ([`Staleness`]) replaces that with rules on the job's clock. None of
+them is a failure and **none resends**: a device that goes quiet may still print the job.
+
+| Rule | Default | Effect |
+|---|---|---|
+| poll gap | 2 s growing to 15 s while nothing changes (`poll_initial`, `poll_cap`) | a backend's recommended interval and the config's watch interval win over `poll_initial` |
+| `silence_after` | 3 min without one successful status read | `NeedsAttention`, `Snapshot::stale == NoNews`, reason `no-news-since:<unix seconds of the last good read>` (`unknown` if none) in `view()`, advice `CheckDeviceFirst` |
+| `probe_interval` | 30 s | while `NeedsAttention` for lack of news or a stall, one status read per interval; a good read returns the print to `Watching` by itself |
+| `stall_after_processing` | 10 min with a completely unchanged reading (`JobStatus::same_as`: state, reasons, warnings, sheet and page counters) while `Processing` | `NeedsAttention`, `Stalled`, reason `stalled`; any change in the reading ends it |
+| `stall_after_pending` | 30 min unchanged while `Pending` (queued behind other jobs) | the same |
+| held, stopped | never | an explicit hold has no timeout; jams and paper-out arrive at once in the printer's own reasons |
+| `ceiling` | 3 h from acceptance without a terminal state | `Terminal(Abandoned)`, advice `CheckDeviceFirst`; `view()` has `JobState::Unknown` and the reason `abandoned-no-outcome` (`craft-job` has no abandoned state) |
+| `dismiss()` / `dismiss_and_cancel(&Registry)` | by a person | the same end as the ceiling, earlier; the second first asks the device to cancel the job if the print has one (the cancel error is returned, the row is dismissed anyway) |
+| `reconcile_after` | 65 s, or the backend's `Backend::open_job_timeout` (WS-Print 65 s; the IPP-like fake 240 s) | after a send whose outcome is unknown, `retry_advice()` stays `CheckDeviceFirst` until the device has had its own window to end the half-made job; `PrintJob::reconcile_wait()` says how long is left |
+
+`Staleness::disabled()` switches all of it off, including the wait after a lost send: a failed watch then
+leaves the print `Accepted` as before (`refresh` resumes it).
+
+**Backends without status** (`watch_support() == None`, for example a fire-and-forget spooler): nothing is
+polled and nothing times out. The print is `Accepted`, already settled (`SimpleState::Sent`, `JobState::Unknown`
+in `view()`), which is the same "accepted, outcome not reported" meaning as the IPP `queued-in-device`
+reason. It is not made terminal, so that a backend that later gains status needs no change here.
+
+**After a lost send** the device repairs itself, which is why a resend is not advised at once. A WS-Print
+printer aborts a job that got no document within 60 s of `CreatePrintJob` (`DocumentTimeoutError`). An IPP
+printer waits `multiple-operation-time-out` (RFC 8011 section 5.4.31: it SHOULD be 60 to 240 s) and then ends
+the job with `submission-interrupted` or `aborted-by-system`. A reconcile that finds the job `Aborted` with such a
+reason advises `RetryNow`; one that finds it `Processing` or `Completed` leaves `DoNotRetry` for `accept`.
+
+**Sources, and what is judgement.** CUPS `MaxJobTime` defaults to 10800 s (3 h): the ceiling. RFC 8011
+section 5.3.7.2 requires a printer to keep finished jobs for at least 60 s, so the 15 s poll cap cannot
+miss a short job. `queued-in-device`, `submission-interrupted` and `aborted-by-system` are `job-state-reasons`
+keywords (RFC 8011 section 5.3.8). The 3 min, 30 s, 10 min and 30 min figures are judgement, not protocol
+numbers; they are fields so that an app can change them. The Windows spooler's own timeouts were not
+verified.

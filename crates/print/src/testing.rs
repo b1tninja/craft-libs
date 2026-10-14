@@ -113,6 +113,7 @@ struct Config {
     user: String,
     created_at: Arc<dyn Fn() -> SystemTime + Send + Sync>,
     title_max: Option<usize>,
+    open_job_timeout: Option<Duration>,
 }
 
 /// A configurable [`Backend`] for tests; see the [module documentation](self). Build it with
@@ -162,6 +163,7 @@ impl FakeBackend {
             user: "fake-user".into(),
             created_at: Arc::new(SystemTime::now),
             title_max: None,
+            open_job_timeout: None,
         };
         Self { config: Arc::new(config), recorded: Arc::default() }
     }
@@ -183,12 +185,20 @@ impl FakeBackend {
             .with_watch(WatchSupport::Poll)
             .with_tag_support(TagSupport::Carried(TagPlacement::NativeAttribute))
             .with_query_caps(JobQueryCaps::ALL)
+            .with_open_job_timeout(Duration::from_secs(240))
     }
 
     fn configured(mut self, change: impl FnOnce(&mut Config)) -> Self {
         // Configuration is set before the fake is cloned; if it was cloned, the clones keep the old one.
         change(Arc::make_mut(&mut self.config));
         self
+    }
+
+    /// What [`Backend::open_job_timeout`] answers (default `None`; [`Self::ipp_like`] uses 240
+    /// seconds, the top of the range an IPP printer waits for the rest of a request).
+    #[must_use]
+    pub fn with_open_job_timeout(self, timeout: Duration) -> Self {
+        self.configured(|c| c.open_job_timeout = Some(timeout))
     }
 
     /// [`BackendClass::Network`] fakes need a [`crate::UserConfirmed`] on every request.
@@ -373,6 +383,24 @@ impl FakeBackend {
         lock(&self.recorded).jobs.push(job);
     }
 
+    /// Replace the answers of `job_status` while the fake is in use (see
+    /// [`Self::with_status_script`]); every clone sees the change.
+    pub fn set_status_script(&self, script: Vec<Result<JobStatus, PrintError>>) {
+        lock(&self.recorded).script = script;
+    }
+
+    /// Set the reasons of a job in the fake's queue (by native handle); `false` if there is none.
+    pub fn set_remote_reasons(&self, native: &str, reasons: Vec<String>) -> bool {
+        let mut recorded = lock(&self.recorded);
+        match recorded.jobs.iter_mut().find(|job| job.id.native() == native) {
+            Some(job) => {
+                job.reasons = reasons;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Change the state of a job in the fake's queue (by native handle); `false` if there is none.
     pub fn set_remote_state(&self, native: &str, state: JobState) -> bool {
         let mut recorded = lock(&self.recorded);
@@ -533,6 +561,10 @@ impl Backend for FakeBackend {
             WatchSupport::Poll => Some(Duration::from_secs(2)),
             WatchSupport::Events => Some(Duration::from_secs(15)),
         })
+    }
+
+    fn open_job_timeout(&self) -> Option<Duration> {
+        self.config.open_job_timeout
     }
 
     fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {

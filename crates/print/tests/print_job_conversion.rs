@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use craft_print::testing::{FakeBackend, SubmitStep};
 use craft_print::{
-    Document, DocumentConverter, DocumentFormat, ErrorKind, FnSource, Job, JobOptions, JobState, LifecycleState, ManualClock, OwnedDocument,
-    PrintError, PrintJob, Registry, Resolution, RetrySafety, UserConfirmed,
+    Document, DocumentConverter, DocumentFormat, ErrorKind, FnSource, Job, JobOptions, JobState, JobStatus, LifecycleState, ManualClock, Outcome,
+    OwnedDocument, PrintError, PrintJob, Registry, Resolution, RetrySafety, UserConfirmed,
 };
 
 const PDF: &[u8] = b"%PDF-1.7";
@@ -34,6 +34,7 @@ impl DocumentConverter for ToRaster {
 fn raster_only() -> FakeBackend {
     FakeBackend::ipp_like("net")
         .with_printer("p1", true)
+        .with_status_script(vec![Ok(JobStatus::new(JobState::Completed))])
         .with_formats(vec![DocumentFormat::PwgRaster])
         .with_formats_per_printer(true)
         .with_printer_formats(vec![DocumentFormat::PwgRaster])
@@ -77,7 +78,7 @@ fn a_tracked_print_is_converted_for_the_printer_and_the_tag_travels_once() {
         .with_consent(UserConfirmed::interactive());
     let tag = *job.tag();
     drive(&mut job, &registry, &clock);
-    assert_eq!(job.state(), LifecycleState::Accepted);
+    assert_eq!(job.state(), LifecycleState::Terminal(Outcome::Completed));
 
     let sent = backend.submissions();
     assert_eq!(sent.len(), 1);
@@ -100,7 +101,7 @@ fn a_tracked_print_is_converted_for_the_printer_and_the_tag_travels_once() {
     let document = view.documents.first().unwrap();
     assert_eq!((document.format.as_deref(), document.bytes), (Some("pwg-raster"), Some(8)));
     assert_eq!(document.pages, Some(3));
-    assert_eq!(view.state, JobState::Unknown, "accepted, and the fake reports no state");
+    assert_eq!(view.state, JobState::Completed);
     assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
@@ -121,7 +122,7 @@ fn a_retry_after_a_safe_failure_reads_the_source_and_converts_again() {
     assert!(first.next_in.is_some(), "a Safe failure is retried on its own");
     assert_eq!(job.snapshot().conversion, None);
     drive(&mut job, &registry, &clock);
-    assert_eq!(job.state(), LifecycleState::Accepted);
+    assert_eq!(job.state(), LifecycleState::Terminal(Outcome::Completed));
     assert_eq!(reads.load(Ordering::SeqCst), 2, "the source is read for every attempt");
     assert_eq!(converter.calls.load(Ordering::SeqCst), 2, "and converted again");
     assert_eq!(job.snapshot().attempt, 2);
@@ -142,7 +143,7 @@ mod wsd {
 
     use craft_print::wsd::WsdBackend;
     use craft_print::wsd::testing::{FakeConfig, FakePrinter, MemTransport};
-    use craft_print::{BytesSource, Outcome, Quality};
+    use craft_print::{BytesSource, Quality};
 
     use super::*;
 

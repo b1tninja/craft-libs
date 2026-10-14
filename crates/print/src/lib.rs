@@ -83,7 +83,7 @@ pub use retry::{CANCEL_SLICE, Clock, JitterExt, ManualClock, Phase, SystemClock,
 pub use tag::{TagExt, TagPolicy, TagSupportExt};
 pub use tracked::{
     Advance, Attempt, AttemptError, AttemptOutcome, BytesSource, DocumentInfo, DocumentSource, FnSource, JobProgress, LifecycleState, LocalJobId,
-    Outcome, PrintJob, PrintJobConfig, RequestRecord, SimpleState, Snapshot, TrailEntry, TrailEvent,
+    Outcome, PrintJob, PrintJobConfig, RequestRecord, SimpleState, Snapshot, StaleReason, Staleness, TrailEntry, TrailEvent,
 };
 pub use watch::{JobSource, JobWatch, WaitPolicy, WatchOutcome, WatchStep, wait_for_job};
 

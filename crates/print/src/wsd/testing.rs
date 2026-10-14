@@ -2,7 +2,7 @@
 //! (together with `wsd`); not for production use, and it has no effect on default builds.
 //!
 //! The protocol logic is [`FakePrinter::handle`], [`MemTransport`] is a socket-free
-//! [`Transport`](super::adapter::Transport) over it, and [`printer_server`] puts it behind the
+//! [`Transport`] over it, and [`printer_server`] puts it behind the
 //! loopback HTTP server of `craft-wsd`'s `testing` feature (127.0.0.1, ephemeral port). It
 //! implements just enough of the service to exercise a client: printer elements (description,
 //! status, capabilities), create / send / status / cancel / history of jobs, with scripted endings

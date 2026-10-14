@@ -1,7 +1,7 @@
 //! Request bodies and reply readers for the operations, one function each.
 //!
 //! Builders return the fragment that goes inside `<s:Body>`; readers take the response element
-//! that [`crate::envelope::read_reply`] hands over. Readers are lenient about vendor additions
+//! that `craft_wsd::envelope::read_reply` hands over. Readers are lenient about vendor additions
 //! (unknown elements are skipped) and strict about what they need (a missing `JobId` is an error).
 //! Every list they build is capped.
 

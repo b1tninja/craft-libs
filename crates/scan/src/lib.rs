@@ -32,10 +32,15 @@ mod contract;
 pub mod trace;
 
 pub use backend::{
-    Backend, BackendError, Listing, RegisterError, Registry, acquire, backend_names, diagnostic_dump, global, namespaced_id, register,
-    scanner_details, scanner_list, scanners, split_id, status, supported,
+    Backend, BackendError, Listing, RegisterError, Registry, acquire, backend_names, diagnostic_dump, global, register, scanner_details,
+    scanner_list, scanners, status, supported,
 };
-pub use contract::{Compression, ErrorContext, ImageFormat, ListDetails, ParseWireError, Phase, Recovery, ScanErrorInfo, contract_json, recovery};
+pub use contract::{
+    Compression, ErrorContext, ImageFormat, ListDetails, NativeCodeExt, ParseWireError, Phase, Recovery, ScanErrorInfo, contract_json, recovery,
+};
+/// The vocabulary shared with the print side lives in craft-job; these are the same names and wire formats this
+/// crate has always exported (`"<backend>:<native id>"`, the native error code).
+pub use craft_job::{HRESULT_DOMAIN, NativeCode, namespaced_id, split_id};
 
 /// Where the page sits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -1042,34 +1047,6 @@ impl Default for ScanSettings {
             cancel: None,
             progress: None,
         }
-    }
-}
-
-/// A backend's own error code, kept beside the neutral kind. The core never interprets it: it only
-/// carries it to the app, which may show or log it.
-///
-/// `domain` says which numbering `code` belongs to: `"hresult"` (Windows WIA, the code is the
-/// unsigned HRESULT), `"sane"` (`SANE_STATUS_*`), `"http"` (eSCL status codes), `"nserror"`
-/// (macOS), or any other short lowercase name a backend chooses. `name` is the symbolic name when
-/// the backend knows one (`WIA_ERROR_BUSY`, `SANE_STATUS_NO_DOCS`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NativeCode {
-    pub domain: &'static str,
-    pub code: i64,
-    pub name: Option<&'static str>,
-}
-
-/// The [`NativeCode::domain`] of a Windows HRESULT.
-pub const HRESULT_DOMAIN: &str = "hresult";
-
-impl NativeCode {
-    pub const fn new(domain: &'static str, code: i64, name: Option<&'static str>) -> Self {
-        Self { domain, code, name }
-    }
-
-    /// A Windows HRESULT (domain `"hresult"`).
-    pub const fn hresult(code: u32, name: Option<&'static str>) -> Self {
-        Self { domain: HRESULT_DOMAIN, code: code as i64, name }
     }
 }
 

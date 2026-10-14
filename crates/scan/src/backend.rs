@@ -50,6 +50,8 @@
 
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
+use craft_job::{BackendName, namespaced_id, split_id};
+
 use crate::{Acquired, HandlingStatus, ScanError, ScanSettings, Scanner, ScannerRef};
 #[cfg(doc)]
 use crate::{InterruptKind, NativeCode, Page};
@@ -130,18 +132,10 @@ pub struct Registry {
     backends: RwLock<Vec<Arc<dyn Backend>>>,
 }
 
+/// A registry name is valid when craft-job accepts it as a [`BackendName`]: one or more of `a-z`, `0-9`, `-`
+/// and `_`. The empty name is refused by both.
 fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-}
-
-/// `"<backend>:<native id>"`.
-pub fn namespaced_id(backend: &str, native_id: &str) -> String {
-    format!("{backend}:{native_id}")
-}
-
-/// Split a namespaced id at its first colon.
-pub fn split_id(id: &str) -> Option<(&str, &str)> {
-    id.split_once(':')
+    BackendName::new(name).is_ok()
 }
 
 impl Registry {

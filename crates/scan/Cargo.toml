@@ -11,6 +11,7 @@ description = "Scanner settings, errors, page handling and the acquire contract 
 workspace = true
 
 [dependencies]
+craft-job = { workspace = true }
 thiserror = "2"
 log = "0.4"
 # Decoders for JPEG, PNG, TIFF and the BMP forms bw.rs does not read itself (software 1-bit).

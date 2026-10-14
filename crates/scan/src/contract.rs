@@ -472,7 +472,7 @@ impl ScanErrorInfo {
     /// The Windows HRESULT, when `native` is in the `"hresult"` domain. For the apps whose CLI and
     /// Python bindings have always had an `hresult` field; other domains answer `None`.
     pub fn hresult(&self) -> Option<u32> {
-        self.native.as_ref().and_then(NativeCode::as_hresult)
+        self.native.as_ref().and_then(NativeCodeExt::as_hresult)
     }
 
     /// The symbolic name of [`Self::hresult`] (`WIA_ERROR_BUSY`), only for the `"hresult"` domain.
@@ -486,9 +486,14 @@ impl ScanErrorInfo {
     }
 }
 
-impl NativeCode {
+/// What craft-scan adds to [`NativeCode`] (which lives in craft-job, so it cannot have inherent methods here).
+pub trait NativeCodeExt {
     /// The code as an unsigned HRESULT, when the domain is `"hresult"` and it fits.
-    pub fn as_hresult(&self) -> Option<u32> {
+    fn as_hresult(&self) -> Option<u32>;
+}
+
+impl NativeCodeExt for NativeCode {
+    fn as_hresult(&self) -> Option<u32> {
         if self.domain == HRESULT_DOMAIN { u32::try_from(self.code).ok() } else { None }
     }
 }

@@ -517,6 +517,11 @@ pub struct Datagram {
 }
 
 /// The datagram I/O the driver needs. Implementations own the socket; there is none in this crate.
+///
+/// Any platform's socket layer (or an in-memory one) can implement it. Failures are reported with
+/// [`Error::transport`] / [`Error::transport_at`] so the caller never parses text; an IPv6
+/// link-local peer keeps its scope id in the `SocketAddr` of [`Datagram::from`] and
+/// [`Destination::Unicast`], which the implementation can use to reply on the right interface.
 pub trait DiscoverySocket {
     /// Send one datagram.
     fn send(&self, to: &Destination, payload: &[u8]) -> Result<()>;
@@ -846,6 +851,21 @@ pub mod fake {
 mod tests {
     use super::fake::{FakeResponder, FakeSocket};
     use super::*;
+
+    #[test]
+    fn a_link_local_scope_id_survives_destination_and_datagram() {
+        use std::net::{Ipv6Addr, SocketAddrV6};
+        let addr = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 3702, 0, 7));
+        match Destination::unicast(addr) {
+            Ok(Destination::Unicast(SocketAddr::V6(v6))) => assert_eq!(v6.scope_id(), 7),
+            other => panic!("{other:?}"),
+        }
+        let d = Datagram { from: addr, payload: Vec::new() };
+        assert!(matches!(d.from, SocketAddr::V6(v6) if v6.scope_id() == 7));
+        // A public IPv6 address is still refused, scope id or not.
+        let public = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 3702, 0, 7));
+        assert!(matches!(Destination::unicast(public), Err(Error::Policy(_))));
+    }
 
     fn print_dev() -> QName {
         ServiceKind::Print.descriptor().device_type_qname()

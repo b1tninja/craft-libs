@@ -6,7 +6,7 @@
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use roxmltree::Node;
 
@@ -73,13 +73,24 @@ pub struct Expect<'a> {
 /// header, correlation id or body element does not match the request is a protocol error. `E` is
 /// the caller's error type, so a service crate can read its own messages with its own errors.
 pub fn read_reply<T, E: From<Error>>(bytes: &[u8], expect: Expect<'_>, read: impl FnOnce(Node<'_, '_>) -> Result<T, E>) -> Result<T, E> {
+    read_reply_hinted(bytes, expect, None, read)
+}
+
+/// [`read_reply`] for a caller that has the HTTP reply's `Retry-After`: a fault in the body carries
+/// it ([`crate::Fault::retry_after`]).
+pub fn read_reply_hinted<T, E: From<Error>>(
+    bytes: &[u8],
+    expect: Expect<'_>,
+    retry_after: Option<Duration>,
+    read: impl FnOnce(Node<'_, '_>) -> Result<T, E>,
+) -> Result<T, E> {
     let text = xml::checked_text(bytes)?;
     let doc = xml::parse(text)?;
     let envelope = doc.root_element();
     let (body, header) = open(envelope)?;
     let payload = body.children().find(|c| c.is_element()).ok_or_else(|| Error::Protocol("the Body is empty".into()))?;
     if xml::is(payload, ns::SOAP, "Fault") {
-        return Err(Error::Fault(parse_fault(payload)).into());
+        return Err(Error::from_fault(parse_fault(payload).with_retry_after(retry_after)).into());
     }
     check_header(header, expect.action, expect.message_id)?;
     if !xml::is(payload, expect.body_ns, expect.body_local) {
@@ -92,13 +103,18 @@ pub fn read_reply<T, E: From<Error>>(bytes: &[u8], expect: Expect<'_>, read: imp
 /// Body may be empty, or hold anything but a fault, which is ignored. Faults, the action header and
 /// the correlation id are checked as for any reply.
 pub fn read_ack<E: From<Error>>(bytes: &[u8], action: &str, message_id: &str) -> Result<(), E> {
+    read_ack_hinted(bytes, action, message_id, None)
+}
+
+/// [`read_ack`] for a caller that has the HTTP reply's `Retry-After` (see [`read_reply_hinted`]).
+pub fn read_ack_hinted<E: From<Error>>(bytes: &[u8], action: &str, message_id: &str, retry_after: Option<Duration>) -> Result<(), E> {
     let text = xml::checked_text(bytes)?;
     let doc = xml::parse(text)?;
     let (body, header) = open(doc.root_element())?;
     if let Some(payload) = body.children().find(|c| c.is_element())
         && xml::is(payload, ns::SOAP, "Fault")
     {
-        return Err(Error::Fault(parse_fault(payload)).into());
+        return Err(Error::from_fault(parse_fault(payload).with_retry_after(retry_after)).into());
     }
     check_header(header, action, message_id)?;
     Ok(())

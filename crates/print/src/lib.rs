@@ -5,11 +5,17 @@
 //! with the options as a PrintTicket, all in this process (`windows.rs`): no PowerShell or other
 //! program is started, so printing works where scripts are locked down. Other platforms report
 //! that printing isn't available yet; the print-ready PDF can still be saved.
+//!
+//! The spooler is also available as a [`backends::Backend`] in a [`Registry`] that can hold other
+//! backends beside it (see the README); the functions of this crate are unchanged.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod backend;
+mod builtin;
 #[cfg(any(test, windows))]
 mod progress;
+mod registry;
 #[cfg(any(test, windows))]
 mod sheets;
 #[cfg(test)]
@@ -25,6 +31,21 @@ mod windows;
 pub mod rgb {
     pub use craft_winprint_gdi::*;
 }
+
+/// The [`backend::Backend`] trait and the neutral types a backend speaks. The crate's older
+/// `Backend` enum (the platform's built-in kind, see [`backend()`]) is unchanged.
+pub mod backends {
+    pub use crate::backend::*;
+}
+pub use backend::{
+    BackendClass, CancelToken, Document, DocumentFormat, ErrorKind, JobHint, NativeCode, PrintError, PrinterDetails, PrinterRef, PrinterState,
+    PrinterStatus, Progress, Receipt, SubmitRequest, UserConfirmed,
+};
+#[cfg(any(windows, all(unix, not(target_arch = "wasm32"))))]
+pub use builtin::SystemSpooler;
+pub use registry::{
+    BackendError, Listing, RegisterError, Registry, list_printers, namespaced_id, printer_details, register, registry, split_id, submit_to_backend,
+};
 
 /// A system spooler failure. Document permissions belong to the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]

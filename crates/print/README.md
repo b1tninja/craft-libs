@@ -13,6 +13,70 @@ imposition, marks and bleed. This crate discovers printers, exposes CUPS driver 
 opens Windows printer preferences and submits jobs with copies, collation, duplex and colour.
 `command_preview` returns diagnostics without creating files or starting a process.
 
+## Backends and the registry
+
+`submit`, `printers` and the rest of the functions above are the unchanged single-spooler API.
+Beside them the crate has a `backends::Backend` trait and a `Registry` that holds several
+backends at once (the system spooler plus, later, network protocols such as WS-Print or IPP):
+
+```rust,no_run
+use craft_print::{Document, Job, SubmitRequest};
+
+let listing = craft_print::list_printers()?;          // every backend; ids look like "cups:Office"
+for failure in &listing.errors { eprintln!("{}: {}", failure.backend, failure.error); }
+let job = Job { printer: Some("cups:Office".into()), ..Job::default() };
+let receipt = craft_print::submit_to_backend(SubmitRequest::new(Document::pdf(&pdf_bytes), job))?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+* **Built-in backend.** `SystemSpooler` is an adapter over the existing functions (`printers`,
+  `printer_options`, `submit_with_progress`), so behaviour is the same. It registers as `cups` on
+  macOS and Linux and as `spooler` on Windows (the `winprint` code stays behind `cfg(windows)`);
+  the process-wide registry (`craft_print::registry()`) holds it from the start. The older
+  `Backend` enum and `backend()` still describe that built-in kind; the trait lives at
+  `craft_print::backends::Backend`.
+* **Ids** are `"<backend>:<native id>"`; only the first colon separates the prefix. An id
+  without a registered prefix is `ErrorKind::UnknownBackend`. A job with no printer goes to the
+  only backend, or to the first one that lists a default printer.
+* **Several backends, partial failure.** `list_printers` asks every backend and returns what
+  answered plus one `BackendError` per backend that failed; it is `Err(Unsupported)` only when
+  none is registered. `Registry::register` returns `RegisterError` for a duplicate or invalid name,
+  never panics. Make a standalone `Registry::new()` for isolation or tests.
+* **Neutral errors.** `PrintError::kind()` (`ErrorKind`) and `is_retryable()` are the contract;
+  `native()` is an optional `NativeCode { domain, code, name }` with domains such as `"win32"`,
+  `"ipp"`, `"wsd-fault"` or `"cups"`. The legacy `Error::Spool` converts with its message kept.
+* **Capabilities may be unknown.** `PrinterDetails` lists formats, driver options, paper and the
+  `JobHint`s the backend honours (`honoured`); an empty list or `None` means "not published".
+  Duplex, colour, scaling and driver options in a `Job` are hints a backend may ignore, and
+  `honoured` tells a UI which ones it applies. `status` is `None` when the backend cannot say
+  before a job (CUPS and the Windows spooler report after the fact).
+* **Documents** are bytes plus a `DocumentFormat` (`Pdf`, `PwgRaster`, `PostScript`,
+  `OctetStream`). A backend declares `accepted_formats()`; the registry refuses anything else
+  with `ErrorKind::UnsupportedFormat` before calling it.
+* **Consent.** `UserConfirmed` is a marker with no policy of its own (`attest(Option<bool>)`
+  errors unless `Some(true)`; `interactive()` for a Print button the person just pressed). Local
+  backends (`BackendClass::Local`, the default) ignore it; a `BackendClass::Network` backend only
+  ever receives requests that carry one, which the registry enforces.
+
+### Writing a backend (the extension points for a network backend)
+
+* The trait is object safe and **blocking**: `Backend: Send + Sync`, stored as `Arc<dyn Backend>`.
+  There is no async runtime here; a network backend blocks on its own transport inside `submit`,
+  as the callers already submit from a worker thread. Cancellation is a cloneable `CancelToken`
+  in the `SubmitRequest` that the backend polls between round trips (the registry also checks it
+  before calling); progress is the same `(processed, sheets)` callback as `submit_with_progress`.
+* Implement `name`, `list_printers`, `printer_details` and `submit`; override `class` (network
+  backends return `BackendClass::Network`) and `accepted_formats` (for example raster or the
+  printer's own language) as needed. Use native ids; the registry adds the prefix.
+* Register once at start-up: `craft_print::register(Box::new(MyBackend::new()))?`, or on a
+  `Registry` you own. A backend that needs extra dependencies can live behind a cargo feature
+  that registers it; the base crate is complete without it.
+
+`tests/registry.rs` drives the public API with test-only fake backends (CUPS-like with options
+and no status, IPP-like with state up front, WSD-like with formats and a consent requirement, and
+one that always fails): aggregation, routing, partial failure, duplicate registration, unknown
+prefix, consent and format refusals.
+
 - **macOS/Linux:** CUPS `lpstat`, `lpoptions` and `lp`. Jobs stream through stdin. Exact-size
   sheets use `fit-to-page=false`; shrink-to-fit uses IPP `print-scaling=auto-fit`.
 - **Windows:** in this process, with no PowerShell, script or other program started, so

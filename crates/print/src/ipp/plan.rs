@@ -82,6 +82,13 @@ pub fn plan(job_name: String, document_mime: &str, job: &Job, per_job: &JobOptio
     if job.copies != 1 {
         let n = job.copies;
         let wanted = i32::try_from(n).unwrap_or(i32::MAX);
+        // Below the published minimum is a mistake in the request, not "too many": refused here and
+        // never turned into the maximum.
+        if let Some((low, _)) = printer.copies
+            && wanted < low.max(1)
+        {
+            return Err(IppError::Invalid(format!("{n} copies is below the printer's minimum of {}", low.max(1))));
+        }
         match printer.supports_copies(n) {
             Some(false) if !strict => {
                 let max = printer.copies.map_or(1, |(_, max)| max).max(1);
@@ -276,6 +283,29 @@ mod tests {
         }
         let ok = run(&Job { copies: 2, ..Job::default() }, &JobOptions::new(), true, &printer()).unwrap();
         assert!(ok.request.fidelity && ok.warnings.is_empty());
+    }
+
+    #[test]
+    fn copies_below_the_published_minimum_are_refused_and_above_the_maximum_are_lowered() {
+        let with = |range: Option<(i32, i32)>, n: u32, strict: bool| {
+            let p = PrinterAttrs { copies: range, ..PrinterAttrs::default() };
+            run(&Job { copies: n, ..Job::default() }, &JobOptions::new(), strict, &p)
+        };
+        for range in [Some((1, 99)), Some((3, 9)), None] {
+            for strict in [false, true] {
+                assert!(matches!(with(range, 0, strict), Err(IppError::Invalid(_))), "{range:?}");
+            }
+        }
+        for strict in [false, true] {
+            assert!(matches!(with(Some((3, 9)), 2, strict), Err(IppError::Invalid(_))));
+        }
+        let lowered = with(Some((1, 99)), 120, false).unwrap();
+        assert_eq!(lowered.request.attributes[0].values, [Value::Integer(99)]);
+        assert!(lowered.warnings.iter().any(|w| w.contains("lowered to 99")), "{:?}", lowered.warnings);
+        assert!(matches!(with(Some((1, 99)), 120, true), Err(IppError::Unsupported(_))));
+        let sent = with(None, 7, false).unwrap();
+        assert_eq!(sent.request.attributes[0].values, [Value::Integer(7)]);
+        assert_eq!(with(Some((3, 9)), 3, true).unwrap().request.attributes[0].values, [Value::Integer(3)]);
     }
 
     #[test]

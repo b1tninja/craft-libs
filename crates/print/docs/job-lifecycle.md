@@ -164,24 +164,25 @@ is pinned by `the_retry_table_for_every_kind` in `src/wsd/error.rs`.
 | Document could not be produced | `Failed` | no | Prepare | Safe | Safe | none |
 | Caller cancelled | `Cancelled` | no | Prepare | Safe | Safe | none |
 | Our request over the size cap | `InvalidRequest` | no | Prepare | Safe | Safe | none |
-| Connection refused, host or network unreachable | `Unavailable` | yes | Connect | Safe | Safe | none |
-| Connection attempt timed out | `Timeout` | yes | Connect | Safe | Safe | none |
-| Connection closed or reset with no reply | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | none |
-| Timeout waiting for the reply (or the caller's deadline) | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
-| Other transport failure (unrecognised text) | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | none |
-| Redirect refused | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
+| Transport `refused` or `unreachable` (stage connect) | `Unavailable` | yes | Connect | Safe | Safe | none |
+| Transport `connect_timeout` (stage connect) | `Timeout` | yes | Connect | Safe | Safe | none |
+| Transport `connection_closed` (stage reply; request, if it was being written) | `Unavailable` | yes | Reply (Request) | OutcomeUnknown | Idempotent | none |
+| Transport `timeout` (stage reply) | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
+| The caller's deadline passed | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
+| Transport `other` (a malformed exchange, an I/O error that fits no kind) | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | none |
+| Transport `redirect` (refused) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
 | HTTP 408 | `Timeout` | yes | Request | Safe | Safe | none |
-| HTTP 425 | `Busy` | yes | Request | Safe | Safe | 2 s |
-| HTTP 429 | `Busy` | yes | Request | Safe | Safe | 5 s |
-| HTTP 503 | `Unavailable` | yes | Request | Safe | Safe | 5 s |
-| HTTP 500, 502, 504 and other 5xx | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | none |
+| HTTP 425 | `Busy` | yes | Request | Safe | Safe | 2 s, or the printer's |
+| HTTP 429 | `Busy` | yes | Request | Safe | Safe | 5 s, or the printer's |
+| HTTP 503 | `Unavailable` | yes | Request | Safe | Safe | 5 s, or the printer's |
+| HTTP 500, 502, 504 and other 5xx | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | the printer's, if sent |
 | HTTP 501, 505 | `Failed` | no | Reply | Safe | Safe | none |
 | HTTP 3xx | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
 | HTTP 4xx other than 408, 425, 429 | `Failed` | no | Reply | Safe | Safe | none |
 | Unreadable or unexpected reply, reply over the cap | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
-| Fault: not accepting jobs | `Busy` | yes | Reply | Safe | Safe | 15 s |
-| Fault: temporary error | `Busy` | yes | Reply | Safe | Safe | 5 s |
-| Fault: document active | `Busy` | yes | Reply | Safe | Safe | 2 s |
+| Fault: not accepting jobs | `Busy` | yes | Reply | Safe | Safe | 15 s, or the printer's |
+| Fault: temporary error | `Busy` | yes | Reply | Safe | Safe | 5 s, or the printer's |
+| Fault: document active | `Busy` | yes | Reply | Safe | Safe | 2 s, or the printer's |
 | Fault: format or compression not supported | `UnsupportedFormat` | no | Reply | Safe | Safe | none |
 | Fault: job id not found | `NotFound` | no | Reply | Safe | Safe | none |
 | Fault: job cancelled | `Cancelled` | no | Reply | Safe | Safe | none |
@@ -194,16 +195,22 @@ For a status read the phase of every failure that reached the wire is `Poll`. A 
 answer (the printer said no), which is why it is `Safe` even for an internal error; only "the last
 document was already sent" says an earlier send did arrive.
 
-The `retry_after` values are defaults, not measurements: `craft-wsd` does not expose a `Retry-After`
-header, so a hint from the printer is not available; a printer that is not taking jobs is in a
-mode that lasts (15 s), a temporary error clears sooner (5 s), a document still being processed
-sooner still (2 s). `RetryPolicy` takes the larger of this and its own backoff.
+When the printer sends an HTTP `Retry-After` (on a status error or on the reply that carried a
+fault), `craft-wsd` parses and caps it and the backend uses it as `retry_after`, for the transient
+kinds only. Without one the values above are defaults, not measurements: a printer that is not taking
+jobs is in a mode that lasts (15 s), a temporary error clears sooner (5 s), a document still being
+processed sooner still (2 s). `RetryPolicy` takes the larger of this and its own backoff.
 
-`craft-wsd` reports transport failures as text. The backend recognises connection refusals, unreachable
-networks, connect timeouts, other timeouts and refused redirects from that text (`transport_kind`,
-unit-tested with the phrases the operating systems and the HTTP client use) and reads any other text the
-careful way (`OutcomeUnknown` for a create or send). A typed transport error in `craft-wsd` would remove
-that guesswork.
+Nothing is read from text. `craft-wsd` reports a transport failure as a typed kind (`refused`,
+`unreachable`, `connect_timeout`, `timeout`, `redirect`, `connection_closed`, `other`) and the stage
+the exchange reached (prepare, connect, request, reply). The stage gives the phase and, through
+`craft-wsd`'s own `retry_safety(idempotent)`, the safety: nothing sent (prepare, connect) is `Safe`,
+anything that may have arrived is `OutcomeUnknown` for a create or send and `Idempotent` for the
+rest. HTTP 429 and 503 are a decline and `Safe` there too. What this crate adds is the print
+service's own reading: 408 and 425 are declines, 501, 505 and the other 4xx are definite refusals, a
+SOAP fault is a definite answer, and an unclassified (`other`) failure stays transient here although
+`craft-wsd` does not call it retryable. A closed connection is a transport kind, not an error kind of
+its own. `every_transport_kind_for_every_operation` pins every kind against every operation.
 
 **Reconcile.** `WsdBackend::reconcile(printer, title)` is the answer to `OutcomeUnknown`: read
 `GetActiveJobs` and `GetJobHistory` and look for jobs with that title from this backend's user name

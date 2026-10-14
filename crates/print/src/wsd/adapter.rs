@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use crate::RetrySafety;
+
 pub use craft_wsd::soap::{Attachment, Call, SoapClient};
 pub use craft_wsd::transport::{Request, Response, Transport};
 pub use craft_wsd::{DeviceUrl, NetworkLimits, xml};
@@ -18,7 +20,29 @@ pub use craft_wsd::KINDS as WIRE_KINDS;
 pub type WireFault = craft_wsd::Fault;
 pub use craft_wsd::fault::{Role, parse_fault};
 pub use craft_wsd::ns::{ANONYMOUS, FAULT_ACTION, SOAP, WSA, WSA_FINAL, XOP};
-pub use craft_wsd::{Fault, SubCode};
+pub use craft_wsd::{Fault, Stage, SubCode, TransportKind};
+
+/// What the shared layer says about repeating a request that failed with a typed transport error:
+/// nothing sent is [`RetrySafety::Safe`], a request that may have arrived is
+/// [`RetrySafety::Idempotent`] when `idempotent` and [`RetrySafety::OutcomeUnknown`] otherwise.
+pub fn transport_safety(kind: TransportKind, stage: Stage, idempotent: bool) -> RetrySafety {
+    wire_safety(WireError::transport_at(kind, stage, ""), idempotent)
+}
+
+/// The same for an HTTP status without a SOAP fault (429 and 503 are a decline: safe).
+pub fn http_safety(status: u16, idempotent: bool) -> RetrySafety {
+    wire_safety(WireError::http(status), idempotent)
+}
+
+fn wire_safety(error: WireError, idempotent: bool) -> RetrySafety {
+    match error.retry_safety(idempotent) {
+        craft_wsd::RetrySafety::Safe => RetrySafety::Safe,
+        craft_wsd::RetrySafety::Idempotent => RetrySafety::Idempotent,
+        // The shared enum is non-exhaustive: anything new is read as "it may have arrived".
+        _ if idempotent => RetrySafety::Idempotent,
+        _ => RetrySafety::OutcomeUnknown,
+    }
+}
 
 /// A transport the backend can hold and share between threads.
 pub type SharedTransport = Arc<dyn Transport + Send + Sync>;

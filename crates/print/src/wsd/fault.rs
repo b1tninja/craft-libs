@@ -111,6 +111,8 @@ pub struct Fault {
     pub reason: String,
     /// The text of the detail, if any, capped.
     pub detail: String,
+    /// The wait the printer asked for with an HTTP `Retry-After` on the reply that carried the fault.
+    pub retry_after: Option<std::time::Duration>,
 }
 
 impl fmt::Display for Fault {
@@ -129,7 +131,13 @@ impl fmt::Display for Fault {
 impl From<super::adapter::WireFault> for Fault {
     /// Classify the generic fault's sub-code against the print codes.
     fn from(f: super::adapter::WireFault) -> Self {
-        Self { role: f.role, code: FaultCode::from_qname(f.code.ns.as_deref(), &f.code.local), reason: f.reason, detail: f.detail }
+        Self {
+            role: f.role,
+            code: FaultCode::from_qname(f.code.ns.as_deref(), &f.code.local),
+            reason: f.reason,
+            detail: f.detail,
+            retry_after: f.retry_after,
+        }
     }
 }
 
@@ -198,22 +206,24 @@ mod tests {
 
     #[test]
     fn a_generic_fault_is_classified_against_the_print_codes() {
-        let generic = crate::wsd::adapter::WireFault {
-            role: Role::Receiver,
-            code: crate::wsd::adapter::SubCode { ns: Some(ns::WPRT.to_owned()), local: "ServerErrorNotAcceptingJobs".into() },
-            reason: "busy".into(),
-            detail: String::new(),
-        };
+        let generic = crate::wsd::adapter::WireFault::new(
+            Role::Receiver,
+            crate::wsd::adapter::SubCode::new(Some(ns::WPRT), "ServerErrorNotAcceptingJobs"),
+            "busy",
+            "",
+        )
+        .with_retry_after(Some(std::time::Duration::from_secs(9)));
         let f = Fault::from(generic);
+        assert_eq!(f.retry_after, Some(std::time::Duration::from_secs(9)));
         assert_eq!(f.code, FaultCode::ServerErrorNotAcceptingJobs);
         assert!(f.code.is_retryable());
         assert_eq!(f.to_string(), "the printer refused: ServerErrorNotAcceptingJobs (busy)");
-        let e: crate::wsd::error::WsdError = crate::wsd::adapter::WireError::Fault(crate::wsd::adapter::WireFault {
-            role: Role::Sender,
-            code: crate::wsd::adapter::SubCode { ns: Some(ns::WPRT.to_owned()), local: "InvalidArgs".into() },
-            reason: String::new(),
-            detail: String::new(),
-        })
+        let e: crate::wsd::error::WsdError = crate::wsd::adapter::WireError::from_fault(crate::wsd::adapter::WireFault::new(
+            Role::Sender,
+            crate::wsd::adapter::SubCode::new(Some(ns::WPRT), "InvalidArgs"),
+            "",
+            "",
+        ))
         .into();
         assert_eq!(e.fault().map(|f| f.code.clone()), Some(FaultCode::InvalidArgs));
     }

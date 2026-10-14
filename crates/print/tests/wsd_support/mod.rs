@@ -410,7 +410,7 @@ pub struct MemTransport(pub Arc<FakePrinter>);
 impl Transport for MemTransport {
     fn post(&self, _url: &DeviceUrl, request: Request) -> Result<Response, WireError> {
         let (status, content_type, body) = self.0.handle(&request.content_type, &request.body);
-        Ok(Response { status, content_type: Some(content_type), body })
+        Ok(Response::new(status, Some(content_type), body))
     }
 }
 

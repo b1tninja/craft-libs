@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use super::adapter::WireError;
+use super::adapter::{Stage, TransportKind, WireError, http_safety, transport_safety};
 use super::fault::{Fault, FaultCode};
 use crate::{ErrorKind, NativeCode, Phase, PrintError, RetrySafety};
 
@@ -12,12 +12,13 @@ use crate::{ErrorKind, NativeCode, Phase, PrintError, RetrySafety};
 pub enum WsdError {
     /// The network policy refused (see `policy`): the URL, or a missing confirmation.
     Policy(String),
-    /// The transport failed before a usable HTTP reply arrived (connect, timeout, redirect refused, ...).
-    Transport(String),
-    /// The printer closed the connection without replying (retryable).
-    ConnectionClosed,
-    /// An HTTP status that is not success, with no SOAP fault in the body.
-    Http(u16),
+    /// The transport failed before a usable HTTP reply arrived. The kind says why (refused,
+    /// timeout, redirect, closed without a reply, ...) and the stage how far the exchange got;
+    /// the message is only for people.
+    Transport { kind: TransportKind, stage: Stage, message: String },
+    /// An HTTP status that is not success, with no SOAP fault in the body, and the wait the printer
+    /// asked for with `Retry-After`.
+    Http { status: u16, retry_after: Option<Duration> },
     /// A size cap was hit (what, the limit in bytes or items).
     TooLarge(&'static str, usize),
     /// The reply is not well-formed XML (or uses something refused, such as a DTD).
@@ -47,9 +48,9 @@ impl fmt::Display for WsdError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Policy(m) => write!(f, "refused by policy: {m}"),
-            Self::Transport(m) => write!(f, "transport: {m}"),
-            Self::ConnectionClosed => f.write_str("the printer closed the connection without replying"),
-            Self::Http(s) => write!(f, "the printer answered HTTP {s}"),
+            Self::Transport { message, .. } => write!(f, "transport: {message}"),
+            Self::Http { status, retry_after: Some(wait) } => write!(f, "the printer answered HTTP {status} (retry after {}s)", wait.as_secs()),
+            Self::Http { status, retry_after: None } => write!(f, "the printer answered HTTP {status}"),
             Self::TooLarge(what, n) => write!(f, "{what} is larger than the limit of {n}"),
             Self::Xml(m) => write!(f, "malformed XML: {m}"),
             Self::Protocol(m) => write!(f, "unexpected reply: {m}"),
@@ -74,16 +75,15 @@ impl From<WireError> for WsdError {
     fn from(e: WireError) -> Self {
         match e {
             WireError::Policy(m) => Self::Policy(m),
-            WireError::Transport(m) => Self::Transport(m),
-            WireError::ConnectionClosed => Self::ConnectionClosed,
-            WireError::Http(s) => Self::Http(s),
+            WireError::Transport { kind, stage, message } => Self::Transport { kind, stage, message },
+            WireError::Http { status, retry_after } => Self::Http { status, retry_after },
             WireError::Cancelled => Self::Cancelled,
             WireError::Timeout => Self::Timeout,
             WireError::NotFound(m) => Self::NotFound(m),
             WireError::TooLarge(what, n) => Self::TooLarge(what, n),
             WireError::Xml(m) => Self::Xml(m),
             WireError::Protocol(m) => Self::Protocol(m),
-            WireError::Fault(f) => Self::Fault(f.into()),
+            WireError::Fault(f) => Self::Fault((*f).into()),
             WireError::Invalid(m) => Self::Invalid(m),
             // The core's error type is non-exhaustive: a future variant is at least a protocol problem.
             other => Self::Protocol(other.to_string()),
@@ -97,7 +97,6 @@ pub type Result<T, E = WsdError> = std::result::Result<T, E>;
 pub const KINDS: &[&str] = &[
     "policy",
     "transport",
-    "connection_closed",
     "http",
     "too_large",
     "xml",
@@ -123,9 +122,8 @@ impl WsdError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Policy(_) => "policy",
-            Self::Transport(_) => "transport",
-            Self::ConnectionClosed => "connection_closed",
-            Self::Http(_) => "http",
+            Self::Transport { .. } => "transport",
+            Self::Http { .. } => "http",
             Self::TooLarge(..) => "too_large",
             Self::Xml(_) => "xml",
             Self::Protocol(_) => "protocol",
@@ -141,8 +139,9 @@ impl WsdError {
     }
 
     /// Would trying the same request again later plausibly work? The condition is transient: HTTP
-    /// 408, 425, 429 and 5xx except 501 and 505, a connection that failed or that the printer
-    /// closed, a deadline, and a fault whose code says so. It is exactly
+    /// 408, 425, 429 and 5xx except 501 and 505, a connection that failed, timed out or that the
+    /// printer closed, a deadline, and a fault whose code says so. A refused redirect and an
+    /// unclassified transport failure are not. It is exactly
     /// [`ErrorKind::is_retryable`] of [`Self::error_kind`]. Whether sending again is *safe* depends
     /// on the operation too: see [`Self::classify`].
     pub fn is_retryable(&self) -> bool {
@@ -169,7 +168,9 @@ impl WsdError {
     ///
     /// The principle: **a failure that proves the printer did not act is [`RetrySafety::Safe`]**
     /// (nothing sent, a refused address, a connect failure, a policy refusal, 408/425/429/503, a SOAP
-    /// fault, which is a definite answer). **A failure after the request may have arrived is
+    /// fault, which is a definite answer). For the transport and HTTP errors `craft-wsd` says
+    /// which stage the exchange reached and whether repeating is safe; this adds what only the
+    /// print service knows (a 408/425 decline, a fault being a definite answer). **A failure after the request may have arrived is
     /// [`RetrySafety::OutcomeUnknown`] for a non-idempotent operation** (create, send: a closed or
     /// reset connection, a timeout waiting for the reply, a 500/502/504, an unreadable reply) and
     /// [`RetrySafety::Idempotent`] for a query or a cancel, which may be repeated freely.
@@ -192,19 +193,38 @@ impl WsdError {
             // back (the reply, a list, a multipart message) is the printer's doing.
             Self::TooLarge(what, _) if REQUEST_LABELS.contains(what) => class(K::InvalidRequest, P::Prepare, S::Safe),
             Self::TooLarge(..) | Self::Xml(_) | Self::Protocol(_) => class(K::Failed, net(P::Reply), reached),
-            Self::ConnectionClosed => class(K::Unavailable, net(P::Reply), reached),
             Self::Timeout => class(K::Timeout, net(P::Reply), reached),
-            Self::Transport(message) => match transport_kind(message) {
-                TransportKind::Redirect => class(K::Failed, net(P::Reply), reached),
-                TransportKind::ConnectFailed => class(K::Unavailable, net(P::Connect), S::Safe),
-                TransportKind::ConnectTimeout => class(K::Timeout, net(P::Connect), S::Safe),
-                TransportKind::Timeout => class(K::Timeout, net(P::Reply), reached),
-                TransportKind::Other => class(K::Unavailable, net(P::Reply), reached),
-            },
-            Self::Http(status) => http_class(*status, net(P::Request), net(P::Reply), reached),
+            Self::Transport { kind, stage, .. } => {
+                use TransportKind as T;
+                let kind_of = match kind {
+                    T::ConnectTimeout | T::Timeout => K::Timeout,
+                    // Not transient: a refused redirect.
+                    T::Redirect => K::Failed,
+                    // Refused, unreachable, closed without a reply, and a malformed exchange or an
+                    // I/O error that fits no other kind (an embedded server's usual way of being
+                    // busy), and any kind added later. `craft-wsd` calls `Other` not retryable;
+                    // this layer keeps retrying it, the request being safe or idempotent to repeat
+                    // per the safety below.
+                    _ => K::Unavailable,
+                };
+                let phase = match stage {
+                    Stage::Prepare => P::Prepare,
+                    Stage::Connect => P::Connect,
+                    Stage::Request => P::Request,
+                    _ => P::Reply,
+                };
+                // A status poll's failures are poll failures, whatever the network step was; a
+                // failure before anything went out stays a preparation failure.
+                let phase = if op == Op::Status && phase != P::Prepare { P::Poll } else { phase };
+                class(kind_of, phase, transport_safety(*kind, *stage, op.is_idempotent()))
+            }
+            Self::Http { status, retry_after } => {
+                http_class(*status, *retry_after, net(P::Request), net(P::Reply), http_safety(*status, op.is_idempotent()))
+            }
             Self::Fault(fault) => {
                 let kind = fault_kind(&fault.code);
-                let retry_after = fault_retry_after(&fault.code);
+                // The printer's own `Retry-After` wins over the defaults.
+                let retry_after = fault.retry_after.or_else(|| fault_retry_after(&fault.code));
                 // A fault is a definite answer: the printer declined, so nothing was accepted. The
                 // one exception says an earlier send was in fact accepted.
                 let safety = match fault.code {
@@ -268,44 +288,19 @@ pub struct Class {
     pub retry_after: Option<Duration>,
 }
 
-/// What the transport's failure text says. `craft-wsd` reports transport failures as text, so this
-/// reads that text; an unrecognised message is [`TransportKind::Other`], which is treated as
-/// "the request may have arrived" (the careful reading).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TransportKind {
-    /// A redirect was answered and refused.
-    Redirect,
-    /// The connection could not be made (refused, unreachable): nothing was sent.
-    ConnectFailed,
-    /// The connection attempt timed out: nothing was sent.
-    ConnectTimeout,
-    /// A deadline passed after the request was sent, or the phase is unknown.
-    Timeout,
-    Other,
-}
-
-fn transport_kind(message: &str) -> TransportKind {
-    let m = message.to_ascii_lowercase();
-    let has = |needles: &[&str]| needles.iter().any(|n| m.contains(n));
-    if has(&["redirect"]) {
-        TransportKind::Redirect
-    } else if has(&["connection attempt failed", "timeout: connect", "connect timed out", "connection timed out"]) {
-        TransportKind::ConnectTimeout
-    } else if has(&["refused", "unreachable", "no route to host", "host is down", "network is down"]) {
-        TransportKind::ConnectFailed
-    } else if has(&["timeout", "timed out"]) {
-        TransportKind::Timeout
-    } else {
-        TransportKind::Other
-    }
-}
-
 /// HTTP statuses without a SOAP fault. `request` and `reply` are the phases for "the server
-/// refused before processing" and "it answered something unusable"; `reached` is the safety when
-/// the request may have been processed.
-fn http_class(status: u16, request: Phase, reply: Phase, reached: RetrySafety) -> Class {
+/// refused before processing" and "it answered something unusable"; `reached` is what `craft-wsd`
+/// says about repeating after this status (429 and 503 are a decline), and is used where the
+/// request may have been processed. A wait the printer sent is kept for the busy kinds only.
+fn http_class(status: u16, wait: Option<Duration>, request: Phase, reply: Phase, reached: RetrySafety) -> Class {
     use ErrorKind as K;
-    let class = |kind, phase, safety, retry_after| Class { kind, phase, safety, retry_after };
+    // The printer's `Retry-After` wins over the default wait.
+    let class = |kind: K, phase, safety, default: Option<Duration>| Class {
+        kind,
+        phase,
+        safety,
+        retry_after: if kind.is_retryable() { wait.or(default) } else { None },
+    };
     match status {
         // The server says it did not take the request, or is not ready for it: nothing happened.
         408 => class(K::Timeout, request, RetrySafety::Safe, None),
@@ -368,23 +363,18 @@ mod tests {
     use super::*;
     use crate::wsd::adapter::{Role, SubCode};
     use crate::wsd::ns;
+    use std::time::Duration;
 
     fn wire_samples() -> Vec<WireError> {
-        let fault = crate::wsd::adapter::WireFault {
-            role: Role::Sender,
-            code: SubCode { ns: Some(ns::WPRT.to_owned()), local: "InvalidArgs".into() },
-            reason: String::new(),
-            detail: String::new(),
-        };
+        let fault = crate::wsd::adapter::WireFault::new(Role::Sender, SubCode::new(Some(ns::WPRT), "InvalidArgs"), "", "");
         vec![
             WireError::Policy("p".into()),
-            WireError::Transport("t".into()),
-            WireError::ConnectionClosed,
-            WireError::Http(503),
+            WireError::transport(TransportKind::Refused, "t"),
+            WireError::http_retry_after(503, Some(Duration::from_secs(7))),
             WireError::TooLarge("x", 1),
             WireError::Xml("x".into()),
             WireError::Protocol("x".into()),
-            WireError::Fault(fault),
+            WireError::from_fault(fault),
             WireError::Invalid("x".into()),
             WireError::Cancelled,
             WireError::Timeout,
@@ -407,17 +397,34 @@ mod tests {
             assert_eq!(neutral.is_retryable(), ours.is_retryable(), "{kind}");
         }
         assert_eq!(samples.len(), WIRE_KINDS.len());
+        assert!(
+            !KINDS.contains(&"connection_closed") && !WIRE_KINDS.contains(&"connection_closed"),
+            "a closed connection is a transport kind, not an error kind"
+        );
     }
 
     fn fault(local: &str) -> WsdError {
-        WsdError::Fault(Fault { role: Role::Receiver, code: FaultCode::from_qname(Some(ns::WPRT), local), reason: "r".into(), detail: String::new() })
+        WsdError::Fault(Fault {
+            role: Role::Receiver,
+            code: FaultCode::from_qname(Some(ns::WPRT), local),
+            reason: "r".into(),
+            detail: String::new(),
+            retry_after: None,
+        })
+    }
+
+    fn transport(kind: TransportKind, stage: Stage) -> WsdError {
+        WsdError::Transport { kind, stage, message: "m".into() }
+    }
+
+    fn http(status: u16) -> WsdError {
+        WsdError::Http { status, retry_after: None }
     }
 
     /// One of every shape of error, with the transport texts that are classified.
     fn samples() -> Vec<WsdError> {
         let mut all = vec![
             WsdError::Policy(String::new()),
-            WsdError::ConnectionClosed,
             WsdError::TooLarge(REPLY_LABEL, 1),
             WsdError::TooLarge("the device's reply", 1),
             WsdError::TooLarge("the request", 1),
@@ -438,21 +445,17 @@ mod tests {
             fault("ClientErrorJobIdNotFound"),
             fault("OperationFailed"),
         ];
-        for m in [
-            "",
-            "the device answered with a redirect (HTTP 302), which is refused",
-            "io: No connection could be made because the target machine actively refused it. (os error 10061)",
-            "io: Connection refused (os error 111)",
-            "io: Network is unreachable (os error 101)",
-            "timeout: global",
-            "timeout: connect",
-            "io: A connection attempt failed because the connected party did not properly respond after a period of time",
-            "io: something odd",
-        ] {
-            all.push(WsdError::Transport(m.into()));
+        for kind in TransportKind::ALL {
+            for stage in [Stage::Prepare, Stage::Connect, Stage::Request, Stage::Reply] {
+                // Before any traffic is not where a transient failure happens.
+                if stage != Stage::Prepare || kind == TransportKind::Redirect {
+                    all.push(transport(kind, stage));
+                }
+            }
         }
         for s in [301, 400, 401, 403, 404, 408, 425, 429, 500, 501, 502, 503, 504, 505] {
-            all.push(WsdError::Http(s));
+            all.push(http(s));
+            all.push(WsdError::Http { status: s, retry_after: Some(Duration::from_secs(11)) });
         }
         all
     }
@@ -461,11 +464,16 @@ mod tests {
     fn every_kind_of_ours_maps_to_a_neutral_kind_and_keeps_retryability() {
         let all = [
             (WsdError::Policy(String::new()), ErrorKind::InvalidRequest),
-            (WsdError::Transport(String::new()), ErrorKind::Unavailable),
-            (WsdError::ConnectionClosed, ErrorKind::Unavailable),
-            (WsdError::Http(503), ErrorKind::Unavailable),
-            (WsdError::Http(429), ErrorKind::Busy),
-            (WsdError::Http(404), ErrorKind::Failed),
+            (transport(TransportKind::Refused, Stage::Connect), ErrorKind::Unavailable),
+            (transport(TransportKind::Unreachable, Stage::Connect), ErrorKind::Unavailable),
+            (transport(TransportKind::ConnectionClosed, Stage::Reply), ErrorKind::Unavailable),
+            (transport(TransportKind::ConnectTimeout, Stage::Connect), ErrorKind::Timeout),
+            (transport(TransportKind::Timeout, Stage::Reply), ErrorKind::Timeout),
+            (transport(TransportKind::Redirect, Stage::Reply), ErrorKind::Failed),
+            (transport(TransportKind::Other, Stage::Reply), ErrorKind::Unavailable),
+            (http(503), ErrorKind::Unavailable),
+            (http(429), ErrorKind::Busy),
+            (http(404), ErrorKind::Failed),
             (WsdError::TooLarge(REPLY_LABEL, 1), ErrorKind::Failed),
             (WsdError::TooLarge("the device's reply", 1), ErrorKind::Failed),
             (WsdError::TooLarge("the request", 1), ErrorKind::InvalidRequest),
@@ -502,7 +510,8 @@ mod tests {
         use ErrorKind as K;
         use Phase as P;
         use RetrySafety as S;
-        let transport = |m: &str| WsdError::Transport(m.into());
+        use Stage as G;
+        use TransportKind as T;
         let rows: Vec<(WsdError, Op, K, P, S, Option<u64>)> = vec![
             // Refused before anything is sent: not transient, safe.
             (WsdError::Policy("p".into()), Op::Create, K::InvalidRequest, P::Prepare, S::Safe, None),
@@ -513,58 +522,68 @@ mod tests {
             (WsdError::NotFound("n".into()), Op::Query, K::NotFound, P::Prepare, S::Safe, None),
             (WsdError::Cancelled, Op::Send, K::Cancelled, P::Prepare, S::Safe, None),
             (WsdError::TooLarge("the request", 1), Op::Send, K::InvalidRequest, P::Prepare, S::Safe, None),
-            // The connection closed or timed out: transient, and after a write it may have arrived.
-            (WsdError::ConnectionClosed, Op::Create, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
-            (WsdError::ConnectionClosed, Op::Send, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
-            (WsdError::ConnectionClosed, Op::Query, K::Unavailable, P::Reply, S::Idempotent, None),
-            (WsdError::ConnectionClosed, Op::Cancel, K::Unavailable, P::Reply, S::Idempotent, None),
-            (WsdError::ConnectionClosed, Op::Status, K::Unavailable, P::Poll, S::Idempotent, None),
             (WsdError::Timeout, Op::Send, K::Timeout, P::Reply, S::OutcomeUnknown, None),
             (WsdError::Timeout, Op::Status, K::Timeout, P::Poll, S::Idempotent, None),
-            (transport("timeout: global"), Op::Send, K::Timeout, P::Reply, S::OutcomeUnknown, None),
-            (transport("timeout: global"), Op::Status, K::Timeout, P::Poll, S::Idempotent, None),
-            (transport("io: something odd"), Op::Create, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
-            (transport("io: something odd"), Op::Query, K::Unavailable, P::Reply, S::Idempotent, None),
-            (transport(""), Op::Send, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
-            // A connection that could not be made: nothing was sent, whatever the operation.
-            (transport("io: Connection refused (os error 111)"), Op::Send, K::Unavailable, P::Connect, S::Safe, None),
-            (
-                transport("io: No connection could be made because the target machine actively refused it. (os error 10061)"),
-                Op::Create,
-                K::Unavailable,
-                P::Connect,
-                S::Safe,
-                None,
-            ),
-            (transport("io: Network is unreachable (os error 101)"), Op::Query, K::Unavailable, P::Connect, S::Safe, None),
-            (transport("timeout: connect"), Op::Send, K::Timeout, P::Connect, S::Safe, None),
-            (
-                transport("io: A connection attempt failed because the connected party did not properly respond after a period of time"),
-                Op::Create,
-                K::Timeout,
-                P::Connect,
-                S::Safe,
-                None,
-            ),
-            (transport("io: Connection refused (os error 111)"), Op::Status, K::Unavailable, P::Poll, S::Safe, None),
+            // Transport, at the default stage of each kind: a connect failure sent nothing, whatever
+            // the operation; the rest may have arrived (a create and a send are then unknown, a
+            // query, a status poll and a cancel idempotent).
+            (transport(T::Refused, G::Connect), Op::Create, K::Unavailable, P::Connect, S::Safe, None),
+            (transport(T::Refused, G::Connect), Op::Send, K::Unavailable, P::Connect, S::Safe, None),
+            (transport(T::Refused, G::Connect), Op::Status, K::Unavailable, P::Poll, S::Safe, None),
+            (transport(T::Unreachable, G::Connect), Op::Query, K::Unavailable, P::Connect, S::Safe, None),
+            (transport(T::Unreachable, G::Connect), Op::Create, K::Unavailable, P::Connect, S::Safe, None),
+            (transport(T::ConnectTimeout, G::Connect), Op::Send, K::Timeout, P::Connect, S::Safe, None),
+            (transport(T::ConnectTimeout, G::Connect), Op::Cancel, K::Timeout, P::Connect, S::Safe, None),
+            (transport(T::Timeout, G::Reply), Op::Create, K::Timeout, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::Timeout, G::Reply), Op::Send, K::Timeout, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::Timeout, G::Reply), Op::Query, K::Timeout, P::Reply, S::Idempotent, None),
+            (transport(T::Timeout, G::Reply), Op::Status, K::Timeout, P::Poll, S::Idempotent, None),
+            (transport(T::Timeout, G::Reply), Op::Cancel, K::Timeout, P::Reply, S::Idempotent, None),
+            (transport(T::ConnectionClosed, G::Reply), Op::Create, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::ConnectionClosed, G::Reply), Op::Send, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::ConnectionClosed, G::Reply), Op::Query, K::Unavailable, P::Reply, S::Idempotent, None),
+            (transport(T::ConnectionClosed, G::Reply), Op::Status, K::Unavailable, P::Poll, S::Idempotent, None),
+            (transport(T::ConnectionClosed, G::Reply), Op::Cancel, K::Unavailable, P::Reply, S::Idempotent, None),
+            // A reset while the request was being written: it may have partly arrived.
+            (transport(T::ConnectionClosed, G::Request), Op::Send, K::Unavailable, P::Request, S::OutcomeUnknown, None),
+            (transport(T::ConnectionClosed, G::Request), Op::Query, K::Unavailable, P::Request, S::Idempotent, None),
             // A refused redirect is not transient; the request may have reached a server that answered.
-            (transport("the device answered with a redirect (HTTP 302), which is refused"), Op::Send, K::Failed, P::Reply, S::OutcomeUnknown, None),
-            (transport("the device answered with a redirect (HTTP 302), which is refused"), Op::Query, K::Failed, P::Reply, S::Idempotent, None),
+            (transport(T::Redirect, G::Reply), Op::Send, K::Failed, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::Redirect, G::Reply), Op::Create, K::Failed, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::Redirect, G::Reply), Op::Query, K::Failed, P::Reply, S::Idempotent, None),
+            (transport(T::Redirect, G::Reply), Op::Status, K::Failed, P::Poll, S::Idempotent, None),
+            // A malformed exchange or an unclassified I/O error: transient here, read carefully.
+            (transport(T::Other, G::Reply), Op::Create, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::Other, G::Reply), Op::Query, K::Unavailable, P::Reply, S::Idempotent, None),
+            // An error from before the wire (a transport that refuses to start) is a preparation failure.
+            (transport(T::Other, G::Prepare), Op::Send, K::Unavailable, P::Prepare, S::Safe, None),
             // HTTP.
-            (WsdError::Http(408), Op::Send, K::Timeout, P::Request, S::Safe, None),
-            (WsdError::Http(425), Op::Create, K::Busy, P::Request, S::Safe, Some(2)),
-            (WsdError::Http(429), Op::Send, K::Busy, P::Request, S::Safe, Some(5)),
-            (WsdError::Http(429), Op::Status, K::Busy, P::Poll, S::Safe, Some(5)),
-            (WsdError::Http(503), Op::Create, K::Unavailable, P::Request, S::Safe, Some(5)),
-            (WsdError::Http(500), Op::Send, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
-            (WsdError::Http(502), Op::Send, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
-            (WsdError::Http(504), Op::Query, K::Unavailable, P::Reply, S::Idempotent, None),
-            (WsdError::Http(504), Op::Status, K::Unavailable, P::Poll, S::Idempotent, None),
-            (WsdError::Http(501), Op::Send, K::Failed, P::Reply, S::Safe, None),
-            (WsdError::Http(505), Op::Query, K::Failed, P::Reply, S::Safe, None),
-            (WsdError::Http(400), Op::Send, K::Failed, P::Reply, S::Safe, None),
-            (WsdError::Http(404), Op::Query, K::Failed, P::Reply, S::Safe, None),
-            (WsdError::Http(301), Op::Send, K::Failed, P::Reply, S::OutcomeUnknown, None),
+            (http(408), Op::Send, K::Timeout, P::Request, S::Safe, None),
+            (http(425), Op::Create, K::Busy, P::Request, S::Safe, Some(2)),
+            (http(429), Op::Send, K::Busy, P::Request, S::Safe, Some(5)),
+            (http(429), Op::Status, K::Busy, P::Poll, S::Safe, Some(5)),
+            (http(503), Op::Create, K::Unavailable, P::Request, S::Safe, Some(5)),
+            // The printer's own Retry-After replaces the default wait, and only for a transient status.
+            (WsdError::Http { status: 503, retry_after: Some(Duration::from_secs(30)) }, Op::Send, K::Unavailable, P::Request, S::Safe, Some(30)),
+            (WsdError::Http { status: 429, retry_after: Some(Duration::from_secs(1)) }, Op::Create, K::Busy, P::Request, S::Safe, Some(1)),
+            (
+                WsdError::Http { status: 500, retry_after: Some(Duration::from_secs(9)) },
+                Op::Send,
+                K::Unavailable,
+                P::Reply,
+                S::OutcomeUnknown,
+                Some(9),
+            ),
+            (WsdError::Http { status: 404, retry_after: Some(Duration::from_secs(9)) }, Op::Query, K::Failed, P::Reply, S::Safe, None),
+            (http(500), Op::Send, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
+            (http(502), Op::Send, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
+            (http(504), Op::Query, K::Unavailable, P::Reply, S::Idempotent, None),
+            (http(504), Op::Status, K::Unavailable, P::Poll, S::Idempotent, None),
+            (http(501), Op::Send, K::Failed, P::Reply, S::Safe, None),
+            (http(505), Op::Query, K::Failed, P::Reply, S::Safe, None),
+            (http(400), Op::Send, K::Failed, P::Reply, S::Safe, None),
+            (http(404), Op::Query, K::Failed, P::Reply, S::Safe, None),
+            (http(301), Op::Send, K::Failed, P::Reply, S::OutcomeUnknown, None),
             // A reply that cannot be used: the request was probably processed.
             (WsdError::Xml("x".into()), Op::Send, K::Failed, P::Reply, S::OutcomeUnknown, None),
             (WsdError::Xml("x".into()), Op::Query, K::Failed, P::Reply, S::Idempotent, None),
@@ -582,6 +601,20 @@ mod tests {
             (fault("InvalidArgs"), Op::Create, K::InvalidRequest, P::Reply, S::Safe, None),
             (fault("ServerErrorJobCancelled"), Op::Status, K::Cancelled, P::Poll, S::Safe, None),
             // An earlier send was in fact accepted: the job may print.
+            (
+                WsdError::Fault(Fault {
+                    role: Role::Receiver,
+                    code: FaultCode::ServerErrorNotAcceptingJobs,
+                    reason: String::new(),
+                    detail: String::new(),
+                    retry_after: Some(Duration::from_secs(40)),
+                }),
+                Op::Create,
+                K::Busy,
+                P::Reply,
+                S::Safe,
+                Some(40),
+            ),
             (fault("ClientErrorLastDocumentAlreadySent"), Op::Send, K::Failed, P::Reply, S::OutcomeUnknown, None),
         ];
         let mut kinds_seen: Vec<&str> = Vec::new();
@@ -605,6 +638,47 @@ mod tests {
         let mut listed = KINDS.to_vec();
         listed.sort_unstable();
         assert_eq!(kinds_seen, listed, "the retry table has a row for every kind");
+    }
+
+    /// Every typed transport kind x every operation, at the stage the kind usually happens in: the
+    /// neutral kind, the phase and the safety follow from the typed values alone, and the
+    /// retryability agrees with `craft-wsd` (except `Other`, see `classify`).
+    #[test]
+    fn every_transport_kind_for_every_operation() {
+        use ErrorKind as K;
+        use Phase as P;
+        use RetrySafety as S;
+        for kind in TransportKind::ALL {
+            let stage = kind.default_stage();
+            let (want_kind, want_net_phase, retryable) = match kind {
+                TransportKind::Refused | TransportKind::Unreachable => (K::Unavailable, P::Connect, true),
+                TransportKind::ConnectTimeout => (K::Timeout, P::Connect, true),
+                TransportKind::Timeout => (K::Timeout, P::Reply, true),
+                TransportKind::ConnectionClosed => (K::Unavailable, P::Reply, true),
+                TransportKind::Redirect => (K::Failed, P::Reply, false),
+                TransportKind::Other => (K::Unavailable, P::Reply, true),
+                _ => panic!("a new transport kind needs a row here"),
+            };
+            // craft-wsd calls `Other` not retryable; this layer keeps it transient (see `classify`).
+            assert!(kind == TransportKind::Other || kind.is_retryable() == retryable, "{kind}: agrees with craft-wsd");
+            let sent = stage.may_have_reached_device();
+            for op in Op::ALL {
+                let e = transport(kind, stage);
+                let c = e.classify(op);
+                let what = format!("{kind} [{op:?}]");
+                assert_eq!(c.kind, want_kind, "{what}");
+                assert_eq!(c.phase, if op == Op::Status { P::Poll } else { want_net_phase }, "{what}");
+                let want_safety = match (sent, op.is_idempotent()) {
+                    (false, _) => S::Safe,
+                    (true, true) => S::Idempotent,
+                    (true, false) => S::OutcomeUnknown,
+                };
+                assert_eq!(c.safety, want_safety, "{what}");
+                assert_eq!(c.retry_after, None, "{what}");
+                assert_eq!(e.is_retryable(), retryable, "{what}");
+                assert_eq!(e.print_error(op).retry_safety(), want_safety, "{what}");
+            }
+        }
     }
 
     #[test]
@@ -638,17 +712,18 @@ mod tests {
             }
         }
         // Refusals and the redirect are not transient.
-        for e in [WsdError::Policy("p".into()), WsdError::Transport("the device answered with a redirect (HTTP 302), which is refused".into())] {
+        for e in [WsdError::Policy("p".into()), transport(TransportKind::Redirect, Stage::Reply)] {
             assert!(!e.is_retryable(), "{e}");
         }
         // The conversion without an operation is the careful one.
-        assert_eq!(PrintError::from(WsdError::ConnectionClosed).retry_safety(), RetrySafety::OutcomeUnknown);
+        assert_eq!(PrintError::from(transport(TransportKind::ConnectionClosed, Stage::Reply)).retry_safety(), RetrySafety::OutcomeUnknown);
     }
 
     #[test]
     fn every_fault_code_maps_and_the_retryable_ones_stay_retryable() {
         for (name, code) in crate::wsd::fault::WPRT_CODES.iter() {
-            let e = WsdError::Fault(Fault { role: Role::Sender, code: code.clone(), reason: String::new(), detail: String::new() });
+            let e =
+                WsdError::Fault(Fault { role: Role::Sender, code: code.clone(), reason: String::new(), detail: String::new(), retry_after: None });
             let neutral = PrintError::from(e.clone());
             let native = neutral.native().expect("a fault carries its code");
             assert_eq!((native.domain, native.name), ("wsd-fault", Some(*name)));
@@ -661,6 +736,7 @@ mod tests {
             code: FaultCode::ActionNotSupported,
             reason: String::new(),
             detail: String::new(),
+            retry_after: None,
         }));
         assert_eq!((action.kind(), action.native().map(|n| n.name)), (ErrorKind::Rejected, Some(Some("ActionNotSupported"))));
         let vendor = PrintError::from(WsdError::Fault(Fault {
@@ -668,6 +744,7 @@ mod tests {
             code: FaultCode::Other(Some("urn:v".into()), "Odd".into()),
             reason: String::new(),
             detail: String::new(),
+            retry_after: None,
         }));
         assert_eq!((vendor.kind(), vendor.native().map(|n| (n.code, n.name))), (ErrorKind::Rejected, Some((0, None))));
         // Codes are distinct.
@@ -695,29 +772,10 @@ mod tests {
             (403, false),
             (301, false),
         ] {
-            assert_eq!(WsdError::Http(s).is_retryable(), r, "{s}");
-            assert_eq!(PrintError::from(WsdError::Http(s)).is_retryable(), r, "{s}");
+            assert_eq!(http(s).is_retryable(), r, "{s}");
+            assert_eq!(PrintError::from(http(s)).is_retryable(), r, "{s}");
         }
         assert!(!WsdError::Protocol(String::new()).is_retryable());
-        assert!(WsdError::ConnectionClosed.is_retryable());
-    }
-
-    #[test]
-    fn transport_texts_are_read_conservatively() {
-        use TransportKind as T;
-        for (text, kind) in [
-            ("the device answered with a redirect (HTTP 307), which is refused", T::Redirect),
-            ("io: Connection refused (os error 111)", T::ConnectFailed),
-            ("io: The remote host actively refused it", T::ConnectFailed),
-            ("io: No route to host (os error 113)", T::ConnectFailed),
-            ("timeout: connect", T::ConnectTimeout),
-            ("io: Connection timed out (os error 110)", T::ConnectTimeout),
-            ("timeout: global", T::Timeout),
-            ("io: read timed out", T::Timeout),
-            ("io: something odd", T::Other),
-            ("", T::Other),
-        ] {
-            assert_eq!(transport_kind(text), kind, "{text:?}");
-        }
+        assert!(transport(TransportKind::ConnectionClosed, Stage::Reply).is_retryable());
     }
 }

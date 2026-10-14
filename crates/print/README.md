@@ -224,8 +224,9 @@ let status = craft_print::job_status(&job.id)?;       // one GetJobElements; or 
   and `Idempotent` for a query or a cancel. A refused redirect, a refused address, 501, 505 and
   other 4xx are not retryable. The full table, per error kind and operation, is in
   [docs/job-lifecycle.md](docs/job-lifecycle.md) and pinned by the table tests in `wsd::error`.
-  `craft-wsd` reports transport failures as text, so connect failures, timeouts and redirects are
-  recognised from it, and an unrecognised text is read the careful way.
+  `craft-wsd` reports transport failures as a typed kind and stage (connect failures, timeouts,
+  redirects, a closed connection), so nothing is read from text; a `Retry-After` the printer sends
+  becomes the error's `retry_after`.
 * **Lower layers** are public for apps that need them: `wsd::client::Client` (one method per
   operation: `GetPrinterElements`, `CreatePrintJob`, `SendDocument`, `GetJobElements`,
   `GetActiveJobs`, `GetJobHistory`, `CancelJob`), `wsd::job::submit_document` (the accepted

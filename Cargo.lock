@@ -587,7 +587,7 @@ dependencies = [
 [[package]]
 name = "craft-wsd"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=refs%2Fpull%2F113%2Fhead#37918294703104a43254a05232da00b348ccbfad"
+source = "git+https://github.com/storytold/craft-libs?rev=refs%2Fpull%2F113%2Fhead#98ec2dd810c31088ef9afcd8a5173aaaea5ae38d"
 dependencies = [
  "roxmltree",
  "thiserror 2.0.21",

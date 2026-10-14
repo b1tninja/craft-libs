@@ -610,6 +610,22 @@ fn hostile_replies_are_typed_errors_and_never_a_panic() {
 }
 
 #[test]
+fn a_retry_after_from_the_printer_reaches_the_neutral_error() {
+    let with_wait = |status: u16, wait: &str| {
+        let wait = wait.to_owned();
+        move |_: &wsd_support::HttpRequest| {
+            format!("HTTP/1.1 {status} X\r\nContent-Type: text/plain\r\nRetry-After: {wait}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .into_bytes()
+        }
+    };
+    let e = details_error(with_wait(503, "17"));
+    assert_eq!((e.kind(), e.retry_after()), (ErrorKind::Unavailable, Some(Duration::from_secs(17))), "{e}");
+    // Without a usable header the default wait stays.
+    let e = details_error(with_wait(503, "soon"));
+    assert_eq!(e.retry_after(), Some(Duration::from_secs(5)), "{e}");
+}
+
+#[test]
 fn a_connection_closed_with_no_reply_is_retryable() {
     let e = details_error(|_| Vec::new());
     assert_eq!(e.kind(), ErrorKind::Unavailable);
@@ -715,7 +731,7 @@ fn a_full_print_over_a_loopback_socket() {
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use craft_print::wsd::adapter::{DeviceUrl, Request, Response, Transport, WireError};
+use craft_print::wsd::adapter::{DeviceUrl, Request, Response, Transport, TransportKind, WireError};
 use craft_print::{Jitter, retry};
 
 /// Delivers every request to the fake printer and, for the named operation, loses the reply a number
@@ -737,9 +753,9 @@ impl Transport for LossyReply {
         let (status, content_type, body) = self.printer.handle(&request.content_type, &request.body);
         if request.soap_action.ends_with(self.lose) && self.remaining.load(Ordering::SeqCst) > 0 {
             self.remaining.fetch_sub(1, Ordering::SeqCst);
-            return Err(WireError::ConnectionClosed);
+            return Err(WireError::transport(TransportKind::ConnectionClosed, "closed without a reply"));
         }
-        Ok(Response { status, content_type: Some(content_type), body })
+        Ok(Response::new(status, Some(content_type), body))
     }
 }
 

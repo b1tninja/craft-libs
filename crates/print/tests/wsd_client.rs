@@ -338,7 +338,7 @@ fn job_lists_split_active_from_history() {
 #[test]
 fn a_device_that_answers_http_errors_gives_a_typed_error() {
     let p = FakePrinter::new(Config { http_error: Some(503), ..Default::default() });
-    assert_eq!(printer_info(&client(&p)).unwrap_err(), WsdError::Http(503));
+    assert_eq!(printer_info(&client(&p)).unwrap_err(), WsdError::Http { status: 503, retry_after: None });
 }
 
 #[test]
@@ -408,15 +408,15 @@ fn a_dropped_connection_while_watching_is_retried_a_few_times() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use craft_print::wsd::adapter::{DeviceUrl, Request, Response, Transport, WireError};
+    use craft_print::wsd::adapter::{DeviceUrl, Request, Response, Transport, TransportKind, WireError};
     struct Flaky(Arc<FakePrinter>, AtomicU32);
     impl Transport for Flaky {
         fn post(&self, _: &DeviceUrl, request: Request) -> Result<Response, WireError> {
             if request.soap_action.ends_with("GetJobElements") && self.1.fetch_add(1, Ordering::SeqCst) == 2 {
-                return Err(WireError::ConnectionClosed);
+                return Err(WireError::transport(TransportKind::ConnectionClosed, "closed without a reply"));
             }
             let (status, content_type, body) = self.0.handle(&request.content_type, &request.body);
-            Ok(Response { status, content_type: Some(content_type), body })
+            Ok(Response::new(status, Some(content_type), body))
         }
     }
     let p = FakePrinter::new(Config { polls_to_finish: 5, ..Config::default() });

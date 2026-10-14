@@ -127,7 +127,7 @@ mod tests {
 
     impl Transport for Canned {
         fn post(&self, _: &DeviceUrl, _: Request) -> Result<Response, WireError> {
-            Ok(Response { status: self.0, content_type: self.1.map(str::to_owned), body: self.2.clone() })
+            Ok(Response::new(self.0, self.1.map(str::to_owned), self.2.clone()))
         }
     }
 
@@ -163,7 +163,7 @@ mod tests {
         ];
         for (status, ct, body) in cases {
             let e = err(&client(status, ct, body));
-            assert_eq!(e, WsdError::Http(status), "{status} {ct:?}");
+            assert_eq!(e, WsdError::Http { status, retry_after: None }, "{status} {ct:?}");
         }
     }
 

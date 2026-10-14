@@ -191,7 +191,21 @@ pub fn plan(options: &PrintOptions, caps: &Capabilities, description: &PrinterDe
             }
         }
     }
+    if let Some(n) = options.copies {
+        // Zero copies is never a request a printer should be asked about, minimal ticket or not.
+        if n == 0 {
+            return Err(WsdError::Invalid("copies must be at least 1".into()));
+        }
+    }
     if let Some(n) = options.copies.filter(|_| !minimal) {
+        // A count below the printer's published minimum is a mistake in the request, not a count
+        // that is "too many": it is refused here and never turned into the maximum.
+        if let Some((lo, _)) = caps.copies {
+            let lo = lo.max(1);
+            if n < lo {
+                return Err(WsdError::Invalid(format!("{n} copies is below the printer's minimum of {lo}")));
+            }
+        }
         match caps.supports_copies(n) {
             Some(false) if !strict => {
                 let max = caps.copies.map_or(1, |(_, m)| m).max(1);
@@ -578,6 +592,38 @@ mod tests {
         assert_eq!(default_dpi(&caps()), (150, 150));
         assert_eq!(default_dpi(&Capabilities::default()), (300, 300));
         assert_eq!(default_dpi(&Capabilities { resolutions: vec![(600, 600), (360, 360)], ..Default::default() }), (360, 360));
+    }
+
+    #[test]
+    fn copies_are_mapped_against_the_published_range() {
+        let with = |copies: Option<(u32, u32)>, n: u32, strict: bool| {
+            let c = Capabilities { copies, ..Default::default() };
+            plan(&PrintOptions { copies: Some(n), strict, ..Default::default() }, &c, &desc(None))
+        };
+        let invalid = |r: Result<Plan>| matches!(r, Err(WsdError::Invalid(_)));
+        // Zero is refused locally with any range, strict or not, and never becomes the maximum.
+        for range in [Some((1, 99)), Some((0, 99)), Some((2, 9)), None] {
+            for strict in [false, true] {
+                assert!(invalid(with(range, 0, strict)), "{range:?} strict={strict}");
+            }
+        }
+        // Below the published minimum: refused, not lowered to the maximum.
+        for strict in [false, true] {
+            assert!(invalid(with(Some((3, 9)), 2, strict)));
+        }
+        // Above the maximum: lowered with a warning, or refused in strict mode.
+        let p = with(Some((1, 99)), 100, false).unwrap();
+        assert_eq!(p.ticket.copies, Some(99));
+        assert!(p.warnings.iter().any(|w| w.contains("lowered to 99")), "{:?}", p.warnings);
+        assert!(matches!(with(Some((1, 99)), 100, true), Err(WsdError::Unsupported(_))));
+        // No published range: sent as is, the printer decides.
+        let p = with(None, 7, false).unwrap();
+        assert_eq!((p.ticket.copies, p.warnings.len()), (Some(7), 0));
+        assert_eq!(with(None, 1, false).unwrap().ticket.copies, Some(1));
+        // In range, including the ends.
+        assert_eq!(with(Some((2, 9)), 2, true).unwrap().ticket.copies, Some(2));
+        assert_eq!(with(Some((2, 9)), 9, true).unwrap().ticket.copies, Some(9));
+        assert_eq!(with(Some((1, 99)), 1, false).unwrap().ticket.copies, Some(1));
     }
 
     #[test]

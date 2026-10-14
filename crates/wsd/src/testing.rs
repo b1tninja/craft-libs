@@ -121,7 +121,7 @@ pub mod device {
 
     use crate::addressing::{EndpointRef, ReferenceParameter};
     use crate::envelope::new_uuid;
-    use crate::error::{Error, Result};
+    use crate::error::{Error, Result, TransportKind};
     use crate::eventing::{self, Expiry};
     use crate::metadata::{DIALECT_RELATIONSHIP, DIALECT_THIS_DEVICE, DIALECT_THIS_MODEL, RELATIONSHIP_HOST};
     use crate::policy::DeviceUrl;
@@ -267,7 +267,8 @@ pub mod device {
         }
 
         fn handle(&self, path: &str, request: &Request) -> Result<Response> {
-            let text = std::str::from_utf8(&request.body).map_err(|_| Error::Transport("the fake device got a non-text body".into()))?;
+            let text =
+                std::str::from_utf8(&request.body).map_err(|_| Error::transport(TransportKind::Other, "the fake device got a non-text body"))?;
             let doc = xml::parse(text)?;
             let env = doc.root_element();
             let header = xml::child(env, ns::SOAP, "Header").ok_or_else(|| Error::Protocol("no Header".into()))?;
@@ -284,6 +285,7 @@ pub mod device {
                     "<s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value xmlns:f=\"{sub_ns}\">f:{sub_local}</s:Value></s:Subcode></s:Code><s:Reason><s:Text xml:lang=\"en\">{reason}</s:Text></s:Reason></s:Fault>"
                 );
                 Ok(Response {
+                    retry_after: None,
                     status: 500,
                     content_type: Some("application/soap+xml".into()),
                     body: reply_envelope(ns::FAULT_ACTION, &message_id, &[], &body).into_bytes(),
@@ -362,13 +364,13 @@ pub mod device {
     }
 
     fn soap_ok(body: String) -> Response {
-        Response { status: 200, content_type: Some("application/soap+xml".into()), body: body.into_bytes() }
+        Response { retry_after: None, status: 200, content_type: Some("application/soap+xml".into()), body: body.into_bytes() }
     }
 
     impl Transport for FakeDevice {
         fn post(&self, url: &DeviceUrl, request: Request) -> Result<Response> {
             if url.host().to_string() != self.host || url.port() != self.port {
-                return Err(Error::Transport("connection refused (this is not the fake device's address)".into()));
+                return Err(Error::transport(TransportKind::Refused, "connection refused (this is not the fake device's address)"));
             }
             self.handle(url.path(), &request)
         }

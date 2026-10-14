@@ -479,7 +479,7 @@ pub fn parse_incoming(bytes: &[u8]) -> Result<Incoming> {
     let body = xml::child(envelope, ns::SOAP, "Body").ok_or_else(|| Error::Protocol("the envelope has no Body".into()))?;
     let payload = body.children().find(|c| c.is_element()).ok_or_else(|| Error::Protocol("the Body is empty".into()))?;
     if xml::is(payload, ns::SOAP, "Fault") {
-        return Err(Error::Fault(parse_fault(payload)));
+        return Err(Error::from_fault(parse_fault(payload)));
     }
     let header = xml::child(envelope, ns::SOAP, "Header").ok_or_else(|| Error::Protocol("the message has no Header".into()))?;
     let action = addressing(header, "Action").filter(|a| !a.is_empty()).ok_or_else(|| Error::Protocol("the message has no Action".into()))?;

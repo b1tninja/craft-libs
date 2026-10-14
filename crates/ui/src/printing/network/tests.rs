@@ -13,13 +13,40 @@ fn printer() -> PrinterSummary {
         reasons: vec![],
         caps: Caps {
             formats: vec![PDF.into()],
-            sides: vec!["OneSided".into(), "TwoSidedLongEdge".into()],
-            orientations: vec!["Portrait".into()],
-            qualities: vec![],
-            media_sizes: vec!["iso_a4_210x297mm".into()],
-            copies: Some((1, 5)),
+            sides: listed(&["OneSided", "TwoSidedLongEdge"]),
+            orientations: listed(&["Portrait"]),
+            // Not published: unknown.
+            qualities: Capability::Unknown,
+            media_sizes: listed(&["iso_a4_210x297mm"]),
+            copies: Capability::from_option_range(Some((1, 5))),
+            ..Caps::default()
         },
     }
+}
+
+/// A published list of tokens.
+fn listed(tokens: &[&str]) -> Capability<String> {
+    let tokens: Vec<String> = tokens.iter().map(|t| (*t).to_owned()).collect();
+    Capability::from_option_list(Some(&tokens))
+}
+
+/// A draft that was queried at `192.0.2.5` and got `summary`.
+fn queried_with(summary: PrinterSummary) -> Draft {
+    let mut d = Draft { url: "192.0.2.5".into(), ..Default::default() };
+    let g = d.begin_query();
+    d.finish_query(g, &d.normalized_url(), Ok(summary));
+    d
+}
+
+/// A printer whose caps are exactly `caps` (every option not set there is unknown).
+fn with_caps(caps: Caps) -> PrinterSummary {
+    PrinterSummary { caps: Caps { formats: vec![PDF.into()], ..caps }, ..printer() }
+}
+
+/// Answer a new query on `d` with `summary`.
+fn requery(d: &mut Draft, summary: PrinterSummary) {
+    let g = d.begin_query();
+    d.finish_query(g, "http://192.0.2.5", Ok(summary));
 }
 
 fn queried(url: &str) -> Draft {
@@ -55,7 +82,20 @@ fn labels() -> Labels<'static> {
         normal: "Normal",
         high: "Hoch",
         photo: "Foto",
+        color: "Farbe",
+        color_color: "Farbig",
+        color_monochrome: "Schwarzweiss",
+        resolution: "Aufloesung",
+        resolution_dpi: "{dpi} dpi",
+        resolution_dpi_xy: "{x} x {y} dpi",
         auto: "Automatisch",
+        unsupported_copies: "Dieser Drucker druckt nur eine Kopie.",
+        unsupported_sides: "Dieser Drucker druckt nur einseitig.",
+        unsupported_orientation: "Ausrichtung nicht unterstuetzt.",
+        unsupported_quality: "Qualitaet nicht unterstuetzt.",
+        unsupported_color: "Dieser Drucker druckt nur schwarzweiss.",
+        unsupported_resolution: "Aufloesung nicht unterstuetzt.",
+        unconfirmed_note: "Vom Drucker nicht bestaetigt",
         confirm: "Ich bestaetige den Versand",
         sending: "Sende an {printer}",
         canceling: "Abbrechen laeuft",
@@ -102,10 +142,14 @@ fn only_listed_options_are_offered() {
     let d = queried("192.0.2.5");
     assert_eq!(d.offered_sides(), [Sides::OneSided, Sides::LongEdge]);
     assert_eq!(d.offered_orientations(), [Orientation::Portrait]);
-    assert!(d.offered_qualities().is_empty(), "not stated: nothing offered");
+    // Not published is unknown, not unsupported: every known value is offered, as a hint.
+    assert_eq!(d.offered_qualities(), Quality::ALL);
     assert_eq!(d.max_copies(), 5);
+    // Nothing queried: everything unknown, so the hints are what is offered.
     let fresh = Draft::default();
-    assert!(fresh.offered_sides().is_empty() && fresh.offered_orientations().is_empty() && fresh.max_copies() == 1);
+    assert_eq!(fresh.offered_sides(), Sides::ALL);
+    assert_eq!(fresh.offered_orientations(), Orientation::ALL);
+    assert_eq!(fresh.max_copies(), UNKNOWN_MAX_COPIES);
 }
 
 #[test]
@@ -122,7 +166,7 @@ fn photo_is_a_quality_with_a_token_and_a_label() {
 #[test]
 fn photo_is_offered_and_requested_only_for_a_printer_that_lists_it() {
     let mut photo_printer = printer();
-    photo_printer.caps.qualities = vec!["High".into(), "Photo".into(), "Vendor".into()];
+    photo_printer.caps.qualities = listed(&["High", "Photo", "Vendor"]);
     let mut d = Draft { url: "192.0.2.5".into(), ..Default::default() };
     let g = d.begin_query();
     d.finish_query(g, &d.normalized_url(), Ok(photo_printer));
@@ -132,7 +176,7 @@ fn photo_is_offered_and_requested_only_for_a_printer_that_lists_it() {
 
     // Another printer that does not list it: the choice is dropped, not sent.
     let mut plain = printer();
-    plain.caps.qualities = vec!["Normal".into(), "High".into()];
+    plain.caps.qualities = listed(&["Normal", "High"]);
     let g = d.begin_query();
     d.finish_query(g, "http://192.0.2.5", Ok(plain));
     assert_eq!((d.quality, d.request(None).quality), (None, None));
@@ -142,7 +186,9 @@ fn photo_is_offered_and_requested_only_for_a_printer_that_lists_it() {
 
 #[test]
 fn a_request_is_limited_to_what_the_printer_lists() {
-    let mut d = queried("192.0.2.5");
+    let mut listing = printer();
+    listing.caps.qualities = listed(&["Normal", "High"]); // changed: this printer now lists qualities, so Photo is not listed
+    let mut d = queried_with(listing);
     d.copies = 3;
     d.sides = Some(Sides::LongEdge);
     d.quality = Some(Quality::Photo);
@@ -162,9 +208,9 @@ fn choices_the_next_printer_lacks_are_dropped() {
     d.sides = Some(Sides::LongEdge);
     d.orientation = Some(Orientation::Portrait);
     let mut other = printer();
-    other.caps.sides = vec!["OneSided".into()];
-    other.caps.orientations.clear();
-    other.caps.copies = Some((1, 2));
+    other.caps.sides = listed(&["OneSided"]);
+    other.caps.orientations = Capability::Unsupported; // published, and empty
+    other.caps.copies = Capability::from_option_range(Some((1, 2)));
     let g = d.begin_query();
     d.finish_query(g, "http://192.0.2.5", Ok(other));
     assert_eq!((d.sides, d.orientation, d.copies), (None, None, 2));
@@ -422,7 +468,8 @@ fn the_section_shows_its_controls_with_labels_and_drives_query_and_confirmation(
     for label in ["Adresse", "Ich bestaetige den Versand", "Kopien", "Zweiseitig", "Ausrichtung"] {
         assert!(center_of(&output, label).is_some(), "{label} is exposed");
     }
-    assert!(center_of(&output, "Qualitaet").is_none(), "an unlisted option is not drawn");
+    // Changed: an unpublished option (quality here) is unknown, not unsupported, so it is drawn.
+    assert!(center_of(&output, "Qualitaet").is_some(), "an unpublished option is drawn, enabled");
     let at = center_of(&output, "Ich bestaetige den Versand").unwrap_or_default();
     let r = click(&f, at);
     assert!(r.changed);
@@ -790,4 +837,257 @@ fn an_unknown_total_shows_the_count_and_no_bar_and_a_known_one_shows_the_bar() {
     // The printer's own total wins over the expectation.
     let output = drawn(accepted_draft(Some(4), progress(Stage::Printing, Some(1), Some(8))));
     assert!(exposes(&output, "1 von 8") && !exposes(&output, "1 von 4"));
+}
+
+// ---- three-state options: supported, unsupported, unknown ----
+
+fn drawn_with(summary: PrinterSummary) -> egui::FullOutput {
+    drawn(queried_with(summary))
+}
+
+/// For every node whose description is `description`: is it disabled?
+fn described(output: &egui::FullOutput, description: &str) -> Vec<bool> {
+    output
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .map(|t| t.nodes.iter().filter(|(_, n)| n.description() == Some(description)).map(|(_, n)| n.is_disabled()).collect())
+        .unwrap_or_default()
+}
+
+fn one_sided_only() -> PrinterSummary {
+    let mut p = printer();
+    p.caps.sides = listed(&["OneSided"]);
+    p
+}
+
+#[test]
+fn sides_without_a_two_sided_value_are_unsupported_and_the_request_never_carries_one() {
+    let mut d = queried_with(one_sided_only());
+    assert_eq!(d.sides_state(), Capability::Unsupported);
+    assert!(d.offered_sides().is_empty());
+    d.sides = Some(Sides::LongEdge);
+    assert_eq!(d.request(None).sides, None, "a stale two-sided choice is never sent");
+    d.sides = Some(Sides::OneSided);
+    assert_eq!(d.request(None).sides, None, "nor is one-sided: the printer has no duplex option to set");
+    // The dependent choice: a duplex estimate does not halve the sheets of an unsupported option.
+    d.sides = Some(Sides::LongEdge);
+    d.expected_pages = Some(4);
+    assert_eq!(d.expected_sheets(), Some(4));
+    // Cleared on a new answer.
+    let mut d = queried("192.0.2.5");
+    d.sides = Some(Sides::LongEdge);
+    requery(&mut d, one_sided_only());
+    assert_eq!(d.sides, None);
+    // An explicit "no", and a list with nothing the dialog knows, are the same state.
+    let mut p = printer();
+    p.caps.sides = Capability::Unsupported;
+    assert_eq!(queried_with(p).sides_state(), Capability::Unsupported);
+    let mut p = printer();
+    p.caps.sides = listed(&["Vendor"]);
+    assert_eq!(queried_with(p).sides_state(), Capability::Unsupported);
+}
+
+#[test]
+fn every_option_has_the_three_states() {
+    // Supported: restricted to the list; the printer default is carried.
+    let mut p = printer();
+    p.caps.qualities = Capability::list_default_first(&["Draft".to_owned(), "High".to_owned()], Some(&"High".to_owned()));
+    p.caps.color_modes = listed(&["Color", "Monochrome"]);
+    p.caps.resolutions = Capability::from_option_list(Some(&[Resolution::square(300), Resolution::square(600)][..]));
+    let d = queried_with(p);
+    assert_eq!(d.quality_state().list(), [Quality::Draft, Quality::High]);
+    assert_eq!(d.quality_state().default_value(), Some(&Quality::High));
+    assert_eq!(d.offered_colors(), ColorMode::ALL);
+    assert_eq!(d.offered_resolutions(), [Resolution::square(300), Resolution::square(600)]);
+    assert!(d.copies_state().is_supported() && d.sides_state().is_supported());
+
+    // Unknown: nothing published; every hint is offered.
+    let d = queried_with(with_caps(Caps::default()));
+    assert!(d.sides_state().is_enabled() && d.orientation_state().is_enabled() && d.quality_state().is_enabled());
+    assert!(d.color_state().is_enabled() && d.resolution_state().is_enabled() && d.copies_state().is_enabled());
+    assert!(!d.sides_state().is_known() && !d.color_state().is_known() && !d.copies_state().is_known());
+    assert_eq!((d.offered_sides().len(), d.offered_colors().len()), (3, 2));
+    assert_eq!(d.offered_resolutions(), COMMON_RESOLUTIONS);
+    assert_eq!(d.max_copies(), UNKNOWN_MAX_COPIES);
+
+    // Unsupported: published, and no.
+    let unsupported = Caps {
+        sides: Capability::Unsupported,
+        orientations: Capability::Unsupported,
+        qualities: Capability::Unsupported,
+        color_modes: listed(&["Monochrome"]),
+        resolutions: Capability::Unsupported,
+        copies: Capability::from_option_range(Some((1, 1))),
+        ..Caps::default()
+    };
+    let d = queried_with(with_caps(unsupported));
+    assert!(d.sides_state().is_unsupported() && d.orientation_state().is_unsupported() && d.quality_state().is_unsupported());
+    assert!(d.color_state().is_unsupported(), "a monochrome-only printer has no colour option");
+    assert!(d.resolution_state().is_unsupported() && d.copies_state().is_unsupported(), "a maximum of one copy is not a choice");
+    assert_eq!(d.max_copies(), 1);
+    assert!(d.offered_qualities().is_empty() && d.offered_colors().is_empty() && d.offered_resolutions().is_empty());
+}
+
+#[test]
+fn the_request_omits_unsupported_keeps_unknown_hints_and_restricts_supported() {
+    let set_all = |d: &mut Draft| {
+        d.copies = 3;
+        d.sides = Some(Sides::ShortEdge);
+        d.orientation = Some(Orientation::Landscape);
+        d.quality = Some(Quality::Photo);
+        d.color = Some(ColorMode::Color);
+        d.resolution = Some(Resolution::square(600));
+    };
+    // Unknown: every hint goes.
+    let mut d = queried_with(with_caps(Caps::default()));
+    set_all(&mut d);
+    let r = d.request(Some("na_letter_8.5x11in"));
+    assert_eq!((r.copies, r.sides, r.orientation), (Some(3), Some(Sides::ShortEdge), Some(Orientation::Landscape)));
+    assert_eq!((r.quality, r.color, r.resolution), (Some(Quality::Photo), Some(ColorMode::Color), Some(Resolution::square(600))));
+    assert_eq!(r.media_size.as_deref(), Some("na_letter_8.5x11in"), "an unpublished media list does not drop the app's size");
+    // Unsupported: nothing goes, even when the draft still holds the values.
+    let none = Caps {
+        sides: Capability::Unsupported,
+        orientations: Capability::Unsupported,
+        qualities: Capability::Unsupported,
+        color_modes: Capability::Unsupported,
+        media_sizes: Capability::Unsupported,
+        resolutions: Capability::Unsupported,
+        copies: Capability::Unsupported,
+        ..Caps::default()
+    };
+    let mut d = queried_with(with_caps(none));
+    set_all(&mut d);
+    let r = d.request(Some("iso_a4_210x297mm"));
+    assert_eq!((r.copies, r.sides, r.orientation, r.quality), (None, None, None, None));
+    assert_eq!((r.color, r.resolution, r.media_size), (None, None, None));
+    // Supported: only listed values; copies clamped into the range.
+    let some = Caps {
+        sides: listed(&["OneSided", "TwoSidedLongEdge"]),
+        orientations: listed(&["Portrait"]),
+        qualities: listed(&["Normal"]),
+        color_modes: listed(&["Color", "Monochrome"]),
+        media_sizes: listed(&["iso_a4_210x297mm"]),
+        resolutions: Capability::from_option_list(Some(&[Resolution::square(300)][..])),
+        copies: Capability::from_option_range(Some((1, 2))),
+        ..Caps::default()
+    };
+    let mut d = queried_with(with_caps(some));
+    set_all(&mut d);
+    d.sides = Some(Sides::LongEdge);
+    let r = d.request(Some("na_letter_8.5x11in"));
+    assert_eq!((r.copies, r.sides, r.orientation, r.quality), (Some(2), Some(Sides::LongEdge), None, None));
+    assert_eq!((r.color, r.resolution, r.media_size), (Some(ColorMode::Color), None, None));
+}
+
+#[test]
+fn states_follow_the_query_and_a_failed_query_is_all_unknown() {
+    let mut d = queried_with(one_sided_only());
+    assert!(d.sides_state().is_unsupported());
+    // A printer that does not publish duplex: a hint is kept and sent.
+    requery(&mut d, with_caps(Caps::default()));
+    assert!(!d.sides_state().is_known(), "a new answer replaces the old states");
+    d.sides = Some(Sides::LongEdge);
+    assert_eq!(d.request(None).sides, Some(Sides::LongEdge));
+    // Back to a printer that rules it out: cleared.
+    requery(&mut d, one_sided_only());
+    assert_eq!(d.sides, None);
+    d.color = Some(ColorMode::Color);
+    let mut mono = printer();
+    mono.caps.color_modes = listed(&["Monochrome"]);
+    requery(&mut d, mono);
+    assert_eq!(d.color, None, "colour is cleared on a black-and-white printer");
+    // The details failed: nothing is known, and the old answer's states are gone.
+    d.copies = 3;
+    let g = d.begin_query();
+    d.finish_query(g, "http://192.0.2.5", Err(Failure::new(FailureKind::Transport, "timed out")));
+    assert!(d.printer().is_none());
+    assert!(!d.sides_state().is_known() && !d.color_state().is_known() && !d.copies_state().is_known());
+    assert_eq!(d.request(None), Request::default());
+    // Another address: the answer for the first is not applied.
+    let mut d = queried_with(one_sided_only());
+    d.url = "192.0.2.9".into();
+    d.address_edited();
+    assert!(!d.sides_state().is_known());
+}
+
+#[test]
+fn only_the_edges_the_printer_lists_are_offered() {
+    let mut p = printer();
+    p.caps.sides = listed(&["OneSided", "TwoSidedShortEdge"]);
+    let d = queried_with(p);
+    assert_eq!(d.offered_sides(), [Sides::OneSided, Sides::ShortEdge]);
+}
+
+#[test]
+fn status_never_disables_a_control() {
+    // A printer that is out of paper with a cover open still has every capability.
+    let mut p = printer();
+    p.state = "Stopped".into();
+    p.reasons = vec!["media-empty".into(), "cover-open".into()];
+    let d = queried_with(p);
+    assert!(d.sides_state().is_supported() && d.copies_state().is_supported());
+    assert_eq!(d.max_copies(), 5);
+    let output = drawn(d);
+    assert!(center_of(&output, "Gruende: media-empty, cover-open").is_some(), "the reasons are shown as a warning");
+    assert!(described(&output, "Vom Drucker nicht bestaetigt").iter().all(|disabled| !disabled), "controls stay enabled");
+}
+
+#[test]
+fn an_unsupported_control_is_shown_disabled_with_its_reason_as_text_and_description() {
+    let output = drawn_with(one_sided_only());
+    assert!(center_of(&output, "Zweiseitig").is_some(), "greyed, not hidden");
+    assert!(center_of(&output, "Dieser Drucker druckt nur einseitig.").is_some(), "the reason is visible");
+    assert_eq!(described(&output, "Dieser Drucker druckt nur einseitig."), [true], "the description is the reason and the control is disabled");
+    assert!(described(&output, "Ausrichtung nicht unterstuetzt.").is_empty(), "a supported option has no reason");
+}
+
+#[test]
+fn an_unknown_control_is_enabled_with_the_note_and_a_supported_one_is_enabled_and_restricted() {
+    // printer(): quality, colour and resolution unknown; sides, orientation and copies supported.
+    let output = drawn_with(printer());
+    let notes = described(&output, "Vom Drucker nicht bestaetigt");
+    assert_eq!(notes, [false, false, false], "quality, colour and resolution are enabled with the note");
+    assert!(center_of(&output, "Vom Drucker nicht bestaetigt").is_some(), "the note is visible text");
+    for label in ["Qualitaet", "Farbe", "Aufloesung", "Zweiseitig", "Ausrichtung", "Kopien"] {
+        assert!(center_of(&output, label).is_some(), "{label}");
+    }
+    assert!(!exposes(&output, "Dieser Drucker druckt nur einseitig."));
+}
+
+#[test]
+fn all_unsupported_draws_every_reason_on_a_disabled_control() {
+    let none = Caps {
+        sides: Capability::Unsupported,
+        orientations: Capability::Unsupported,
+        qualities: Capability::Unsupported,
+        color_modes: listed(&["Monochrome"]),
+        resolutions: Capability::Unsupported,
+        copies: Capability::from_option_range(Some((1, 1))),
+        ..Caps::default()
+    };
+    let output = drawn_with(with_caps(none));
+    for reason in [
+        "Dieser Drucker druckt nur eine Kopie.",
+        "Dieser Drucker druckt nur einseitig.",
+        "Ausrichtung nicht unterstuetzt.",
+        "Qualitaet nicht unterstuetzt.",
+        "Dieser Drucker druckt nur schwarzweiss.",
+        "Aufloesung nicht unterstuetzt.",
+    ] {
+        assert_eq!(described(&output, reason), [true], "{reason}");
+    }
+    assert!(!exposes(&output, "Vom Drucker nicht bestaetigt"), "nothing is unknown here");
+}
+
+#[test]
+fn notes_and_option_labels_are_worded_by_the_app() {
+    let l = Labels { unconfirmed_note: "", ..labels() };
+    assert_eq!(l.note(&Capability::<u8>::Unknown, "x"), None, "an empty note label is omitted");
+    assert_eq!(l.note(&Capability::<u8>::Unsupported, "x"), Some("x"));
+    assert_eq!(l.note(&Capability::from_option_list(Some(&[1u8][..])), "x"), None);
+    assert_eq!(l.resolution_label(Resolution::square(600)), "600 dpi");
+    assert_eq!(l.resolution_label(Resolution::new(600, 300)), "600 x 300 dpi");
+    assert_eq!((l.color_label(ColorMode::Color), l.color_label(ColorMode::Monochrome)), ("Farbig", "Schwarzweiss"));
 }

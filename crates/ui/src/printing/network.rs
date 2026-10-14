@@ -7,7 +7,12 @@
 //! workers, and words everything through [`Labels`]. No network work happens while drawing.
 //!
 //! Rules the model keeps:
-//! - the options offered are the ones the printer lists, nothing else;
+//! - every option is three-state ([`Capability`]): **supported** (the printer listed it: the control is
+//!   enabled and offers only what is listed), **unsupported** (the printer answered and the option is
+//!   not part of it: the control is shown disabled with a reason from [`Labels`], and the request never
+//!   carries a value for it) or **unknown** (the printer did not say, or the query failed: the control
+//!   is enabled with a quiet "not confirmed" note and the value is sent as a hint). Capability is
+//!   static; a printer's status (out of paper, cover open) only warns and never disables a control;
 //! - the confirmation is never on by default and never remembered: it clears when the address
 //!   changes, when the printer is queried again, when a job starts and when the dialog opens;
 //! - a job can start only for an address that was queried, with the confirmation ticked.
@@ -23,8 +28,10 @@
 
 use std::sync::mpsc::{Receiver, TryRecvError};
 
+use crate::capability::{Advertised, Capability, Choices};
+
 /// Duplex setting. [`Sides::token`] is the standard attribute value a printer lists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Sides {
     OneSided,
     LongEdge,
@@ -43,7 +50,7 @@ impl Sides {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Orientation {
     Portrait,
     Landscape,
@@ -67,7 +74,7 @@ impl Orientation {
 /// Print quality, the choices of the dialog. `Photo` is offered only for a printer that lists it
 /// ([`Draft::offered_qualities`]); a host maps each to its client's quality setting (`craft-print`
 /// has the same four).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Quality {
     Draft,
     Normal,
@@ -93,17 +100,120 @@ impl Quality {
     }
 }
 
-/// What a printer lists it accepts, as tokens. An empty list means it did not say, and then
-/// nothing of that kind is offered.
+/// Colour or black and white. [`ColorMode::token`] is the value a printer lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ColorMode {
+    Color,
+    Monochrome,
+}
+
+impl ColorMode {
+    pub const ALL: [ColorMode; 2] = [Self::Color, Self::Monochrome];
+
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Color => "Color",
+            Self::Monochrome => "Monochrome",
+        }
+    }
+}
+
+/// A print resolution in dots per inch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Resolution {
+    pub x_dpi: u32,
+    pub y_dpi: u32,
+}
+
+impl Resolution {
+    pub const fn new(x_dpi: u32, y_dpi: u32) -> Self {
+        Resolution { x_dpi, y_dpi }
+    }
+
+    pub const fn square(dpi: u32) -> Self {
+        Resolution { x_dpi: dpi, y_dpi: dpi }
+    }
+}
+
+/// Resolutions offered as hints when a printer listed none ([`Capability::Unknown`]).
+pub const COMMON_RESOLUTIONS: [Resolution; 4] = [Resolution::square(150), Resolution::square(300), Resolution::square(600), Resolution::square(1200)];
+
+/// The most copies offered as a hint when a printer did not say ([`Capability::Unknown`]).
+pub const UNKNOWN_MAX_COPIES: u32 = 99;
+
+/// What a printer says about each option, as [`Capability`] values.
+///
+/// The host fills it from its backend's details. Per option: [`Capability::Unknown`] when the
+/// printer did not publish it (or asking failed); [`Capability::Supported`] with the list or range it
+/// published; [`Capability::Unsupported`] when it published its answer and the option is not in it
+/// (an explicit `false`, or a published empty list). The model also treats a published list that
+/// offers nothing to choose as unsupported: sides without a two-sided value, colour without
+/// [`ColorMode::Color`], copies with a maximum of 1, a list with none of the values the dialog
+/// knows. See the README table for the mapping from `craft-print`'s `PrinterDetails`.
+///
+/// Reshaped from the earlier `Vec<String>` / `Option<(u32, u32)>` fields, where an empty list meant
+/// both "not said" and "nothing"; use [`Capability::from_option_list`] and
+/// [`Capability::from_option_range`] to convert.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Caps {
+    /// Media types the printer takes. Empty means it did not say and the printer is left to answer
+    /// for itself (see [`PrinterSummary::takes_any`]); not an option of the dialog.
     pub formats: Vec<String>,
-    pub sides: Vec<String>,
-    pub orientations: Vec<String>,
-    pub qualities: Vec<String>,
-    pub media_sizes: Vec<String>,
-    /// Allowed copies (min, max).
-    pub copies: Option<(u32, u32)>,
+    /// Duplex tokens ([`Sides::token`]).
+    pub sides: Capability<String>,
+    /// Orientation tokens ([`Orientation::token`]).
+    pub orientations: Capability<String>,
+    /// Quality tokens ([`Quality::token`]); a token that is not one of the four is no choice.
+    pub qualities: Capability<String>,
+    /// Colour-mode tokens ([`ColorMode::token`]).
+    pub color_modes: Capability<String>,
+    /// Media-size tokens. There is no control for it: the app names the size it wants in
+    /// [`Draft::request`].
+    pub media_sizes: Capability<String>,
+    pub resolutions: Capability<Resolution>,
+    /// Allowed copies, as a range.
+    pub copies: Capability<u32>,
+}
+
+static NOTHING_KNOWN: Caps = Caps {
+    formats: Vec::new(),
+    sides: Capability::Unknown,
+    orientations: Capability::Unknown,
+    qualities: Capability::Unknown,
+    color_modes: Capability::Unknown,
+    media_sizes: Capability::Unknown,
+    resolutions: Capability::Unknown,
+    copies: Capability::Unknown,
+};
+
+/// The typed view of a token capability: the values the dialog knows, in its order. Unknown stays
+/// unknown. A published list with none of the known values, or none for which `varied` holds (a
+/// choice among nothing), is unsupported.
+fn typed<T: Copy + PartialEq>(cap: &Capability<String>, all: &[T], token: fn(T) -> &'static str, varied: fn(&[T]) -> bool) -> Capability<T> {
+    match cap {
+        Capability::Unknown => Capability::Unknown,
+        Capability::Unsupported => Capability::Unsupported,
+        Capability::Supported(Advertised { choices: Choices::List(tokens), default }) => {
+            let values: Vec<T> = all.iter().copied().filter(|v| tokens.iter().any(|t| t == token(*v))).collect();
+            if values.is_empty() || !varied(&values) {
+                return Capability::Unsupported;
+            }
+            let default = default.as_deref().and_then(|d| values.iter().copied().find(|v| token(*v) == d));
+            Capability::Supported(Advertised { choices: Choices::List(values), default })
+        }
+        // A range of tokens means nothing.
+        Capability::Supported(_) => Capability::Unknown,
+    }
+}
+
+/// What to offer: every known value (as hints) for an unknown option, the listed values for a
+/// supported one, nothing for an unsupported one.
+fn offered<T: Copy>(cap: &Capability<T>, hints: &[T]) -> Vec<T> {
+    match cap {
+        Capability::Unknown => hints.to_vec(),
+        Capability::Unsupported => Vec::new(),
+        other => other.list().to_vec(),
+    }
 }
 
 /// What a query learned about a printer.
@@ -344,6 +454,8 @@ pub struct Request {
     pub sides: Option<Sides>,
     pub orientation: Option<Orientation>,
     pub quality: Option<Quality>,
+    pub color: Option<ColorMode>,
+    pub resolution: Option<Resolution>,
     pub media_size: Option<String>,
     /// The page count the app set in [`Draft::expected_pages`], for the host to pass on (a
     /// `craft-print` worker puts it in `JobOptions::expected_pages`). `None` when the app did not say.
@@ -382,6 +494,8 @@ pub struct Draft {
     pub sides: Option<Sides>,
     pub orientation: Option<Orientation>,
     pub quality: Option<Quality>,
+    pub color: Option<ColorMode>,
+    pub resolution: Option<Resolution>,
     /// How many pages the document has, when the app knows. Set it before [`State::start_job`]: it
     /// goes to the host in [`Request::expected_pages`] and, as an estimate of the sheets
     /// ([`Draft::expected_sheets`]), becomes the total of the progress bar when the printer reports
@@ -405,6 +519,8 @@ impl Default for Draft {
             sides: None,
             orientation: None,
             quality: None,
+            color: None,
+            resolution: None,
             expected_pages: None,
             confirmed: false,
             job: JobView::Idle,
@@ -457,6 +573,8 @@ impl Draft {
         self.sides = None;
         self.orientation = None;
         self.quality = None;
+        self.color = None;
+        self.resolution = None;
     }
 
     /// The dialog opens: a confirmation from before is void, and so is a finished job's report.
@@ -467,23 +585,78 @@ impl Draft {
         }
     }
 
+    /// What the printer said, or nothing (all unknown) when no printer was queried for this address
+    /// or the query failed.
+    pub fn caps(&self) -> &Caps {
+        self.printer().map_or(&NOTHING_KNOWN, |p| &p.caps)
+    }
+
+    /// The duplex option. A list without a two-sided value is [`Capability::Unsupported`]
+    /// (nothing to choose). Together with the sides control, the "flip on long/short edge" choices
+    /// are unavailable then.
+    pub fn sides_state(&self) -> Capability<Sides> {
+        typed(&self.caps().sides, &Sides::ALL, Sides::token, |v| v.iter().any(|s| *s != Sides::OneSided))
+    }
+
+    pub fn orientation_state(&self) -> Capability<Orientation> {
+        typed(&self.caps().orientations, &Orientation::ALL, Orientation::token, |_| true)
+    }
+
+    pub fn quality_state(&self) -> Capability<Quality> {
+        typed(&self.caps().qualities, &Quality::ALL, Quality::token, |_| true)
+    }
+
+    /// A list without [`ColorMode::Color`] is a black-and-white printer: [`Capability::Unsupported`].
+    pub fn color_state(&self) -> Capability<ColorMode> {
+        typed(&self.caps().color_modes, &ColorMode::ALL, ColorMode::token, |v| v.contains(&ColorMode::Color))
+    }
+
+    pub fn resolution_state(&self) -> Capability<Resolution> {
+        self.caps().resolutions.clone()
+    }
+
+    /// Copies as a range; a maximum of 1 is [`Capability::Unsupported`] (nothing to choose).
+    pub fn copies_state(&self) -> Capability<u32> {
+        match &self.caps().copies {
+            Capability::Supported(Advertised { choices: Choices::Range { max, .. }, .. }) if *max <= 1 => Capability::Unsupported,
+            other => other.clone(),
+        }
+    }
+
+    pub fn media_state(&self) -> Capability<String> {
+        self.caps().media_sizes.clone()
+    }
+
+    /// The choices to offer: the listed ones, all known values (as hints) when the printer did not
+    /// say, none when it does not support the option.
     pub fn offered_sides(&self) -> Vec<Sides> {
-        self.printer().map(|p| Sides::ALL.into_iter().filter(|s| p.caps.sides.iter().any(|t| t == s.token())).collect()).unwrap_or_default()
+        offered(&self.sides_state(), &Sides::ALL)
     }
 
     pub fn offered_orientations(&self) -> Vec<Orientation> {
-        self.printer()
-            .map(|p| Orientation::ALL.into_iter().filter(|o| p.caps.orientations.iter().any(|t| t == o.token())).collect())
-            .unwrap_or_default()
+        offered(&self.orientation_state(), &Orientation::ALL)
     }
 
     pub fn offered_qualities(&self) -> Vec<Quality> {
-        self.printer().map(|p| Quality::ALL.into_iter().filter(|q| p.caps.qualities.iter().any(|t| t == q.token())).collect()).unwrap_or_default()
+        offered(&self.quality_state(), &Quality::ALL)
     }
 
-    /// The most copies the printer takes (1 when it did not say).
+    pub fn offered_colors(&self) -> Vec<ColorMode> {
+        offered(&self.color_state(), &ColorMode::ALL)
+    }
+
+    pub fn offered_resolutions(&self) -> Vec<Resolution> {
+        offered(&self.resolution_state(), &COMMON_RESOLUTIONS)
+    }
+
+    /// The most copies to offer: what the printer lists, [`UNKNOWN_MAX_COPIES`] when it did not
+    /// say, 1 when it takes no more than one.
     pub fn max_copies(&self) -> u32 {
-        self.printer().and_then(|p| p.caps.copies).map_or(1, |(_, max)| max.clamp(1, 9999))
+        match self.copies_state() {
+            Capability::Unknown => UNKNOWN_MAX_COPIES,
+            Capability::Supported(Advertised { choices: Choices::Range { max, .. }, .. }) => max.clamp(1, 9999),
+            _ => 1,
+        }
     }
 
     /// The sheets the job should use, estimated from [`Self::expected_pages`]: halved (rounded up)
@@ -491,7 +664,8 @@ impl Draft {
     /// and what it reports wins. `None` without a page count (or with zero pages).
     pub fn expected_sheets(&self) -> Option<u32> {
         let pages = self.expected_pages.filter(|pages| *pages > 0)?;
-        let per_sheet = if matches!(self.sides, Some(Sides::LongEdge | Sides::ShortEdge)) { 2 } else { 1 };
+        let sides = self.sides.filter(|s| self.sides_state().allows(s));
+        let per_sheet = if matches!(sides, Some(Sides::LongEdge | Sides::ShortEdge)) { 2 } else { 1 };
         Some(pages.div_ceil(per_sheet).saturating_mul(self.copies.clamp(1, self.max_copies())))
     }
 
@@ -522,17 +696,14 @@ impl Draft {
         }
     }
 
-    /// Drop choices the (new) printer does not list, and bring copies within its limit.
+    /// Drop choices the (new) printer does not allow (an unsupported option is cleared, a listed one
+    /// kept only when listed, an unknown one kept as a hint), and bring copies within its limit.
     pub fn keep_only_offered(&mut self) {
-        if self.sides.is_some_and(|s| !self.offered_sides().contains(&s)) {
-            self.sides = None;
-        }
-        if self.orientation.is_some_and(|o| !self.offered_orientations().contains(&o)) {
-            self.orientation = None;
-        }
-        if self.quality.is_some_and(|q| !self.offered_qualities().contains(&q)) {
-            self.quality = None;
-        }
+        self.sides = self.sides.filter(|s| self.sides_state().allows(s));
+        self.orientation = self.orientation.filter(|o| self.orientation_state().allows(o));
+        self.quality = self.quality.filter(|q| self.quality_state().allows(q));
+        self.color = self.color.filter(|c| self.color_state().allows(c));
+        self.resolution = self.resolution.filter(|r| self.resolution_state().allows(r));
         self.copies = self.copies.clamp(1, self.max_copies());
     }
 
@@ -558,16 +729,18 @@ impl Draft {
         None
     }
 
-    /// The settings to send, limited to what the printer lists. `media` is the media-size token
-    /// the app wants; it is dropped unless the printer lists it.
+    /// The settings to send. An unsupported option never carries a value; a supported one carries
+    /// only a listed value; an unknown one carries the person's choice as a hint. `media` is the
+    /// media-size token the app wants, handled the same way (there is no control: the app names it).
     pub fn request(&self, media: Option<&str>) -> Request {
-        let printer = self.printer();
-        let media_size = media.filter(|m| printer.is_some_and(|p| p.caps.media_sizes.iter().any(|s| s == m))).map(str::to_owned);
+        let media_size = media.and_then(|m| self.media_state().clamp_to_supported(&m.to_owned()));
         Request {
-            copies: (self.copies > 1).then_some(self.copies.min(self.max_copies())),
-            sides: self.sides.filter(|s| self.offered_sides().contains(s)),
-            orientation: self.orientation.filter(|o| self.offered_orientations().contains(o)),
-            quality: self.quality.filter(|q| self.offered_qualities().contains(q)),
+            copies: (self.copies > 1 && self.copies_state().is_enabled()).then_some(self.copies.min(self.max_copies())),
+            sides: self.sides.filter(|s| self.sides_state().allows(s)),
+            orientation: self.orientation.filter(|o| self.orientation_state().allows(o)),
+            quality: self.quality.filter(|q| self.quality_state().allows(q)),
+            color: self.color.filter(|c| self.color_state().allows(c)),
+            resolution: self.resolution.filter(|r| self.resolution_state().allows(r)),
             media_size,
             expected_pages: self.expected_pages.filter(|pages| *pages > 0),
         }
@@ -687,8 +860,28 @@ pub struct Labels<'a> {
     pub normal: &'a str,
     pub high: &'a str,
     pub photo: &'a str,
+    pub color: &'a str,
+    pub color_color: &'a str,
+    pub color_monochrome: &'a str,
+    pub resolution: &'a str,
+    /// Template with `{dpi}`: a square resolution.
+    pub resolution_dpi: &'a str,
+    /// Template with `{x}` and `{y}`: a resolution that differs by axis.
+    pub resolution_dpi_xy: &'a str,
     /// The printer's own default.
     pub auto: &'a str,
+    /// Shown, with the disabled control, when the printer answered and does not support the option
+    /// (for example "This printer only prints one-sided."). The control stays visible so people
+    /// understand why; the reason is also its accessible description.
+    pub unsupported_copies: &'a str,
+    pub unsupported_sides: &'a str,
+    pub unsupported_orientation: &'a str,
+    pub unsupported_quality: &'a str,
+    pub unsupported_color: &'a str,
+    pub unsupported_resolution: &'a str,
+    /// A quiet note for an enabled option the printer did not publish ("not confirmed by the
+    /// printer"); the value is sent as a hint. Empty to omit.
+    pub unconfirmed_note: &'a str,
     /// The wording of the per-job confirmation belongs to the app.
     pub confirm: &'a str,
     /// Template with `{printer}`.
@@ -786,6 +979,32 @@ impl Labels<'_> {
             Orientation::ReversePortrait => self.reverse_portrait,
             Orientation::ReverseLandscape => self.reverse_landscape,
         }
+    }
+
+    fn color_label(&self, color: ColorMode) -> &str {
+        match color {
+            ColorMode::Color => self.color_color,
+            ColorMode::Monochrome => self.color_monochrome,
+        }
+    }
+
+    fn resolution_label(&self, r: Resolution) -> String {
+        if r.x_dpi == r.y_dpi {
+            fill(self.resolution_dpi, "dpi", &r.x_dpi.to_string())
+        } else {
+            fill(&fill(self.resolution_dpi_xy, "x", &r.x_dpi.to_string()), "y", &r.y_dpi.to_string())
+        }
+    }
+
+    /// The note under an option's control: the reason when it is unsupported, the quiet note when
+    /// the printer did not say, nothing when it listed it.
+    fn note<'s, T>(&'s self, state: &Capability<T>, reason: &'s str) -> Option<&'s str> {
+        let text = match state {
+            Capability::Unsupported => reason,
+            Capability::Unknown => self.unconfirmed_note,
+            _ => "",
+        };
+        (!text.is_empty()).then_some(text)
     }
 
     fn quality_label(&self, quality: Quality) -> &str {
@@ -991,33 +1210,74 @@ impl State {
             return false;
         }
         let draft = &mut self.draft;
+        let (copies_state, sides_state, orientation_state) = (draft.copies_state(), draft.sides_state(), draft.orientation_state());
+        let (quality_state, color_state, resolution_state) = (draft.quality_state(), draft.color_state(), draft.resolution_state());
         let sides = draft.offered_sides();
         let orientations = draft.offered_orientations();
         let qualities = draft.offered_qualities();
+        let colors = draft.offered_colors();
+        let resolutions = draft.offered_resolutions();
         let max = draft.max_copies();
+        // An unsupported option holds no value, so the disabled control shows the printer's default.
+        if !copies_state.is_enabled() {
+            draft.copies = 1;
+        }
+        if !sides_state.is_enabled() {
+            draft.sides = None;
+        }
+        if !orientation_state.is_enabled() {
+            draft.orientation = None;
+        }
+        if !quality_state.is_enabled() {
+            draft.quality = None;
+        }
+        if !color_state.is_enabled() {
+            draft.color = None;
+        }
+        if !resolution_state.is_enabled() {
+            draft.resolution = None;
+        }
         ui.add_enabled_ui(!draft.running(), |ui| {
             egui::Grid::new("options").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
-                if max > 1 {
-                    let label = ui.label(labels.copies);
-                    changed |= ui.add(egui::DragValue::new(&mut draft.copies).range(1..=max)).labelled_by(label.id).changed();
-                    ui.end_row();
-                }
-                if !sides.is_empty() {
-                    let label = ui.label(labels.sides);
-                    changed |= choice(ui, "sides", label.id, labels.auto, &mut draft.sides, &sides, |s| labels.sides_label(s));
-                    ui.end_row();
-                }
-                if !orientations.is_empty() {
-                    let label = ui.label(labels.orientation);
-                    changed |=
-                        choice(ui, "orientation", label.id, labels.auto, &mut draft.orientation, &orientations, |o| labels.orientation_label(o));
-                    ui.end_row();
-                }
-                if !qualities.is_empty() {
-                    let label = ui.label(labels.quality);
-                    changed |= choice(ui, "quality", label.id, labels.auto, &mut draft.quality, &qualities, |q| labels.quality_label(q));
-                    ui.end_row();
-                }
+                let copies = &mut draft.copies;
+                changed |=
+                    option_row(ui, labels.copies, copies_state.is_enabled(), labels.note(&copies_state, labels.unsupported_copies), |ui, label| {
+                        let response = ui.add(egui::DragValue::new(copies).range(1..=max)).labelled_by(label);
+                        (response.clone(), response.changed())
+                    });
+                changed |=
+                    option_row(ui, labels.sides, sides_state.is_enabled(), labels.note(&sides_state, labels.unsupported_sides), |ui, label| {
+                        choice(ui, "sides", label, labels.auto, &mut draft.sides, &sides, |s| labels.sides_label(s).to_owned())
+                    });
+                changed |= option_row(
+                    ui,
+                    labels.orientation,
+                    orientation_state.is_enabled(),
+                    labels.note(&orientation_state, labels.unsupported_orientation),
+                    |ui, label| {
+                        choice(ui, "orientation", label, labels.auto, &mut draft.orientation, &orientations, |o| {
+                            labels.orientation_label(o).to_owned()
+                        })
+                    },
+                );
+                changed |= option_row(
+                    ui,
+                    labels.quality,
+                    quality_state.is_enabled(),
+                    labels.note(&quality_state, labels.unsupported_quality),
+                    |ui, label| choice(ui, "quality", label, labels.auto, &mut draft.quality, &qualities, |q| labels.quality_label(q).to_owned()),
+                );
+                changed |=
+                    option_row(ui, labels.color, color_state.is_enabled(), labels.note(&color_state, labels.unsupported_color), |ui, label| {
+                        choice(ui, "color", label, labels.auto, &mut draft.color, &colors, |c| labels.color_label(c).to_owned())
+                    });
+                changed |= option_row(
+                    ui,
+                    labels.resolution,
+                    resolution_state.is_enabled(),
+                    labels.note(&resolution_state, labels.unsupported_resolution),
+                    |ui, label| choice(ui, "resolution", label, labels.auto, &mut draft.resolution, &resolutions, |r| labels.resolution_label(r)),
+                );
             });
         });
         changed
@@ -1107,19 +1367,45 @@ fn failure_lines(ui: &mut egui::Ui, labels: &Labels<'_>, failure: &Failure) {
     }
 }
 
-/// A choice among what the printer lists, with the printer's own default first. True on change.
-fn choice<'a, T: Copy + PartialEq>(
+/// One row of the options grid: the label, the control and, under it, a small note. `enabled` is
+/// false for an unsupported option: the control stays, disabled, and the note is its reason. The
+/// note is also the control's accessible description. `add` draws the control (given the label's id
+/// for `labelled_by`) and returns its response and whether the value changed.
+fn option_row(
+    ui: &mut egui::Ui,
+    text: &str,
+    enabled: bool,
+    note: Option<&str>,
+    add: impl FnOnce(&mut egui::Ui, egui::Id) -> (egui::Response, bool),
+) -> bool {
+    let label = ui.label(text);
+    let mut changed = false;
+    ui.vertical(|ui| {
+        let (response, did_change) = ui.add_enabled_ui(enabled, |ui| add(ui, label.id)).inner;
+        changed = did_change && enabled;
+        if let Some(note) = note {
+            ui.ctx().accesskit_node_builder(response.id, |node| node.set_description(note));
+            ui.label(egui::RichText::new(note).small().weak());
+        }
+    });
+    ui.end_row();
+    changed
+}
+
+/// A choice among what the printer lists, with the printer's own default first. Returns the
+/// control's response and whether the value changed.
+fn choice<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     id: &str,
     label: egui::Id,
-    auto: &'a str,
+    auto: &str,
     value: &mut Option<T>,
     offered: &[T],
-    name: impl Fn(T) -> &'a str,
-) -> bool {
+    name: impl Fn(T) -> String,
+) -> (egui::Response, bool) {
     let before = *value;
-    let shown = value.map_or(auto, &name);
-    egui::ComboBox::from_id_salt(id)
+    let shown = value.map_or_else(|| auto.to_owned(), &name);
+    let response = egui::ComboBox::from_id_salt(id)
         .selected_text(shown)
         .width(180.0)
         .show_ui(ui, |ui| {
@@ -1130,7 +1416,7 @@ fn choice<'a, T: Copy + PartialEq>(
         })
         .response
         .labelled_by(label);
-    *value != before
+    (response, *value != before)
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ craft-atomic = { path = "crates/atomic" }
 craft-cms = { path = "crates/cms" }
 craft-print = { path = "crates/print" }
 craft-quit = { path = "crates/quit" }
+craft-scan = { path = "crates/scan" }
 craft-settings = { path = "crates/settings" }
 craft-ui = { path = "crates/ui" }
 egui = { version = "0.36", default-features = false }

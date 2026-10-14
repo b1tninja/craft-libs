@@ -11,6 +11,13 @@
 //! - the confirmation is never on by default and never remembered: it clears when the address
 //!   changes, when the printer is queried again, when a job starts and when the dialog opens;
 //! - a job can start only for an address that was queried, with the confirmation ticked.
+//!
+//! A job has two phases and the model shows both. The host's [`SendJob`] worker sends the document
+//! (`JobView::Running`), reports **accepted** (`JobUpdate::Accepted`, `JobView::Accepted`: the printer
+//! has the document; nothing says it has printed), may report what the printer says
+//! (`JobUpdate::Status`), and finally answers with the result. A printer that cannot report ends with
+//! [`Outcome::AcceptedUnknown`]: sent, outcome unknown. All of it arrives over `mpsc` receivers that
+//! [`State::poll`] drains once per frame, so nothing blocks the UI thread.
 
 use std::sync::mpsc::{Receiver, TryRecvError};
 
@@ -159,11 +166,21 @@ impl FailureKind {
 pub struct Failure {
     pub kind: FailureKind,
     pub detail: String,
+    /// The request may have reached the printer (the connection dropped after the document went
+    /// out): sending again could print twice. The UI says so; see [`Labels::outcome_unknown_warning`].
+    pub outcome_unknown: bool,
 }
 
 impl Failure {
     pub fn new(kind: FailureKind, detail: impl Into<String>) -> Self {
-        Failure { kind, detail: detail.into() }
+        Failure { kind, detail: detail.into(), outcome_unknown: false }
+    }
+
+    /// Mark the failure as one that may have been delivered.
+    #[must_use]
+    pub fn with_outcome_unknown(mut self, outcome_unknown: bool) -> Self {
+        self.outcome_unknown = outcome_unknown;
+        self
     }
 }
 
@@ -177,6 +194,9 @@ pub enum Outcome {
     Aborted,
     Forgotten,
     StillRunning,
+    /// The printer has the document and cannot say more: sent, outcome unknown. Not a failure and not
+    /// a claim that it printed.
+    AcceptedUnknown,
 }
 
 impl Outcome {
@@ -189,6 +209,7 @@ impl Outcome {
             "canceled" => Outcome::Canceled,
             "forgotten" => Outcome::Forgotten,
             "still_running" => Outcome::StillRunning,
+            "accepted_unknown" | "no_status" => Outcome::AcceptedUnknown,
             _ => Outcome::Aborted,
         }
     }
@@ -207,12 +228,65 @@ pub struct Report {
     pub notes: Vec<String>,
 }
 
+/// How far a job the printer accepted has got, as far as the printer says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Stage {
+    /// Accepted; nothing more is known (yet, or ever).
+    #[default]
+    Accepted,
+    /// Queued behind other work.
+    Waiting,
+    Held,
+    Printing,
+    /// Paused and needing attention; the reasons are in [`Progress::notes`].
+    Stopped,
+}
+
+impl Stage {
+    /// A tolerant mapping from a client's job-state names (`pending`, `held`, `processing`,
+    /// `stopped`); anything else, `unknown` included, is [`Stage::Accepted`].
+    pub fn from_name(name: &str) -> Stage {
+        match name {
+            "pending" => Stage::Waiting,
+            "held" => Stage::Held,
+            "processing" => Stage::Printing,
+            "stopped" => Stage::Stopped,
+            _ => Stage::Accepted,
+        }
+    }
+}
+
+/// What the printer says about an accepted job.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub stage: Stage,
+    pub sheets_done: Option<u32>,
+    pub sheets_total: Option<u32>,
+    /// The printer's reasons, as received.
+    pub notes: Vec<String>,
+}
+
+/// What a [`SendJob`] worker reports before its result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobUpdate {
+    /// The printer has accepted the document. Sending is over; nothing says it has printed.
+    Accepted(Progress),
+    /// A newer status of the accepted job.
+    Status(Progress),
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum JobView {
     #[default]
     Idle,
+    /// The document is being sent; the printer has not accepted it yet.
     Running {
         canceling: bool,
+    },
+    /// The printer has the document (see [`Stage`]); the worker is still watching it.
+    Accepted {
+        canceling: bool,
+        progress: Progress,
     },
     Finished(Report),
     Failed(Failure),
@@ -301,8 +375,9 @@ impl Draft {
         normalize_url(&self.url)
     }
 
+    /// A job is in flight: being sent, or accepted and still watched.
     pub fn running(&self) -> bool {
-        matches!(self.job, JobView::Running { .. })
+        matches!(self.job, JobView::Running { .. } | JobView::Accepted { .. })
     }
 
     pub fn querying(&self) -> bool {
@@ -449,11 +524,29 @@ impl Draft {
     /// Cancel was pressed; returns `true` when a running job should be told.
     pub fn job_canceling(&mut self) -> bool {
         match &mut self.job {
-            JobView::Running { canceling } if !*canceling => {
+            JobView::Running { canceling } | JobView::Accepted { canceling, .. } if !*canceling => {
                 *canceling = true;
                 true
             }
             _ => false,
+        }
+    }
+
+    /// The printer accepted the document. Ignored unless a job is being sent; a cancel already
+    /// pressed is kept.
+    pub fn job_accepted(&mut self, progress: Progress) {
+        if let JobView::Running { canceling } = self.job {
+            self.job = JobView::Accepted { canceling, progress };
+        }
+    }
+
+    /// A newer status of the accepted job. A status that arrives before the acceptance is taken as
+    /// the acceptance; one that arrives after the job ended is dropped.
+    pub fn job_progress(&mut self, progress: Progress) {
+        match &mut self.job {
+            JobView::Accepted { progress: shown, .. } => *shown = progress,
+            JobView::Running { canceling } => self.job = JobView::Accepted { canceling: *canceling, progress },
+            _ => {}
         }
     }
 
@@ -467,10 +560,33 @@ pub type QueryReceiver = Receiver<Result<PrinterSummary, Failure>>;
 /// Ask the printer at the (normalised) address what it supports.
 pub type QueryPrinter = Box<dyn Fn(&str) -> QueryReceiver>;
 
-/// A running job: its result, and a way to ask the host to stop it.
+/// A running job: its result, optionally what happens on the way, and a way to ask the host to stop
+/// it. Build it with [`JobHandle::new`] (and [`JobHandle::with_updates`]).
+///
+/// The worker sends [`JobUpdate::Accepted`] when the printer has the document, [`JobUpdate::Status`]
+/// as it learns more, and last the result on `result`; for a printer that cannot report it sends
+/// `Accepted` and then `Ok(Report { outcome: Outcome::AcceptedUnknown, .. })`. A worker that sends no
+/// updates behaves as before. A worker that stops after `Accepted` without a result is shown as
+/// sent, outcome unknown, not as a failure.
+#[non_exhaustive]
 pub struct JobHandle {
     pub result: Receiver<Result<Report, Failure>>,
+    pub updates: Option<Receiver<JobUpdate>>,
     pub cancel: Box<dyn Fn()>,
+}
+
+impl JobHandle {
+    /// A handle with a result and a cancel, and no updates.
+    pub fn new(result: Receiver<Result<Report, Failure>>, cancel: Box<dyn Fn()>) -> Self {
+        JobHandle { result, updates: None, cancel }
+    }
+
+    /// Also deliver what happens between acceptance and the result.
+    #[must_use]
+    pub fn with_updates(mut self, updates: Receiver<JobUpdate>) -> Self {
+        self.updates = Some(updates);
+        self
+    }
 }
 
 /// Send the app's document to the (normalised) address with the person's settings.
@@ -520,14 +636,27 @@ pub struct Labels<'a> {
     pub cancel: &'a str,
     /// Template with `{printer}`.
     pub sent: &'a str,
+    /// Template with `{printer}`: the printer has the document and nothing more is known yet.
+    pub accepted: &'a str,
+    pub stage_waiting: &'a str,
+    pub stage_held: &'a str,
+    pub stage_printing: &'a str,
+    pub stage_stopped: &'a str,
     /// Template with `{n}`.
     pub sheets: &'a str,
+    /// Template with `{done}` and `{total}`.
+    pub sheets_progress: &'a str,
     pub outcome_warnings: &'a str,
     pub outcome_errors: &'a str,
     pub outcome_canceled: &'a str,
     pub outcome_aborted: &'a str,
     pub outcome_forgotten: &'a str,
     pub outcome_still_running: &'a str,
+    /// Sent, and the printer cannot say what became of it.
+    pub outcome_accepted_unknown: &'a str,
+    /// Shown under a failure whose request may have reached the printer: check the printer before
+    /// sending again.
+    pub outcome_unknown_warning: &'a str,
     pub failure_policy: &'a str,
     pub failure_transport: &'a str,
     pub failure_protocol: &'a str,
@@ -566,6 +695,18 @@ impl Labels<'_> {
             Outcome::Aborted => Some(self.outcome_aborted),
             Outcome::Forgotten => Some(self.outcome_forgotten),
             Outcome::StillRunning => Some(self.outcome_still_running),
+            Outcome::AcceptedUnknown => Some(self.outcome_accepted_unknown),
+        }
+    }
+
+    /// The sentence for a stage of an accepted job; `{printer}` is filled for [`Stage::Accepted`].
+    pub fn stage_text(&self, stage: Stage, printer: &str) -> String {
+        match stage {
+            Stage::Accepted => fill(self.accepted, "printer", printer),
+            Stage::Waiting => self.stage_waiting.to_owned(),
+            Stage::Held => self.stage_held.to_owned(),
+            Stage::Printing => self.stage_printing.to_owned(),
+            Stage::Stopped => self.stage_stopped.to_owned(),
         }
     }
 
@@ -682,10 +823,28 @@ impl State {
             }
         }
         if let Some(job) = &self.job {
+            // What happened on the way first, in order, then the result; one frame drains them all.
+            if let Some(updates) = &job.updates {
+                while let Ok(update) = updates.try_recv() {
+                    match update {
+                        JobUpdate::Accepted(progress) => self.draft.job_accepted(progress),
+                        JobUpdate::Status(progress) => self.draft.job_progress(progress),
+                    }
+                }
+            }
             let view = match job.result.try_recv() {
                 Ok(Ok(report)) => Some(JobView::Finished(report)),
                 Ok(Err(failure)) => Some(JobView::Failed(failure)),
-                Err(TryRecvError::Disconnected) => Some(JobView::Failed(Failure::new(FailureKind::Stopped, ""))),
+                // A worker that ended after the printer accepted the document did not fail: it sent.
+                Err(TryRecvError::Disconnected) => Some(match &self.draft.job {
+                    JobView::Accepted { .. } => JobView::Finished(Report {
+                        outcome: Outcome::AcceptedUnknown,
+                        printer: self.draft.printer().map(|p| p.name.clone()).unwrap_or_default(),
+                        sheets: 0,
+                        notes: Vec::new(),
+                    }),
+                    _ => JobView::Failed(Failure::new(FailureKind::Stopped, "")),
+                }),
                 Err(TryRecvError::Empty) => None,
             };
             if let Some(view) = view {
@@ -819,6 +978,31 @@ impl State {
                 });
                 cancel
             }
+            JobView::Accepted { canceling, progress } => {
+                let mut cancel = false;
+                let printer = self.draft.printer().map_or_else(|| self.draft.url.trim().to_owned(), |p| p.name.clone());
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(if canceling { labels.canceling.to_owned() } else { labels.stage_text(progress.stage, &printer) });
+                    if ui.add_enabled(!canceling, egui::Button::new(labels.cancel)).clicked() {
+                        cancel = self.cancel_job();
+                    }
+                });
+                match (progress.sheets_done, progress.sheets_total) {
+                    (Some(done), Some(total)) if total > 0 => {
+                        let text = fill(&fill(labels.sheets_progress, "done", &done.to_string()), "total", &total.to_string());
+                        ui.add(egui::ProgressBar::new(done.min(total) as f32 / total as f32).text(text));
+                    }
+                    (Some(done), _) if done > 0 => {
+                        ui.label(egui::RichText::new(fill(labels.sheets, "n", &done.to_string())).small().weak());
+                    }
+                    _ => {}
+                }
+                for note in &progress.notes {
+                    ui.label(egui::RichText::new(note).small().weak());
+                }
+                cancel
+            }
             JobView::Finished(report) => {
                 let text = labels.outcome_text(report.outcome).map_or_else(|| fill(labels.sent, "printer", &report.printer), str::to_owned);
                 ui.label(egui::RichText::new(text).strong());
@@ -854,6 +1038,9 @@ fn failure_lines(ui: &mut egui::Ui, labels: &Labels<'_>, failure: &Failure) {
     ui.label(egui::RichText::new(labels.failure_heading(failure.kind)).strong());
     if !failure.detail.is_empty() {
         ui.label(egui::RichText::new(&failure.detail).small().weak());
+    }
+    if failure.outcome_unknown {
+        ui.label(egui::RichText::new(labels.outcome_unknown_warning).small().strong());
     }
 }
 

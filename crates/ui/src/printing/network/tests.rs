@@ -654,3 +654,108 @@ fn an_accepted_job_without_status_says_accepted_and_a_failure_that_may_have_been
     let (_, output) = frame(&f, Vec::new());
     assert!(center_of(&output, "Moeglicherweise schon gesendet: erst am Drucker nachsehen").is_none(), "only when it may have been sent");
 }
+
+// ---- optional sheet totals ----
+
+fn exposes(output: &egui::FullOutput, text: &str) -> bool {
+    output.platform_output.accesskit_update.as_ref().is_some_and(|t| {
+        t.nodes.iter().any(|(_, n)| n.label() == Some(text) || n.value() == Some(text) || n.label().is_some_and(|l| l.contains(text)))
+    })
+}
+
+fn accepted_draft(expected_pages: Option<u32>, progress: Progress) -> Draft {
+    let mut draft = queried("192.0.2.5");
+    draft.expected_pages = expected_pages;
+    draft.job_started();
+    draft.job_accepted(progress);
+    draft
+}
+
+#[test]
+fn progress_is_indeterminate_until_a_total_is_known() {
+    assert_eq!(progress(Stage::Printing, Some(2), None).fraction(), None);
+    assert_eq!(progress(Stage::Printing, None, Some(4)).fraction(), None);
+    assert_eq!(progress(Stage::Printing, Some(2), Some(0)).fraction(), None);
+    assert_eq!(progress(Stage::Printing, Some(1), Some(4)).fraction(), Some(0.25));
+    assert_eq!(progress(Stage::Printing, Some(9), Some(4)).fraction(), Some(1.0), "more than the total is full, not overfull");
+    let unknown = progress(Stage::Printing, Some(2), None);
+    assert_eq!(unknown.clone().with_expected_total(Some(5)).sheets_total, Some(5));
+    assert_eq!(unknown.clone().with_expected_total(None).sheets_total, None);
+    assert_eq!(unknown.with_expected_total(Some(0)).sheets_total, None, "zero is no total");
+    assert_eq!(progress(Stage::Printing, Some(2), Some(3)).with_expected_total(Some(5)).sheets_total, Some(3), "the printer's total wins");
+    assert_eq!(progress(Stage::Printing, Some(2), Some(0)).with_expected_total(Some(5)).sheets_total, Some(5), "a reported zero is not a total");
+}
+
+#[test]
+fn the_expected_sheets_follow_pages_sides_and_copies() {
+    let mut d = queried("192.0.2.5");
+    assert_eq!(d.expected_sheets(), None, "the app has not said");
+    d.expected_pages = Some(5);
+    assert_eq!(d.expected_sheets(), Some(5));
+    d.sides = Some(Sides::LongEdge);
+    assert_eq!(d.expected_sheets(), Some(3), "two pages to a sheet, rounded up");
+    d.copies = 2;
+    assert_eq!(d.expected_sheets(), Some(6));
+    d.expected_pages = Some(0);
+    assert_eq!(d.expected_sheets(), None, "zero pages is unknown");
+    d.expected_pages = Some(4);
+    d.copies = 99;
+    assert_eq!(d.expected_sheets(), Some(2 * 5), "copies stay within what the printer takes");
+}
+
+#[test]
+fn the_request_carries_the_expected_pages_to_the_host() {
+    let mut d = queried("192.0.2.5");
+    assert_eq!(d.request(None).expected_pages, None);
+    d.expected_pages = Some(7);
+    assert_eq!(d.request(None).expected_pages, Some(7));
+    d.expected_pages = Some(0);
+    assert_eq!(d.request(None).expected_pages, None);
+}
+
+#[test]
+fn a_job_without_a_reported_total_gets_the_expected_one_and_a_reported_total_wins() {
+    let d = accepted_draft(Some(4), Progress::default());
+    assert_eq!(d.job, JobView::Accepted { canceling: false, progress: Progress { sheets_total: Some(4), ..Progress::default() } });
+    let mut d = accepted_draft(Some(4), progress(Stage::Printing, Some(1), None));
+    d.job_progress(progress(Stage::Printing, Some(2), None));
+    assert!(matches!(&d.job, JobView::Accepted { progress, .. } if progress.sheets_done == Some(2) && progress.sheets_total == Some(4)));
+    d.job_progress(progress(Stage::Printing, Some(3), Some(6)));
+    assert!(matches!(&d.job, JobView::Accepted { progress, .. } if progress.sheets_total == Some(6)), "the printer's total replaces the estimate");
+    // Without an expectation nothing is invented.
+    let d = accepted_draft(None, progress(Stage::Printing, Some(1), None));
+    assert!(matches!(&d.job, JobView::Accepted { progress, .. } if progress.sheets_total.is_none()));
+    // The estimate is taken when the job starts: later edits do not move it.
+    let mut d = accepted_draft(Some(4), Progress::default());
+    d.copies = 3;
+    d.job_progress(progress(Stage::Printing, Some(1), None));
+    assert!(matches!(&d.job, JobView::Accepted { progress, .. } if progress.sheets_total == Some(4)));
+}
+
+fn drawn(draft: Draft) -> egui::FullOutput {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let state = std::cell::RefCell::new(State::new(draft));
+    let validate: &Validate = &|_| Ok(());
+    let query = query_worker(Ok(printer()));
+    let f: Frames<'_> = (&ctx, &state, validate, &query);
+    frame(&f, Vec::new()).1
+}
+
+#[test]
+fn an_unknown_total_shows_the_count_and_no_bar_and_a_known_one_shows_the_bar() {
+    // The printer says 3 sheets done and nothing else: "Blatt: 3", and no "x von y" bar.
+    let output = drawn(accepted_draft(None, progress(Stage::Printing, Some(3), None)));
+    assert!(center_of(&output, "Blatt: 3").is_some(), "the count of sheets is shown");
+    assert!(!exposes(&output, " von "), "there is no determinate bar without a total");
+    // Nothing done yet and no total: neither.
+    let output = drawn(accepted_draft(None, progress(Stage::Printing, Some(0), None)));
+    assert!(!exposes(&output, "Blatt:") && !exposes(&output, " von "));
+    // The app's page count turns it determinate.
+    let output = drawn(accepted_draft(Some(4), progress(Stage::Printing, Some(1), None)));
+    assert!(exposes(&output, "1 von 4"), "the expected total fills the bar");
+    assert!(center_of(&output, "Blatt: 1").is_none(), "a bar replaces the bare count");
+    // The printer's own total wins over the expectation.
+    let output = drawn(accepted_draft(Some(4), progress(Stage::Printing, Some(1), Some(8))));
+    assert!(exposes(&output, "1 von 8") && !exposes(&output, "1 von 4"));
+}

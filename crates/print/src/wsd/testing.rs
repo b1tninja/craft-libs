@@ -73,6 +73,10 @@ pub struct FakeConfig {
     pub state: &'static str,
     pub state_reasons: Vec<&'static str>,
     pub media: Vec<&'static str>,
+    /// `PrintQuality` values the printer lists; empty lists none.
+    pub qualities: Vec<&'static str>,
+    /// Resolutions the printer lists; empty lists none.
+    pub resolutions: Vec<(u32, u32)>,
 }
 
 impl Default for FakeConfig {
@@ -92,6 +96,8 @@ impl Default for FakeConfig {
             state: "Idle",
             state_reasons: Vec::new(),
             media: vec!["iso_a4_210x297mm"],
+            qualities: Vec::new(),
+            resolutions: Vec::new(),
         }
     }
 }
@@ -289,7 +295,19 @@ impl FakePrinter {
                         }
                         "PrinterCapabilities" => {
                             let list = |v: &[&str]| v.iter().map(|x| format!("<wprt:AllowedValue>{x}</wprt:AllowedValue>")).collect::<String>();
-                            format!("<wprt:ElementData Name=\"wprt:PrinterCapabilities\" Valid=\"true\"><wprt:PrinterCapabilities><wprt:JobValues><wprt:JobProcessing><wprt:Copies><wprt:MaxValue>{}</wprt:MaxValue></wprt:Copies></wprt:JobProcessing><wprt:DocumentProcessing><wprt:MediaSizeName>{}</wprt:MediaSizeName><wprt:Sides>{}</wprt:Sides></wprt:DocumentProcessing></wprt:JobValues><wprt:DocumentValues><wprt:DocumentDescription><wprt:Compression>{}</wprt:Compression><wprt:Format>{}</wprt:Format></wprt:DocumentDescription></wprt:DocumentValues></wprt:PrinterCapabilities></wprt:ElementData>", cfg.max_copies, list(&cfg.media), list(&cfg.sides), list(&cfg.compressions), list(&cfg.formats))
+                            let mut extra = String::new();
+                            if !cfg.qualities.is_empty() {
+                                extra.push_str(&format!("<wprt:PrintQuality>{}</wprt:PrintQuality>", list(&cfg.qualities)));
+                            }
+                            if !cfg.resolutions.is_empty() {
+                                let each: String = cfg
+                                    .resolutions
+                                    .iter()
+                                    .map(|(w, h)| format!("<wprt:AllowedValue><wprt:Width>{w}</wprt:Width><wprt:Height>{h}</wprt:Height></wprt:AllowedValue>"))
+                                    .collect();
+                                extra.push_str(&format!("<wprt:Resolution>{each}</wprt:Resolution>"));
+                            }
+                            format!("<wprt:ElementData Name=\"wprt:PrinterCapabilities\" Valid=\"true\"><wprt:PrinterCapabilities><wprt:JobValues><wprt:JobProcessing><wprt:Copies><wprt:MaxValue>{}</wprt:MaxValue></wprt:Copies></wprt:JobProcessing><wprt:DocumentProcessing><wprt:MediaSizeName>{}</wprt:MediaSizeName><wprt:Sides>{}</wprt:Sides>{}</wprt:DocumentProcessing></wprt:JobValues><wprt:DocumentValues><wprt:DocumentDescription><wprt:Compression>{}</wprt:Compression><wprt:Format>{}</wprt:Format></wprt:DocumentDescription></wprt:DocumentValues></wprt:PrinterCapabilities></wprt:ElementData>", cfg.max_copies, list(&cfg.media), list(&cfg.sides), extra, list(&cfg.compressions), list(&cfg.formats))
                         }
                         other => format!("<wprt:ElementData Name=\"wprt:{other}\" Valid=\"false\"/>"),
                     });

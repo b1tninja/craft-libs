@@ -17,10 +17,12 @@
 
 mod backend;
 mod builtin;
+pub mod convert;
 mod job;
 mod options;
 #[cfg(any(test, windows))]
 mod progress;
+pub mod pwg;
 mod registry;
 mod remote;
 mod retry;
@@ -58,6 +60,7 @@ pub use backend::{
 };
 #[cfg(any(windows, all(unix, not(target_arch = "wasm32"))))]
 pub use builtin::SystemSpooler;
+pub use convert::{Conversion, ConversionPolicy, ConvertContext, DocumentConverter, OwnedDocument, choose_resolution};
 /// The shared job vocabulary lives in the `craft-job` crate (also used by scanning) and keeps its
 /// names here, so `craft_print::JobId`, `craft_print::RetryPolicy` and the others resolve as before.
 /// Renamed on the way in: `JobTag` is [`Tag`], `ParseJobIdError` is [`ParseIdError`] (and its
@@ -73,7 +76,7 @@ pub use job::{ExpectedTotalsExt, JobStatus, Submitted, WatchSupport};
 pub use options::{ColourMode, JobOptions, Orientation, Quality, Resolution};
 pub use registry::{
     BackendError, BackendInfo, Listing, RegisterError, Registry, cancel_job, job_status, list_printers, printer_details, register, registry,
-    submit_job, submit_to_backend,
+    set_converter, submit_job, submit_to_backend,
 };
 pub use remote::{FingerprintExt, JobFilter, JobQueryCaps, Reconciled, RemoteJob, filter_jobs, reconcile_jobs};
 pub use retry::{CANCEL_SLICE, Clock, JitterExt, ManualClock, Phase, SystemClock, advise_error, retry, retry_facts};

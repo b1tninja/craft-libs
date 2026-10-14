@@ -18,8 +18,8 @@ use super::ticket::{self, Sides, TicketShape};
 use crate::backends::{Backend, BackendClass, DocumentFormat, JobHint, PrinterDetails, PrinterRef, PrinterState, PrinterStatus, SubmitRequest};
 use crate::{
     ColourMode, Duplex, ErrorKind, Fingerprint, FingerprintExt as _, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobStatus, PrintError,
-    Progress, Reconciled as FoundJobs, RemoteJob, Scaling, Submitted, Tag, TagExt as _, TagPlacement, TagSupport, TagSupportExt as _, WatchSupport,
-    filter_jobs, reconcile_jobs,
+    Progress, Reconciled as FoundJobs, RemoteJob, Resolution, Scaling, Submitted, Tag, TagExt as _, TagPlacement, TagSupport, TagSupportExt as _,
+    WatchSupport, filter_jobs, reconcile_jobs,
 };
 
 /// The registry name and id prefix.
@@ -31,10 +31,13 @@ const MAX_NAME: usize = 255;
 /// How many job summaries without a name `list_jobs` completes with a `GetJobElements` each.
 const MAX_NAME_LOOKUPS: usize = 8;
 
-/// What the registry may be handed: the formats a WS-Print printer can list and this crate can name.
-/// Whether one printer takes one of them is decided against that printer's own list, in
-/// [`Backend::submit`] ([`ErrorKind::UnsupportedFormat`]) and shown by [`Backend::printer_details`].
-const FORMATS: &[DocumentFormat] = &[DocumentFormat::Pdf, DocumentFormat::PwgRaster, DocumentFormat::PostScript, DocumentFormat::OctetStream];
+/// What the registry may be handed: every format this crate names. A WS-Print printer lists its
+/// formats as MIME types and any of them that has a [`DocumentFormat`] is shown in
+/// [`Backend::printer_details`]; a document in such a format goes to the printer unchanged. Whether
+/// one printer takes one of them is decided against that printer's own list, by the registry when
+/// it has a converter ([`Backend::formats_per_printer`]) and in [`Backend::submit`]
+/// ([`ErrorKind::UnsupportedFormat`]) in any case.
+const FORMATS: &[DocumentFormat] = &DocumentFormat::ALL;
 
 /// The `Job` and `JobOptions` settings this backend applies: copies, duplex, colour (chosen when the
 /// picture is made), and the print ticket's media size, orientation, quality and resolution (each
@@ -356,10 +359,14 @@ fn ticket_orientation(o: crate::Orientation) -> ticket::Orientation {
     }
 }
 
+/// The ticket's `PrintQuality` token for the neutral hint. Whether the printer takes it is the
+/// plan's decision against its capability list: a value it does not list is left out with a warning,
+/// or refused in strict mode, like any other setting.
 fn ticket_quality(q: crate::Quality) -> ticket::Quality {
     match q {
         crate::Quality::Draft => ticket::Quality::Draft,
         crate::Quality::High => ticket::Quality::High,
+        crate::Quality::Photo => ticket::Quality::Photo,
         _ => ticket::Quality::Normal,
     }
 }
@@ -399,6 +406,7 @@ fn details_of(entry: &Entry, elements: PrinterElements) -> PrinterDetails {
         details.two_sided = if caps.sides.is_empty() { None } else { Some(caps.sides.iter().any(|s| s.starts_with("TwoSided"))) };
         details.paper = caps.media_sizes;
         details.max_copies = caps.copies.map(|(_, max)| max);
+        details.resolutions = caps.resolutions.iter().map(|(x, y)| Resolution::new(*x, *y)).collect();
     }
     details.status = elements.status.and_then(|s| printer_state(&s.state).map(|state| PrinterStatus { state, reasons: s.reasons }));
     details
@@ -416,6 +424,12 @@ impl Backend for WsdBackend {
 
     fn accepted_formats(&self) -> &[DocumentFormat] {
         FORMATS
+    }
+
+    /// Each printer lists its own formats (and the registry reads them with one `GetPrinterElements`
+    /// when it has to decide on a conversion).
+    fn formats_per_printer(&self) -> bool {
+        true
     }
 
     /// The printers the app added; no discovery, no connection.

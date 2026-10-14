@@ -50,9 +50,52 @@ let receipt = craft_print::submit_to_backend(SubmitRequest::new(Document::pdf(&p
   Duplex, colour, scaling and driver options in a `Job` are hints a backend may ignore, and
   `honoured` tells a UI which ones it applies. `status` is `None` when the backend cannot say
   before a job (CUPS and the Windows spooler report after the fact).
-* **Documents** are bytes plus a `DocumentFormat` (`Pdf`, `PwgRaster`, `PostScript`,
-  `OctetStream`). A backend declares `accepted_formats()`; the registry refuses anything else
-  with `ErrorKind::UnsupportedFormat` before calling it.
+* **Documents** are bytes plus a `DocumentFormat`: `Pdf`, `PwgRaster`, `PostScript`, `OctetStream`,
+  `Jpeg`, `Png`, `Tiff`, `PlainText`, `Xps` (`application/vnd.ms-xpsdocument`) and `OpenXps`
+  (`application/oxps`). `mime()`, `from_mime()` (parameters and case ignored), `extension()`,
+  `from_extension()`, `sniff(bytes)` (magic numbers; plain text by content; XPS is a ZIP and is never
+  sniffed) and `detect(file_name, bytes)` (bytes first, then the extension) turn files into
+  formats; `DocumentFormat::negotiate(&preference, &printer_formats)` picks the first preferred
+  format a printer lists (`negotiate_default` uses `DEFAULT_PREFERENCE`: PDF, PWG raster, Open XPS,
+  XPS, PostScript, TIFF, PNG, JPEG, text, then the printer's own language). A backend declares
+  `accepted_formats()` and, when printers differ, `formats_per_printer()` plus
+  `PrinterDetails::formats`. The built-in spooler stays **PDF only**: CUPS is handed the PDF and the
+  Windows job is drawn from it by the in-box PDF renderer, and the crate has no image, text or XPS
+  renderer to offer instead; an app that wants to print a JPEG on the spooler registers a converter
+  that makes PDF from it.
+
+### Formats and conversion
+
+This crate has no renderer, so the app that owns one says how to make a format a printer takes:
+
+* **`DocumentConverter`** (`targets(from)`, `convert(document, target, &ConvertContext) ->
+  OwnedDocument`), registered with `Registry::set_converter` (or `craft_print::set_converter`).
+  `ConvertContext` carries the chosen `resolution`, whether to render in `colour`, and the media,
+  orientation, duplex, page count and cancel token of the request.
+* **`craft_print::pwg`** is the neutral PWG raster **encoder** for pages the converter has already
+  rendered (`RasterPage`, `PwgOptions`, `encode`). It needs no feature and builds for wasm32;
+  `craft_print::wsd::pwg` re-exports it.
+* **The registry decides.** A document in a format the printer accepts is sent as it is and the
+  converter is not asked. Otherwise the best target the converter makes and the printer lists is
+  chosen (`ConversionPolicy::preference`, default `DocumentFormat::DEFAULT_PREFERENCE`), the
+  resolution is the request's `JobOptions::resolution` if set, else the printer's listed
+  `PrinterDetails::resolutions` entry nearest `ConversionPolicy::target_dpi` (default 300; distance
+  is summed over both axes, ties go to the higher one, nothing listed means 300 square; see
+  `choose_resolution`), the converter runs and its output is sent. For a raster target the chosen
+  resolution is also put into the job so the ticket and the raster agree.
+  `Submitted::conversion` records what was done. With no converter, no format in common, or an
+  unsupported source the call fails with `ErrorKind::UnsupportedFormat` and a message that lists the
+  document's format and what the printer accepts (and what the converter can make); a converter
+  failure is reported as it was, marked `Phase::Prepare` and `RetrySafety::Safe` (nothing was
+  sent). A network backend is not contacted for any of this without a `UserConfirmed`.
+* **Cost.** For a backend with `formats_per_printer()` (WS-Print) and a converter registered, the
+  decision needs the printer's list: one read-only `printer_details` call per print. An app that
+  has just shown the printer's details passes them to `Registry::submit_job_with_details` and no
+  extra request is made. A backend with an exact list (the spooler) costs nothing.
+* **Backend-wide settings stay backend-wide.** The ticket shape, strict mode, transfer and limits
+  of a network backend are configuration of the backend, not of a job. An app that wants different
+  ones for one print builds a backend for that print (`backend.clone().with_*`, clones share the
+  printer list) and registers it in a registry of its own, as pdfcraft does for each invocation.
 * **Consent.** `UserConfirmed` is a marker with no policy of its own (`attest(Option<bool>)`
   errors unless `Some(true)`; `interactive()` for a Print button the person just pressed). Local
   backends (`BackendClass::Local`, the default) ignore it; a `BackendClass::Network` backend only
@@ -194,6 +237,9 @@ Renamed relative to the earlier drafts of this crate: `JobTag` is `Tag` (and is 
   the `with_*` methods; the struct is `#[non_exhaustive]`. A backend applies what it can;
   `PrinterDetails::honoured` lists the `JobHint`s it applies (`Media`, `Orientation`, `Quality`,
   `Resolution` and `Colour` joined `Copies`, ...). The built-in spooler honours the colour choice only.
+  `Quality` is `Draft`, `Normal`, `High` or `Photo` (hint only; `Quality::from_name`/`ALL`). A backend
+  maps it to the printer's own setting when the printer offers a matching value and drops it with a
+  warning otherwise.
 * `Registry::submit_job` accepts them, so an app needs no backend-specific entry point. Settings that
   are backend-wide configuration (a network backend's ticket shape, strict mode, transfer) stay on
   the backend: an app that wants different ones per invocation builds a backend for that invocation
@@ -241,7 +287,9 @@ craft-print = { version = "0.1", features = ["testing"] }
 ```
 
 * `craft_print::testing::FakeBackend` is a configurable `Backend` for a `Registry` of your own:
-  printers, details, accepted formats, class (network needs consent), progress events, watch
+  printers, details (including `with_printer_formats`, `with_resolutions`,
+  `with_formats_per_printer`; `detail_calls()` counts the reads), accepted formats, class (network
+  needs consent), progress events, watch
   support, a scripted `job_status` (the last answer repeats), failing list/details/submit, and a job
   handle of your choosing. Clones share state, so register one and keep one:
   `submissions()` (printer, format, bytes, the `Job`, the `JobOptions`, whether consent came),
@@ -252,7 +300,8 @@ craft-print = { version = "0.1", features = ["testing"] }
   `with_submit_script(vec![SubmitStep::LoseReply(error), ..])` makes a send whose reply is lost (the job
   exists, the call fails), `seed_job` adds a foreign job and `remote_jobs()` shows the fake's queue.
 * `craft_print::wsd::testing` (needs `wsd` too) is an in-memory WS-Print printer:
-  `FakePrinter::new(FakeConfig { .. })` (formats, sides, copies, colour, media, how jobs end
+  `FakePrinter::new(FakeConfig { .. })` (formats, sides, copies, colour, media, qualities,
+  resolutions, how jobs end
   with `Ending`, faults, HTTP errors), `MemTransport(printer)` for
   `WsdBackend::with_transport` (no sockets), `printer_server(printer)` for a loopback HTTP server,
   and the stored `FakeJob`s (ticket and document) and the request log (`actions()`) to assert on.
@@ -295,11 +344,28 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   URLs are `http://` with a numeric loopback, link-local or private address; host names, public
   addresses, redirects and proxies are refused (`craft-wsd`'s policy). Replies, lists and XML are
   size-capped and every reply is checked (action, relation to the request, namespaces).
-* **Printer details** map from `GetPrinterElements`: accepted formats (PDF, PWG raster,
-  PostScript, octet-stream, in the printer's order; other formats are not named), two-sided,
-  colour, paper names, maximum copies, status (idle, processing, stopped, with the reasons the
+* **Printer details** map from `GetPrinterElements`: accepted formats (every MIME type the printer
+  lists that has a `DocumentFormat`: PDF, PWG raster, PostScript, octet-stream, JPEG, PNG, TIFF,
+  plain text, XPS and Open XPS, in the printer's order; other formats are not named), its
+  **resolutions** (`PrinterDetails::resolutions`, from the same request, so choosing a raster dpi
+  needs no extra read), two-sided, colour, paper names, maximum copies, status (idle, processing, stopped, with the reasons the
   printer gives) and the hints it applies (copies, duplex, colour, and the per-job media size, orientation, quality and resolution). Unlisted
   dimensions are `None` or empty, not "unsupported".
+* **Formats and conversion.** `formats_per_printer()` is `true`: with an app `DocumentConverter`
+  registered the registry reads the printer's list (one read-only `GetPrinterElements`, which is
+  skipped when the app passes the details it has to `Registry::submit_job_with_details`) and, when
+  the printer does not list the document's format, converts to the best format it does list at the
+  resolution nearest 300 dpi from its own list (see "Formats and conversion" above). Without a
+  converter nothing is read first: the backend answers `UnsupportedFormat` itself. A document in a
+  format the printer lists goes through unchanged, whatever the format (JPEG, PNG, TIFF, text, XPS,
+  Open XPS, PostScript and raster are sent as they are; the printer's spelling of the MIME type is
+  used). `wsd::pwg` re-exports the neutral `craft_print::pwg` encoder; `wsd::DocumentEncoder`,
+  `RasterEncoder` and `negotiate_format` are unchanged for apps that call them directly.
+* **Quality.** `Quality::Photo` is sent as `PrintQuality` `Photo` when the printer lists it (or
+  lists no qualities), left out with a warning when it lists qualities without it, and refused in
+  strict mode, like any other setting; `Draft`, `Normal` and `High` follow the same rule.
+* **Per-invocation settings** (ticket shape, strict mode, transfer, user name, limits) are
+  backend-wide: build `backend.clone().with_*` for the invocation (clones share the printers).
 * **Jobs.** A document is bytes in a `DocumentFormat` the printer lists (case-insensitively; the
   printer's spelling is sent), otherwise `ErrorKind::UnsupportedFormat` before a job exists. The
   job is created and the document sent as an MTOM part (or inline base64, `with_transfer`);

@@ -40,6 +40,7 @@ use craft_job::{
 
 use crate::Job;
 use crate::backend::{CancelToken, Document, DocumentFormat, ErrorKind, PrintError, SubmitRequest, UserConfirmed};
+use crate::convert::Conversion;
 use crate::job::{ExpectedTotalsExt as _, JobStatus, Submitted};
 use crate::options::JobOptions;
 use crate::registry::{BackendInfo, Registry};
@@ -330,6 +331,9 @@ pub struct RequestRecord {
     pub tag: Option<Tag>,
     /// How the backend sent it, in its own words ([`Submitted::effective`]).
     pub effective: Option<String>,
+    /// What the registry's converter did to the document for the accepted attempt
+    /// ([`Submitted::conversion`]); `None` when it was sent as it was (or nothing was accepted yet).
+    pub conversion: Option<Conversion>,
 }
 
 /// What happened, when.
@@ -453,7 +457,10 @@ pub struct Snapshot {
     pub tag: Tag,
     /// Whether the requests carried the tag.
     pub tag_applied: bool,
+    /// The document as the source gave it (before any conversion).
     pub document: Option<DocumentInfo>,
+    /// What the registry's converter made of it for the accepted attempt, when it ran.
+    pub conversion: Option<Conversion>,
     pub advice: RetryAdvice,
     /// What the last reconcile found, until the next attempt.
     pub reconciled: Option<Reconciled>,
@@ -562,7 +569,12 @@ impl Snapshot {
     fn documents(&self) -> JobDocuments {
         let mut documents = JobDocuments::new();
         if let Some(info) = self.document {
-            let mut document = DocumentRef::new(self.title.clone()).with_format(info.format.name()).with_bytes(info.len as u64);
+            // The document is shown as it was sent: the converted one when the converter ran.
+            let (format, len) = match &self.conversion {
+                Some(conversion) => (conversion.to, conversion.bytes),
+                None => (info.format, info.len),
+            };
+            let mut document = DocumentRef::new(self.title.clone()).with_format(format.name()).with_bytes(len as u64);
             if let Some(pages) = self.expected_pages.filter(|pages| *pages > 0) {
                 document = document.with_pages(pages);
             }
@@ -661,7 +673,7 @@ impl PrintJob {
             cancel: CancelToken::new(),
             tag: Tag::random(),
             tag_applied: false,
-            request: RequestRecord { job, options, document: None, tag: None, effective: None },
+            request: RequestRecord { job, options, document: None, tag: None, effective: None, conversion: None },
             first_wall: None,
             state: LifecycleState::Preparing,
             attempts: Arc::default(),
@@ -953,6 +965,7 @@ impl PrintJob {
             return self.step(changed);
         }
         self.begin_attempt();
+        self.request.conversion = None;
         if self.first_wall.is_none() {
             self.first_wall = Some((self.wall)());
         }
@@ -988,6 +1001,7 @@ impl PrintJob {
         self.remote = job;
         self.expected = submitted.expected;
         self.request.effective = submitted.effective.clone();
+        self.request.conversion = submitted.conversion.clone();
         for warning in &submitted.warnings {
             self.warn(warning.clone());
         }
@@ -1440,6 +1454,7 @@ impl PrintJob {
             tag: self.tag,
             tag_applied: self.tag_applied,
             document: self.request.document,
+            conversion: self.request.conversion.clone(),
             advice: self.retry_advice(),
             reconciled: self.reconciled.clone(),
             native: has_native.then_some(native),

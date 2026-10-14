@@ -24,7 +24,10 @@
 //!   that negotiates a format, plans the [`ticket::PrintTicket`], creates the job, sends the
 //!   document (MTOM or inline base64): [`job::submit_document`] returns when the printer has accepted
 //!   it, [`print_document`] adds a blocking watch for callers that want one. [`encoder`] and [`pwg`] make
-//!   the document bytes (pass-through, a chain of alternatives, or PWG raster from a renderer).
+//!   the document bytes (pass-through, a chain of alternatives, or PWG raster from a renderer);
+//!   [`pwg`] re-exports the neutral [`crate::pwg`] encoder. Apps that go through the registry do not
+//!   need these layers: they register a [`crate::DocumentConverter`] and the registry converts to a
+//!   format this printer lists.
 //! * `adapter.rs`: the only file that names `craft-wsd`.
 //!
 //! # Printer firmware and the ticket

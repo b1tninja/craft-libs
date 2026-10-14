@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime};
 use craft_job::{ExpectedTotals, JobId, JobState, ParseIdError, Tag};
 
 use crate::backend::{ErrorKind, PrintError, Receipt};
+use crate::convert::Conversion;
 use crate::options::JobOptions;
 use crate::{Duplex, Job};
 
@@ -178,6 +179,9 @@ pub struct Submitted {
     /// How the backend sent the request, in its own words, for diagnostics (WS-Print: the ticket
     /// shape). Not for parsing.
     pub effective: Option<String>,
+    /// Filled in by the registry when the app's [`DocumentConverter`](crate::DocumentConverter)
+    /// had to make the document the printer accepts; `None` when it was sent as it was.
+    pub conversion: Option<Conversion>,
 }
 
 impl Submitted {
@@ -195,6 +199,7 @@ impl Submitted {
             expected: ExpectedTotals::default(),
             tag: None,
             effective: None,
+            conversion: None,
         }
     }
 

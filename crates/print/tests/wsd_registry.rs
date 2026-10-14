@@ -11,9 +11,9 @@ use std::time::Duration;
 use craft_print::backends::Backend;
 use craft_print::wsd::{Reconciled, TicketShape, Transfer, WsdBackend};
 use craft_print::{
-    BackendClass, CancelToken, Clock, Document, DocumentFormat, Duplex, ErrorKind, Job, JobHint, JobId, JobState, JobWatch, ManualClock, Phase,
-    PrinterState, Progress, Registry, RetryPolicy, RetrySafety, Scaling, SubmitRequest, UserConfirmed, WaitPolicy, WatchOutcome, WatchStep,
-    WatchSupport, namespaced_id, wait_for_job,
+    BackendClass, CancelToken, Clock, Document, DocumentFormat, Duplex, ErrorKind, Job, JobHint, JobId, JobOptions, JobState, JobWatch, ManualClock,
+    Phase, PrinterState, Progress, Quality, Registry, Resolution, RetryPolicy, RetrySafety, Scaling, SubmitRequest, UserConfirmed, WaitPolicy,
+    WatchOutcome, WatchStep, WatchSupport, namespaced_id, wait_for_job,
 };
 use wsd_support::{Ending, FakeConfig, FakePrinter, MemTransport, printer_server, raw_response};
 
@@ -1042,4 +1042,176 @@ fn expected_pages_give_the_sheet_counter_a_total_that_the_printer_does_not() {
     assert!(outcome.is_success(), "{outcome:?}");
     assert!(seen.iter().all(|(_, total, _)| *total == Some(1)), "the printer reports no total, the caller's page count stands in: {seen:?}");
     assert!(matches!(outcome, WatchOutcome::Terminal(ref s) if s.sheet_fraction() == Some(1.0)));
+}
+
+// ---- Photo quality, more formats, resolutions and registry conversion ----
+
+#[test]
+fn details_name_the_newer_formats_and_list_the_resolutions() {
+    let config = FakeConfig {
+        formats: vec![
+            "image/jpeg",
+            "IMAGE/PNG",
+            "image/tiff",
+            "text/plain",
+            "application/vnd.ms-xpsdocument",
+            "application/oxps",
+            "application/vnd.vendor-pcl",
+            "image/pwg-raster",
+        ],
+        resolutions: vec![(300, 300), (600, 600), (1200, 600)],
+        ..FakeConfig::default()
+    };
+    let (_p, _b, r) = setup(config);
+    let d = r.printer_details(&id(URL)).unwrap();
+    use DocumentFormat::*;
+    assert_eq!(d.formats, [Jpeg, Png, Tiff, PlainText, Xps, OpenXps, PwgRaster]);
+    assert_eq!(d.resolutions, [Resolution::square(300), Resolution::square(600), Resolution::new(1200, 600)]);
+    // Nothing published, nothing listed.
+    let (_p, _b, r) = setup(FakeConfig::default());
+    assert!(r.printer_details(&id(URL)).unwrap().resolutions.is_empty());
+}
+
+#[test]
+fn photo_quality_reaches_the_ticket_when_the_printer_lists_it() {
+    let (p, _b, r) = setup(FakeConfig { qualities: vec!["Normal", "High", "Photo"], ..FakeConfig::default() });
+    let submitted = r.submit_job(request(job(URL)).with_options(JobOptions::new().with_quality(Quality::Photo))).unwrap();
+    assert!(p.job(1).unwrap().ticket.contains(">Photo<"), "{}", p.job(1).unwrap().ticket);
+    assert!(submitted.warnings.is_empty(), "{:?}", submitted.warnings);
+    // A printer that publishes no quality list is not second-guessed.
+    let (p, _b, r) = setup(FakeConfig::default());
+    r.submit_job(request(job(URL)).with_options(JobOptions::new().with_quality(Quality::Photo))).unwrap();
+    assert!(p.job(1).unwrap().ticket.contains(">Photo<"));
+}
+
+#[test]
+fn photo_quality_is_dropped_with_a_warning_when_unlisted_and_refused_in_strict_mode() {
+    let (p, b, r) = setup(FakeConfig { qualities: vec!["Draft", "Normal", "High"], ..FakeConfig::default() });
+    let submitted = r.submit_job(request(job(URL)).with_options(JobOptions::new().with_quality(Quality::Photo))).unwrap();
+    assert!(!p.job(1).unwrap().ticket.contains("Photo"), "{}", p.job(1).unwrap().ticket);
+    assert!(submitted.warnings.iter().any(|w| w.contains("Photo")), "{:?}", submitted.warnings);
+    // High, which the same printer lists, is kept.
+    r.submit_job(request(job(URL)).with_options(JobOptions::new().with_quality(Quality::High))).unwrap();
+    assert!(p.job(2).unwrap().ticket.contains(">High<"));
+    // Strict mode refuses before anything is created.
+    let strict = registry(&b.clone().with_strict(true));
+    let error = strict.submit_job(request(job(URL)).with_options(JobOptions::new().with_quality(Quality::Photo))).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidRequest, "{error}");
+    assert_eq!(p.jobs(), 2);
+}
+
+#[test]
+fn a_document_in_a_listed_format_goes_to_the_printer_unchanged() {
+    let formats =
+        vec!["image/jpeg", "image/png", "image/tiff", "text/plain", "application/vnd.ms-xpsdocument", "application/oxps", "application/postscript"];
+    let (p, _b, r) = setup(FakeConfig { formats, ..FakeConfig::default() });
+    let samples = [
+        (DocumentFormat::Jpeg, &b"\xff\xd8\xff\xe0jpeg"[..]),
+        (DocumentFormat::Png, b"\x89PNG\r\n\x1a\npng"),
+        (DocumentFormat::Tiff, b"II*\0tiff"),
+        (DocumentFormat::PlainText, b"hello\n"),
+        (DocumentFormat::Xps, b"PK\x03\x04xps"),
+        (DocumentFormat::OpenXps, b"PK\x03\x04oxps"),
+        (DocumentFormat::PostScript, b"%!PS\n"),
+    ];
+    for (n, (format, bytes)) in samples.into_iter().enumerate() {
+        let submitted = r.submit_job(SubmitRequest::new(Document::new(format, bytes), job(URL)).with_consent(UserConfirmed::interactive())).unwrap();
+        assert!(submitted.conversion.is_none());
+        let sent = p.job(u32::try_from(n).unwrap() + 1).unwrap();
+        assert_eq!((sent.format.as_deref(), sent.document.as_deref()), (Some(format.mime()), Some(bytes)), "{format:?}");
+    }
+    // PDF is not in this printer's list: refused by the backend, no job made.
+    let before = p.jobs();
+    let error = r.submit_job(request(job(URL))).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::UnsupportedFormat);
+    assert_eq!(p.jobs(), before);
+}
+
+/// Renders a blank page per request and packs it with the public PWG encoder.
+struct Blank;
+
+impl craft_print::DocumentConverter for Blank {
+    fn targets(&self, from: DocumentFormat) -> Vec<DocumentFormat> {
+        if from == DocumentFormat::Pdf { vec![DocumentFormat::Jpeg, DocumentFormat::PwgRaster] } else { Vec::new() }
+    }
+    fn convert(
+        &self,
+        _document: Document<'_>,
+        target: DocumentFormat,
+        context: &craft_print::ConvertContext,
+    ) -> Result<craft_print::OwnedDocument, craft_print::PrintError> {
+        let (w, h) = (context.resolution.x_dpi / 10, context.resolution.y_dpi / 10);
+        let channels = if context.colour { 3 } else { 1 };
+        let page = craft_print::pwg::RasterPage { width: w, height: h, gray: !context.colour, pixels: vec![255; (w * h * channels) as usize] };
+        let options =
+            craft_print::pwg::PwgOptions { dpi: (context.resolution.x_dpi, context.resolution.y_dpi), duplex: craft_print::pwg::Duplex::Off };
+        let bytes = craft_print::pwg::encode(&[page], &options).map_err(|e| craft_print::PrintError::new(ErrorKind::Failed, e.to_string()))?;
+        Ok(craft_print::OwnedDocument::new(target, bytes))
+    }
+}
+
+#[test]
+fn the_registry_converts_for_a_wsd_printer_that_lists_only_raster_and_picks_its_resolution() {
+    let config = FakeConfig { formats: vec!["image/pwg-raster"], resolutions: vec![(150, 150), (600, 600), (1200, 1200)], ..FakeConfig::default() };
+    let (p, _b, r) = setup(config);
+    r.set_converter(Arc::new(Blank));
+    let submitted = r.submit_job(request(job(URL))).unwrap();
+    let conversion = submitted.conversion.unwrap();
+    assert_eq!((conversion.from, conversion.to, conversion.resolution), (DocumentFormat::Pdf, DocumentFormat::PwgRaster, Resolution::square(150)));
+    let sent = p.job(1).unwrap();
+    assert_eq!(sent.format.as_deref(), Some("image/pwg-raster"));
+    assert_eq!(&sent.document.unwrap()[..4], b"RaS2");
+    assert!(sent.ticket.contains("150"), "the raster's resolution is in the ticket: {}", sent.ticket);
+    // One read-only request for the registry to choose, one inside the backend's submit.
+    assert_eq!(count(&p, "GetPrinterElements"), 2);
+}
+
+#[test]
+fn details_the_caller_already_has_save_the_registrys_request() {
+    let config = FakeConfig { formats: vec!["image/pwg-raster"], resolutions: vec![(300, 300)], ..FakeConfig::default() };
+    let (p, _b, r) = setup(config);
+    r.set_converter(Arc::new(Blank));
+    let details = r.printer_details(&id(URL)).unwrap();
+    assert_eq!(count(&p, "GetPrinterElements"), 1);
+    r.submit_job_with_details(request(job(URL)), Some(details)).unwrap();
+    assert_eq!(count(&p, "GetPrinterElements"), 2, "only the backend's own read remains");
+    assert_eq!(p.jobs(), 1);
+}
+
+#[test]
+fn a_printer_that_lists_pdf_is_sent_pdf_even_with_a_converter_registered() {
+    let (p, _b, r) = setup(FakeConfig::default());
+    r.set_converter(Arc::new(Blank));
+    let submitted = r.submit_job(request(job(URL))).unwrap();
+    assert!(submitted.conversion.is_none());
+    assert_eq!(p.job(1).unwrap().format.as_deref(), Some("application/pdf"));
+}
+
+#[test]
+fn without_a_common_format_or_a_converter_nothing_is_sent_to_the_printer() {
+    let (p, _b, r) = setup(FakeConfig { formats: vec!["image/tiff"], ..FakeConfig::default() });
+    let error = r.submit_job(request(job(URL))).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::UnsupportedFormat);
+    r.set_converter(Arc::new(Blank));
+    let error = r.submit_job(request(job(URL))).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::UnsupportedFormat);
+    assert!(error.message().contains("image/tiff") && error.message().contains("image/pwg-raster"), "{}", error.message());
+    assert_eq!(p.jobs(), 0);
+}
+
+#[test]
+fn a_network_printer_is_not_asked_for_a_conversion_without_consent() {
+    let (p, _b, r) = setup(FakeConfig { formats: vec!["image/pwg-raster"], ..FakeConfig::default() });
+    r.set_converter(Arc::new(Blank));
+    let error = r.submit_job(SubmitRequest::new(Document::pdf(PDF), job(URL))).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::ConsentRequired);
+    assert!(p.log().is_empty());
+}
+
+#[test]
+fn the_old_wsd_encoder_paths_still_work_and_share_the_neutral_encoder() {
+    use craft_print::wsd::pwg;
+    let page = craft_print::pwg::RasterPage { width: 3, height: 2, gray: true, pixels: vec![9; 6] };
+    let options = craft_print::pwg::PwgOptions { dpi: (300, 300), duplex: craft_print::pwg::Duplex::Off };
+    assert_eq!(pwg::encode(std::slice::from_ref(&page), &options).unwrap(), craft_print::pwg::encode(&[page], &options).unwrap());
 }

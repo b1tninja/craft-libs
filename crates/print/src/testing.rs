@@ -83,6 +83,7 @@ type JobHandle = dyn Fn(Option<&str>, u32) -> Option<String> + Send + Sync;
 struct Recorded {
     submissions: Vec<Submission>,
     status_calls: u32,
+    detail_calls: u32,
     cancels: Vec<String>,
     script: Vec<Result<JobStatus, PrintError>>,
     submit_script: Vec<SubmitStep>,
@@ -94,6 +95,7 @@ struct Config {
     name: &'static str,
     class: BackendClass,
     formats: Vec<DocumentFormat>,
+    formats_per_printer: bool,
     printers: Vec<PrinterRef>,
     details: PrinterDetails,
     list_error: Option<PrintError>,
@@ -142,6 +144,7 @@ impl FakeBackend {
             name,
             class: BackendClass::Local,
             formats: vec![DocumentFormat::Pdf],
+            formats_per_printer: false,
             printers: Vec::new(),
             details: PrinterDetails::default(),
             list_error: None,
@@ -198,6 +201,25 @@ impl FakeBackend {
     #[must_use]
     pub fn with_formats(self, formats: Vec<DocumentFormat>) -> Self {
         self.configured(|c| c.formats = formats)
+    }
+
+    /// Whether [`Backend::formats_per_printer`] is `true` (default `false`): the registry then reads
+    /// the details' `formats` before it decides on a conversion, like it does for a network backend.
+    #[must_use]
+    pub fn with_formats_per_printer(self, per_printer: bool) -> Self {
+        self.configured(|c| c.formats_per_printer = per_printer)
+    }
+
+    /// Shorthand for the `formats` (the printer's own list) of the details.
+    #[must_use]
+    pub fn with_printer_formats(self, formats: Vec<DocumentFormat>) -> Self {
+        self.configured(|c| c.details.formats = formats)
+    }
+
+    /// Shorthand for the `resolutions` of the details.
+    #[must_use]
+    pub fn with_resolutions(self, resolutions: Vec<crate::Resolution>) -> Self {
+        self.configured(|c| c.details.resolutions = resolutions)
     }
 
     /// Add a printer to the listing (a native id; the name is `Printer <id>`).
@@ -373,6 +395,11 @@ impl FakeBackend {
         lock(&self.recorded).submissions.clone()
     }
 
+    /// How many times `printer_details` was asked (the registry asks to choose a conversion).
+    pub fn detail_calls(&self) -> u32 {
+        lock(&self.recorded).detail_calls
+    }
+
     /// How many times `job_status` was asked.
     pub fn status_calls(&self) -> u32 {
         lock(&self.recorded).status_calls
@@ -397,6 +424,10 @@ impl Backend for FakeBackend {
         &self.config.formats
     }
 
+    fn formats_per_printer(&self) -> bool {
+        self.config.formats_per_printer
+    }
+
     fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
         match &self.config.list_error {
             Some(error) => Err(error.clone()),
@@ -405,6 +436,10 @@ impl Backend for FakeBackend {
     }
 
     fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
+        {
+            let mut recorded = lock(&self.recorded);
+            recorded.detail_calls = recorded.detail_calls.saturating_add(1);
+        }
         if let Some(error) = &self.config.details_error {
             return Err(error.clone());
         }

@@ -34,13 +34,27 @@ impl Orientation {
     }
 }
 
-/// Print quality, from the fastest draft to the finest output.
+/// Print quality, from the fastest draft to the finest output. A hint: a backend maps it to the
+/// printer's own quality setting when the printer offers a matching value and drops it (with a
+/// warning in [`Submitted::warnings`](crate::Submitted)) otherwise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Quality {
     Draft,
     Normal,
     High,
+    /// Photographic output (the slowest, finest mode some printers offer beyond [`Self::High`]).
+    Photo,
+}
+
+impl Quality {
+    /// Every quality, from draft to photo.
+    pub const ALL: [Quality; 4] = [Self::Draft, Self::Normal, Self::High, Self::Photo];
+
+    /// The quality named `name` (as [`Self::name`] writes it; ASCII case does not matter).
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|q| q.name().eq_ignore_ascii_case(name.trim()))
+    }
 }
 
 impl Quality {
@@ -49,6 +63,7 @@ impl Quality {
             Self::Draft => "draft",
             Self::Normal => "normal",
             Self::High => "high",
+            Self::Photo => "photo",
         }
     }
 }
@@ -193,6 +208,16 @@ mod tests {
         assert_eq!(options.resolution, Some(Resolution { x_dpi: 600, y_dpi: 300 }));
         assert_eq!((options.colour, options.expected_pages), (ColourMode::Mono, Some(3)));
         assert_eq!(Resolution::square(300), Resolution::new(300, 300));
+    }
+
+    #[test]
+    fn photo_is_a_quality_with_a_stable_name() {
+        assert_eq!(Quality::Photo.name(), "photo");
+        assert_eq!(Quality::from_name(" Photo "), Some(Quality::Photo));
+        assert_eq!(Quality::from_name("high"), Some(Quality::High));
+        assert_eq!(Quality::from_name("best"), None);
+        assert!(Quality::ALL.iter().all(|q| Quality::from_name(q.name()) == Some(*q)));
+        assert_eq!(JobOptions::new().with_quality(Quality::Photo).quality, Some(Quality::Photo));
     }
 
     #[test]

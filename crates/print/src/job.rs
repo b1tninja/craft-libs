@@ -328,7 +328,7 @@ pub struct Submitted {
     pub status: Option<JobStatus>,
     /// Settings that were dropped or changed on the way.
     pub warnings: Vec<String>,
-    /// A sentence for people ("job 7 on <printer> was accepted").
+    /// A sentence for people ("job 7 on the printer was accepted").
     pub message: String,
     /// Filled in by the registry from the backend; see [`WatchSupport`].
     pub watch: WatchSupport,

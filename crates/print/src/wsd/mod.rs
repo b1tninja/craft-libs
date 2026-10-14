@@ -58,6 +58,7 @@ pub mod adapter;
 pub mod client;
 pub mod encoder;
 pub mod error;
+pub mod events;
 pub mod fault;
 pub mod job;
 pub mod model;
@@ -78,6 +79,7 @@ pub mod testing;
 
 pub use backend::{JobMatch, Reconciled, WsdBackend, WsdJob};
 pub use client::Client;
+pub use events::{EventStats, EventTuning, NotifyConfig, Wake};
 pub use encoder::{ColorMode, DocumentEncoder, PassThrough, RasterEncoder};
 pub use error::{Class, KINDS, Op, Result, WsdError};
 pub use fault::{Fault, FaultCode};

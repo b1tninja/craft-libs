@@ -36,6 +36,7 @@ mod tests;
 #[cfg(any(test, windows))]
 mod ticket;
 mod tracked;
+mod wake;
 mod watch;
 #[cfg(windows)]
 mod windows;
@@ -85,6 +86,7 @@ pub use tracked::{
     Advance, Attempt, AttemptError, AttemptOutcome, BytesSource, DocumentInfo, DocumentSource, FnSource, JobProgress, LifecycleState, LocalJobId,
     Outcome, PrintJob, PrintJobConfig, RequestRecord, SimpleState, Snapshot, StaleReason, Staleness, TrailEntry, TrailEvent,
 };
+pub use wake::{WakeReceiver, WakeSender, wake_channel};
 pub use watch::{JobSource, JobWatch, WaitPolicy, WatchOutcome, WatchStep, wait_for_job};
 
 /// A system spooler failure. Document permissions belong to the caller.

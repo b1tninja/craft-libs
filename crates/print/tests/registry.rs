@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use craft_print::backends::Backend;
 use craft_print::{
-    BackendClass, CancelToken, Document, DocumentFormat, ErrorKind, Job, JobHint, NativeCode, PrintError, PrinterDetails, PrinterOption, PrinterRef,
-    PrinterState, PrinterStatus, Receipt, RegisterError, Registry, SubmitRequest, Submitted, UserConfirmed, namespaced_id, split_id,
+    BackendClass, CancelToken, ColourMode, Document, DocumentFormat, ErrorKind, Job, JobHint, JobId, JobOptions, NativeCode, Orientation, PrintError,
+    PrinterDetails, PrinterOption, PrinterRef, PrinterState, PrinterStatus, Progress, Quality, Receipt, RegisterError, Registry, Resolution,
+    SubmitRequest, Submitted, UserConfirmed, namespaced_id, split_id,
 };
 
 type Seen = Arc<Mutex<Vec<(Option<String>, DocumentFormat, usize)>>>;
@@ -78,8 +79,8 @@ impl Backend for IppLike {
     }
     fn submit(&self, mut request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         if let Some(progress) = request.progress.as_deref_mut() {
-            progress(0, 2);
-            progress(2, 2);
+            progress(Progress::of(0, 2));
+            progress(Progress::of(2, 2));
         }
         Ok(Receipt { backend: "ipp", message: "accepted".into(), job_id: None }.into())
     }
@@ -243,10 +244,10 @@ fn a_job_routes_to_its_backend_with_the_native_id() {
     assert_eq!(seen.lock().unwrap().as_slice(), [(Some("Label:Writer".to_string()), DocumentFormat::Pdf, 8)]);
 
     let mut events = Vec::new();
-    let mut progress = |done: usize, total: usize| events.push((done, total));
+    let mut progress = |event: Progress| events.push((event.done, event.total));
     let request = SubmitRequest::new(Document::pdf(b"%PDF"), job_for(Some("ipp:net-1"))).with_progress(&mut progress);
     assert_eq!(registry.submit(request).unwrap().backend, "ipp");
-    assert_eq!(events, [(0, 2), (2, 2)]);
+    assert_eq!(events, [(0, Some(2)), (2, Some(2))]);
 }
 
 #[test]
@@ -373,4 +374,41 @@ fn the_process_wide_registry_holds_the_platform_backend() {
     assert_eq!(names, [if cfg!(windows) { "spooler" } else { "cups" }]);
     // The built-in name cannot be registered a second time.
     assert!(matches!(craft_print::register(Box::new(craft_print::SystemSpooler)), Err(RegisterError::DuplicateName { .. })));
+}
+
+#[test]
+fn per_job_options_reach_the_backend_through_the_registry() {
+    struct Echo(Arc<Mutex<Option<JobOptions>>>);
+    impl Backend for Echo {
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+        fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
+            Ok(vec![printer("p", true)])
+        }
+        fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
+            Ok(PrinterDetails { id: native_id.into(), name: native_id.into(), ..PrinterDetails::default() })
+        }
+        fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
+            *self.0.lock().unwrap() = Some(request.options);
+            Ok(Submitted::new("echo", "ok").with_job(JobId::new("echo", "1")))
+        }
+    }
+    let got = Arc::new(Mutex::new(None));
+    let registry = Registry::new();
+    registry.register(Box::new(Echo(got.clone()))).unwrap();
+    let options = JobOptions::new()
+        .with_media("iso_a4_210x297mm")
+        .with_orientation(Orientation::Landscape)
+        .with_quality(Quality::Draft)
+        .with_resolution(Resolution::new(300, 300))
+        .with_colour(ColourMode::Mono)
+        .with_expected_pages(2);
+    let submitted = registry.submit_job(SubmitRequest::new(Document::pdf(b"%PDF"), job_for(None)).with_options(options.clone())).unwrap();
+    assert_eq!(got.lock().unwrap().as_ref(), Some(&options));
+    assert_eq!(submitted.job.map(|j| j.to_string()).as_deref(), Some("echo:1"));
+    assert_eq!(submitted.expected.pages, Some(2));
+    // Without options the backend sees the defaults.
+    registry.submit_job(SubmitRequest::new(Document::pdf(b"%PDF"), job_for(None))).unwrap();
+    assert_eq!(got.lock().unwrap().as_ref(), Some(&JobOptions::default()));
 }

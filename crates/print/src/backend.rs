@@ -18,9 +18,12 @@
 //!   [`JobState::Unknown`], "accepted, outcome unknown". Callers follow a job with a
 //!   [`crate::JobWatch`]; [`crate::wait_for_job`] is the blocking convenience for a CLI.
 //! * **Cancellation and progress travel in the request**: [`SubmitRequest::cancel`] is polled at
-//!   the backend's own checkpoints (between sheets, between network round trips); progress is the
-//!   same `(processed, sheets)` callback as [`crate::submit_with_progress`]. Neither is required:
+//!   the backend's own checkpoints (between sheets, between network round trips); progress is a
+//!   callback of [`Progress`] events whose total is optional. Neither is required:
 //!   the built-in spooler backends check the token only before they start.
+//! * **Per-job options**: [`SubmitRequest::options`] ([`JobOptions`]) carries media, orientation,
+//!   quality, resolution and colour as hints, and the page count the app knows. Apply what you can,
+//!   say so in [`PrinterDetails::honoured`], and list what you dropped in [`Submitted::warnings`].
 //! * **Ids**: a backend names printers with its own native ids and never adds its prefix; the
 //!   registry does. A native id may contain colons; only the first colon separates the prefix.
 //! * **Capabilities are lists and may be unknown.** [`PrinterDetails`] uses `Option`/empty lists
@@ -45,7 +48,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::job::{JobRef, JobState, JobStatus, Submitted, WatchSupport};
+use crate::job::{JobId, JobState, JobStatus, Submitted, WatchSupport};
+use crate::options::JobOptions;
 use crate::retry::{Phase, RetrySafety};
 use crate::{Error, Job, PrinterOption};
 
@@ -324,7 +328,8 @@ pub struct PrinterRef {
     pub two_sided: Option<bool>,
 }
 
-/// The job settings of [`Job`] a printer may honour. Everything else is a hint it ignores.
+/// The job settings of [`Job`] and [`JobOptions`] a printer may honour. Everything else is a hint
+/// it ignores. ([`JobOptions::colour`] is the `Colour` hint, as is `Job::grayscale`.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum JobHint {
@@ -335,6 +340,14 @@ pub enum JobHint {
     Scaling,
     /// `Job::options`, the driver's own keywords.
     DriverOptions,
+    /// [`JobOptions::media`].
+    Media,
+    /// [`JobOptions::orientation`].
+    Orientation,
+    /// [`JobOptions::quality`].
+    Quality,
+    /// [`JobOptions::resolution`].
+    Resolution,
 }
 
 /// The state a printer reports before a job.
@@ -388,22 +401,79 @@ pub struct Receipt {
     pub job_id: Option<String>,
 }
 
-/// Progress callback: `(processed, sheets)`, as for [`crate::submit_with_progress`].
-pub type Progress<'a> = &'a mut dyn FnMut(usize, usize);
+/// One progress event: sheets processed so far and, **when anyone knows it**, how many there will
+/// be. A network printer typically reports sheets completed and no total; the registry then fills
+/// `total` from [`JobOptions::expected_pages`] (as an estimate of the sheets, see
+/// [`crate::ExpectedTotals`]) and a backend-reported total wins. A UI shows a determinate bar when
+/// `total` is `Some` and an indeterminate one ("3 sheets") otherwise.
+///
+/// The older [`crate::submit_with_progress`] keeps its `(processed, sheets)` closure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Progress {
+    pub done: u32,
+    pub total: Option<u32>,
+}
+
+impl Progress {
+    pub const fn new(done: u32, total: Option<u32>) -> Self {
+        Self { done, total }
+    }
+
+    /// An event with a known total.
+    pub const fn of(done: u32, total: u32) -> Self {
+        Self { done, total: Some(total) }
+    }
+
+    /// An event whose total is not known.
+    pub const fn done_only(done: u32) -> Self {
+        Self { done, total: None }
+    }
+
+    /// `done / total` in `0.0..=1.0` when the total is known and not zero.
+    pub fn fraction(&self) -> Option<f32> {
+        match self.total {
+            Some(total) if total > 0 => Some((self.done.min(total) as f32) / (total as f32)),
+            _ => None,
+        }
+    }
+
+    /// Fill a missing (or zero) total from `expected`; a total that is present is kept.
+    #[must_use]
+    pub fn or_expected(self, expected: Option<u32>) -> Self {
+        match self.total {
+            Some(total) if total > 0 => self,
+            _ => Self { done: self.done, total: expected.filter(|t| *t > 0) },
+        }
+    }
+}
+
+/// The progress callback of a [`SubmitRequest`].
+pub type ProgressCallback<'a> = &'a mut dyn FnMut(Progress);
 
 /// One print request. [`Job::printer`] is the printer: a namespaced id when it goes to a
 /// [`Registry`](crate::Registry), the native id when a backend receives it; `None` is the default.
+/// [`SubmitRequest::options`] carries the per-job hints beside the spooler's own [`Job`] settings;
+/// see [`JobOptions`].
 pub struct SubmitRequest<'a> {
     pub document: Document<'a>,
     pub job: Job,
+    /// Per-job hints (media, orientation, quality, resolution, colour, expected page count).
+    pub options: JobOptions,
     pub consent: Option<UserConfirmed>,
     pub cancel: CancelToken,
-    pub progress: Option<Progress<'a>>,
+    pub progress: Option<ProgressCallback<'a>>,
 }
 
 impl<'a> SubmitRequest<'a> {
     pub fn new(document: Document<'a>, job: Job) -> Self {
-        Self { document, job, consent: None, cancel: CancelToken::new(), progress: None }
+        Self { document, job, options: JobOptions::default(), consent: None, cancel: CancelToken::new(), progress: None }
+    }
+
+    /// Per-job hints; see [`JobOptions`].
+    #[must_use]
+    pub fn with_options(mut self, options: JobOptions) -> Self {
+        self.options = options;
+        self
     }
 
     #[must_use]
@@ -419,7 +489,7 @@ impl<'a> SubmitRequest<'a> {
     }
 
     #[must_use]
-    pub fn with_progress(mut self, progress: Progress<'a>) -> Self {
+    pub fn with_progress(mut self, progress: ProgressCallback<'a>) -> Self {
         self.progress = Some(progress);
         self
     }
@@ -453,8 +523,8 @@ pub trait Backend: Send + Sync {
     /// `request.job.printer` is a native id or `None` for the backend's default. The registry has
     /// already checked the format, the consent and that the token is not cancelled.
     ///
-    /// Return [`Submitted::job`] when the backend has a handle for the job (`JobRef::new(native)`;
-    /// the registry namespaces it). An error that follows a request which may have arrived must say
+    /// Return [`Submitted::job`] when the backend has a handle for the job (`JobId::new(self.name(), native)`;
+    /// the registry stamps the backend's name on it either way). An error that follows a request which may have arrived must say
     /// so: [`PrintError::with_safety`]`(`[`RetrySafety::OutcomeUnknown`]`)`.
     fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError>;
 
@@ -478,15 +548,33 @@ pub trait Backend: Send + Sync {
     /// is harmless). A job the device no longer knows is [`ErrorKind::NotFound`] (finished jobs are
     /// forgotten; the message says so). The default answers [`JobState::Unknown`]: a backend that
     /// cannot report keeps it, and callers do not poll it ([`WatchSupport::None`]).
-    fn job_status(&self, job: &JobRef) -> Result<JobStatus, PrintError> {
+    fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
         let _ = job;
         Ok(JobStatus::new(JobState::Unknown))
     }
 
     /// Ask the device to cancel an accepted job. Cancelling a job that already ended is not an
     /// error. The default is [`ErrorKind::Unsupported`].
-    fn cancel_job(&self, job: &JobRef) -> Result<(), PrintError> {
+    fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {
         let _ = job;
         Err(PrintError::new(ErrorKind::Unsupported, format!("the {} backend cannot cancel a job once it is accepted", self.name())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_totals_are_optional_and_a_reported_one_wins() {
+        assert_eq!(Progress::done_only(2).fraction(), None);
+        assert_eq!(Progress::of(1, 4).fraction(), Some(0.25));
+        assert_eq!(Progress::of(9, 4).fraction(), Some(1.0));
+        assert_eq!(Progress::of(1, 0).fraction(), None);
+        assert_eq!(Progress::done_only(2).or_expected(Some(5)), Progress::of(2, 5));
+        assert_eq!(Progress::of(2, 3).or_expected(Some(5)), Progress::of(2, 3));
+        assert_eq!(Progress::of(2, 0).or_expected(Some(5)), Progress::of(2, 5), "a zero total is no total");
+        assert_eq!(Progress::done_only(2).or_expected(Some(0)), Progress::done_only(2));
+        assert_eq!(Progress::new(1, None), Progress::done_only(1));
     }
 }

@@ -83,8 +83,9 @@ match watch.tick(registry) {
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-* `Submitted` carries the namespaced `JobRef` (`id` such as `"wsd:<printer>#7"`, plus the backend's
-  `native` handle), `accepted_at`, warnings, a message, and what the backend can do afterwards
+* `Submitted` carries a typed `JobId` (`backend()` and `native()`; text form `"wsd:<printer>#7"` via
+  `Display`/`FromStr`, `JobId::new(backend, native)` to build one, a typed `ParseJobIdError` for bad
+  text, never a panic), `accepted_at`, warnings, a message, and what the backend can do afterwards
   (`watch: WatchSupport`, `poll_interval`). The job is `None` for a spooler that gives no handle.
 * `WatchSupport::None` means the backend cannot report (a fire-and-forget spooler): the status is
   `JobState::Unknown`, "accepted, outcome unknown", which is not terminal and not a failure. Do not
@@ -93,7 +94,8 @@ match watch.tick(registry) {
   CompletedWithErrors, Cancelled, Aborted, Unknown), reasons, optional sheet and page counters and
   `terminal()`. A job the device has forgotten is `ErrorKind::NotFound`; a watch reports it as
   `WatchOutcome::Forgotten` (most likely finished).
-* `Registry::job_status(id)` and `cancel_job(id)` are single bounded requests routed by prefix.
+* `Registry::job_status(&JobId)` and `cancel_job(&JobId)` are single bounded requests routed by the
+  id's backend. Keep the `JobId` (or its string and `.parse()` it later); do not build ids by hand.
 * `JobWatch` is a state machine **you** advance: no thread, no timer. It has an interval that backs
   off while nothing changes, a `max_wait`, a `CancelToken` (one cancel is sent, then it keeps watching
   for the end state), failure retries under a `RetryPolicy`, and an injectable `Clock` (`ManualClock`
@@ -109,20 +111,41 @@ match watch.tick(registry) {
   has the survey of how CUPS/IPP, WS-Print and the Windows spooler separate accepting from printing.
 * `Registry::submit` and `submit_to_backend` still return a `Receipt`; it now means "accepted".
 
+### Per-job options and totals
+
+* `SubmitRequest::with_options(JobOptions)` carries per-job **hints** beside the spooler's own `Job`:
+  `media` (a PWG token such as `iso_a4_210x297mm`), `orientation`, `quality`, `resolution`
+  (`Resolution::new(x_dpi, y_dpi)`), an explicit `colour` (`ColourMode::Auto`, `Colour`, `Mono`; it
+  overrides `Job::grayscale` unless `Auto`) and `expected_pages`. Build with `JobOptions::new()` and
+  the `with_*` methods; the struct is `#[non_exhaustive]`. A backend applies what it can;
+  `PrinterDetails::honoured` lists the `JobHint`s it applies (`Media`, `Orientation`, `Quality`,
+  `Resolution` and `Colour` joined `Copies`, ...). The built-in spooler honours the colour choice only.
+* `Registry::submit_job` accepts them, so an app needs no backend-specific entry point. Settings that
+  are backend-wide configuration (a network backend's ticket shape, strict mode, transfer) stay on
+  the backend: an app that wants different ones per invocation builds a backend for that invocation
+  (or its own `Registry`) with them.
+* **Totals are optional.** `Progress { done, total: Option<u32> }` is what the progress callback gets
+  (`fraction()` is `None` while the total is unknown), and `JobStatus`'s counters were already
+  optional. `expected_pages` is the page count the app knows: the registry turns it into an
+  estimated sheet total (halved for two-sided jobs, times the copies; `Submitted::expected`) and
+  uses it as the total of progress events and, through `JobWatch::for_submitted` (or
+  `JobWatch::with_expected`), of status readings, **only where the backend reports none**; a
+  backend-reported total always wins. `JobStatus::sheet_fraction()` is then determinate.
+
 ### Writing a backend (the extension points for a network backend)
 
 * The trait is object safe and **blocking but bounded**: `Backend: Send + Sync`, stored as
   `Arc<dyn Backend>`. There is no async runtime here; a network backend blocks on its own transport
   for at most its per-request timeouts, never for the length of a print (see "Job lifecycle").
   Cancellation is a cloneable `CancelToken` in the `SubmitRequest` that the backend polls between
-  round trips (the registry also checks it before calling); progress is the same
-  `(processed, sheets)` callback as `submit_with_progress`.
+  round trips (the registry also checks it before calling); progress is a callback of
+  `Progress { done, total: Option<u32> }` events (see "Per-job options and totals").
 * Implement `name`, `list_printers`, `printer_details` and `submit` (which returns `Submitted` once the
   printer has accepted the document). Override `watch_support`, `job_status` and `cancel_job` if the
   protocol can tell what happened to a job afterwards; the defaults say "accepted, outcome unknown".
   Override `class` (network backends return `BackendClass::Network`) and `accepted_formats` (for
   example raster or the printer's own language) as needed. Use native ids; the registry adds the
-  prefix, to printers and to jobs.
+  prefix, to printers and to jobs. A job is `JobId::new(self.name(), native)`.
 * Register once at start-up: `craft_print::register(Box::new(MyBackend::new()))?`, or on a
   `Registry` you own. A backend that needs extra dependencies can live behind a cargo feature
   that registers it; the base crate is complete without it.

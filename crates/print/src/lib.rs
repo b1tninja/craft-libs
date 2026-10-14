@@ -18,6 +18,7 @@
 mod backend;
 mod builtin;
 mod job;
+mod options;
 #[cfg(any(test, windows))]
 mod progress;
 mod registry;
@@ -48,11 +49,12 @@ pub mod backends {
 }
 pub use backend::{
     BackendClass, CancelToken, Document, DocumentFormat, ErrorKind, JobHint, NativeCode, PrintError, PrinterDetails, PrinterRef, PrinterState,
-    PrinterStatus, Progress, Receipt, SubmitRequest, UserConfirmed,
+    PrinterStatus, Progress, ProgressCallback, Receipt, SubmitRequest, UserConfirmed,
 };
 #[cfg(any(windows, all(unix, not(target_arch = "wasm32"))))]
 pub use builtin::SystemSpooler;
-pub use job::{JobRef, JobState, JobStatus, Submitted, WatchSupport};
+pub use job::{ExpectedTotals, JobId, JobState, JobStatus, ParseJobIdError, ParseJobIdErrorKind, Submitted, WatchSupport};
+pub use options::{ColourMode, JobOptions, Orientation, Quality, Resolution};
 pub use registry::{
     BackendError, Listing, RegisterError, Registry, cancel_job, job_status, list_printers, namespaced_id, printer_details, register, registry,
     split_id, submit_job, submit_to_backend,

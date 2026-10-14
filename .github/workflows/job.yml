@@ -27,7 +27,12 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy -p craft-job --all-targets --locked -- -D warnings
       - run: cargo test -p craft-job --locked
+      - run: cargo clippy -p craft-job --all-targets --features serde --locked -- -D warnings
+      - run: cargo test -p craft-job --features serde --locked
       - run: cargo doc -p craft-job --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo doc -p craft-job --no-deps --features serde --locked
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -40,3 +45,4 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - run: cargo check -p craft-job --target wasm32-unknown-unknown --locked
+      - run: cargo check -p craft-job --target wasm32-unknown-unknown --features serde --locked

@@ -44,6 +44,9 @@ pub mod tag;
 pub mod time;
 pub mod view;
 
+#[cfg(feature = "serde")]
+mod wire;
+
 pub use device::{
     CapabilitiesSummary, DeviceConnection, DeviceState, DeviceView, Indicator, IndicatorKey, PaperPathView, PaperSource, Severity, Supply, Tri,
 };

@@ -259,6 +259,20 @@ the UI thread never blocks; a worker built on `craft-print` maps `Submitted` to 
 `JobStatus` to `Status` (`JobState::name()` feeds `Stage::from_name`) and its `WatchOutcome` to the
 `Report`. Workers that send no updates behave exactly as before.
 
+**Sheet totals are optional.** Many printers report sheets done and never a total, so
+`Progress::sheets_total` is an `Option`: while it is unknown the accepted phase shows the count
+("N sheets", `Labels::sheets`) and no bar that could never fill; once a total is known it shows a
+determinate bar (`Labels::sheets_progress`). The app can supply one: set `Draft::expected_pages`
+(the document's page count) before `State::start_job`. It travels to the host in
+`Request::expected_pages` (a `craft-print` worker passes it as `JobOptions::expected_pages`), and the
+model turns it into an estimated sheet total (`Draft::expected_sheets`: pages halved and rounded up
+for a two-sided job, times the copies, fixed when the job starts) that fills a missing or zero total
+of every `Accepted` and `Status` update. A total the printer reports always wins. Additive changes
+for hosts: `Request` gained `expected_pages` (build one with `..Default::default()` if you
+construct it yourself), `Draft` gained `expected_pages` and `expected_sheets()`, and `Progress` gained
+`fraction()` and `with_expected_total()`; `JobHandle`, `JobUpdate`, `State::start_job` and `Labels` are
+unchanged.
+
 Rules kept by the model: only options the printer lists are offered and sent; the confirmation is
 never on by default and is cleared when the address changes, the printer is queried again, a job
 starts and the dialog opens (`dialog_opened`); answers for an older query or another address are

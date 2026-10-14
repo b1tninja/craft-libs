@@ -150,10 +150,34 @@ match watch.tick(registry) {
   `Registry` you own. A backend that needs extra dependencies can live behind a cargo feature
   that registers it; the base crate is complete without it.
 
-`tests/registry.rs` drives the public API with test-only fake backends (CUPS-like with options
-and no status, IPP-like with state up front, WSD-like with formats and a consent requirement, and
-one that always fails): aggregation, routing, partial failure, duplicate registration, unknown
-prefix, consent and format refusals.
+`tests/registry.rs` drives the public API with `craft_print::testing::FakeBackend` configured as a
+CUPS-like backend (options, no status), an IPP-like one (state up front), a WSD-like one (formats
+and a consent requirement) and one that always fails: aggregation, routing, partial failure,
+duplicate registration, unknown prefix, consent and format refusals.
+
+### Testing your app (cargo feature `testing`)
+
+`testing` is off by default, has no effect on a default build and adds no dependency of its own
+(with `wsd` it turns on `craft-wsd`'s own `testing` feature, which is a loopback server). Enable
+it in a dev-dependency only, never in a shipped binary:
+
+```toml
+[dev-dependencies]
+craft-print = { version = "0.1", features = ["testing"] }
+```
+
+* `craft_print::testing::FakeBackend` is a configurable `Backend` for a `Registry` of your own:
+  printers, details, accepted formats, class (network needs consent), progress events, watch
+  support, a scripted `job_status` (the last answer repeats), failing list/details/submit, and a job
+  handle of your choosing. Clones share state, so register one and keep one:
+  `submissions()` (printer, format, bytes, the `Job`, the `JobOptions`, whether consent came),
+  `status_calls()` and `cancels()` say what your app did.
+* `craft_print::wsd::testing` (needs `wsd` too) is an in-memory WS-Print printer:
+  `FakePrinter::new(FakeConfig { .. })` (formats, sides, copies, colour, media, how jobs end
+  with `Ending`, faults, HTTP errors), `MemTransport(printer)` for
+  `WsdBackend::with_transport` (no sockets), `printer_server(printer)` for a loopback HTTP server,
+  and the stored `FakeJob`s (ticket and document) and the request log (`actions()`) to assert on.
+  The crate's own tests use exactly these types.
 
 ## WS-Print backend (cargo feature `wsd`)
 
@@ -174,7 +198,7 @@ let job = Job { printer: Some("wsd:http://10.0.0.20:5357/print".into()), ..Job::
 let request = SubmitRequest::new(Document::pdf(&pdf_bytes), job).with_consent(UserConfirmed::interactive());
 let submitted = craft_print::submit_job(request)?;   // returns when the printer has accepted the document
 let job = submitted.job.expect("WS-Print gives every accepted job a handle"); // "wsd:<url>#<job id>"
-let status = craft_print::job_status(&job.id)?;       // one GetJobElements; or follow it with a JobWatch
+let status = craft_print::job_status(&job)?;          // one GetJobElements; or follow it with a JobWatch
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -195,7 +219,7 @@ let status = craft_print::job_status(&job.id)?;       // one GetJobElements; or 
 * **Printer details** map from `GetPrinterElements`: accepted formats (PDF, PWG raster,
   PostScript, octet-stream, in the printer's order; other formats are not named), two-sided,
   colour, paper names, maximum copies, status (idle, processing, stopped, with the reasons the
-  printer gives) and the hints it applies (copies, duplex, colour as grey). Unlisted
+  printer gives) and the hints it applies (copies, duplex, colour, and the per-job media size, orientation, quality and resolution). Unlisted
   dimensions are `None` or empty, not "unsupported".
 * **Jobs.** A document is bytes in a `DocumentFormat` the printer lists (case-insensitively; the
   printer's spelling is sent), otherwise `ErrorKind::UnsupportedFormat` before a job exists. The
@@ -203,10 +227,13 @@ let status = craft_print::job_status(&job.id)?;       // one GetJobElements; or 
   **`submit` returns when the printer has accepted the document** (the reply to `SendDocument`),
   after at most capabilities, create, send (and a cleanup cancel when the printer refused the
   document), each bounded by the request timeout. It never waits for the print. The accepted job
-  is `Submitted::job`, `wsd:<printer url>#<job id>`. Copies, two-sided and grey come from the
-  `Job`; collation, scaling and driver options have no WS-Print setting and are reported as
-  warnings in `Submitted::warnings`. Progress is `(done, 3)` protocol phases (capabilities read,
-  job created, document accepted), not sheets. The cancel token is polled between round trips;
+  is `Submitted::job`, a `JobId` whose text form is `wsd:<printer url>#<job id>`. Copies, two-sided
+  and grey come from the `Job`; media size, orientation, quality, resolution and an explicit
+  colour choice come from the request's `JobOptions` and go into that job's ticket (the printer's
+  capability list still decides: an unlisted value is dropped with a warning, or refused in strict
+  mode; a reduced ticket shape refuses or drops them as before); collation, scaling and driver options have no WS-Print setting and are reported as
+  warnings in `Submitted::warnings`. Progress events are `Progress::of(done, 3)` protocol phases (capabilities read,
+  job created, document accepted), not sheets; the sheets come from `job_status`. The cancel token is polled between round trips;
   cancelling before the document is sent cancels the created job and returns
   `ErrorKind::Cancelled`. A failed send whose outcome is unknown (the connection closed or timed
   out after the document was written) leaves the created job alone: cancelling could abort a job
@@ -221,7 +248,11 @@ let status = craft_print::job_status(&job.id)?;       // one GetJobElements; or 
   A job the printer does not list is `ErrorKind::NotFound` whose message says printers forget finished
   jobs, so it most likely finished; a watch reports it as `Forgotten`. `cancel_job` is `CancelJob`,
   treating "too late" as success (`wsd::job::cancel_job_tolerant`). A job handle must name an added
-  printer; anything else is `ErrorKind::InvalidRequest`, never `NotFound`.
+  printer; anything else is `ErrorKind::InvalidRequest`, never `NotFound`. Apps never build the
+  `wsd:<url>#<n>` string: `WsdBackend::job_id(printer_url, number)` makes the `JobId` and
+  `WsdBackend::parse_job_id` / `parse_native` read it back (`WsdJob { printer_url, job_number }`).
+  `with_expected` / `Submitted::expected` give the sheet counter a total (WS-Print reports none)
+  from `JobOptions::expected_pages`.
 * **Reconcile.** After an error with `retry_safety() == OutcomeUnknown` (for example the connection
   closed with no reply to `SendDocument`), `WsdBackend::reconcile(printer, title)` reads
   `GetActiveJobs` and `GetJobHistory` (reads only) and returns the jobs with that title from this
@@ -235,6 +266,10 @@ let status = craft_print::job_status(&job.id)?;       // one GetJobElements; or 
   (`ErrorKind::InvalidRequest`) unless `with_drop_ticket_settings(true)` drops them with a
   warning each. `with_strict(true)` refuses settings the printer lists as unsupported and sends
   every setting as `MustHonor`; otherwise unsupported settings are lowered or left out, with a warning.
+* **Per invocation.** Ticket shape, strict mode, transfer, user name and limits are backend-wide.
+  To use others for one invocation, build a variant: `backend.clone().with_ticket_shape(..)`
+  shares the printer list but not the configuration (register it in a `Registry` of its own, or
+  call `Backend::submit` on it, which checks consent itself). Everything else is per job.
 * **Errors** are neutral `PrintError`s. Faults carry `NativeCode { domain: "wsd-fault", code,
   name }` (codes 1 to 16 in the order of the service description, 100 for
   `ActionNotSupported`, 0 for a vendor code) and temporary refusals (not accepting jobs,
@@ -260,7 +295,7 @@ let status = craft_print::job_status(&job.id)?;       // one GetJobElements; or 
 * **Dependency.** `craft-wsd` is in `storytold/craft-libs` pull request 113 and is pinned to that
   pull request's ref (`rev = "refs/pull/113/head"`) until it merges; then pin an immutable
   revision.
-* **Tests.** `tests/wsd_registry.rs` (through the registry: listing, policy, consent, format
+* **Tests.** `tests/wsd_registry.rs` (through the registry, on `wsd::testing`: listing, policy, consent, format
   refusal, ticket shapes, accepted-not-printed submits, watching on an injected clock, cancellation,
   progress, outcomes, faults, retries, reconcile after a lost reply, and hostile replies from
   loopback servers: huge, malformed, wrong namespace, HTML 5xx, redirects, silence, a closed port,

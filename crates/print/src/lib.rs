@@ -25,6 +25,8 @@ mod registry;
 mod retry;
 #[cfg(any(test, windows))]
 mod sheets;
+#[cfg(feature = "testing")]
+pub mod testing;
 #[cfg(test)]
 mod tests;
 #[cfg(any(test, windows))]

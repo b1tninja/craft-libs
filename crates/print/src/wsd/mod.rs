@@ -62,7 +62,10 @@ mod backend;
 #[cfg(test)]
 mod testutil;
 
-pub use backend::{JobMatch, Reconciled, WsdBackend};
+#[cfg(feature = "testing")]
+pub mod testing;
+
+pub use backend::{JobMatch, Reconciled, WsdBackend, WsdJob};
 pub use client::Client;
 pub use encoder::{ColorMode, DocumentEncoder, PassThrough, RasterEncoder};
 pub use error::{Class, KINDS, Op, Result, WsdError};

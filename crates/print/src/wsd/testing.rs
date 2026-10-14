@@ -1,23 +1,41 @@
-//! Test support: an in-process fake WS-Print service.
+//! An in-process fake WS-Print printer for tests of apps and of this crate. Cargo feature `testing`
+//! (together with `wsd`); not for production use, and it has no effect on default builds.
 //!
-//! The protocol logic is `FakePrinter::handle`, `MemTransport` is a socket-free transport over it,
-//! and `printer_server` puts it behind the loopback HTTP server of `craft-wsd`'s `testing` feature
-//! (127.0.0.1, ephemeral port). It implements just enough of the service description to exercise
-//! the client. Test code only.
-#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+//! The protocol logic is [`FakePrinter::handle`], [`MemTransport`] is a socket-free
+//! [`Transport`](super::adapter::Transport) over it, and [`printer_server`] puts it behind the
+//! loopback HTTP server of `craft-wsd`'s `testing` feature (127.0.0.1, ephemeral port). It
+//! implements just enough of the service to exercise a client: printer elements (description,
+//! status, capabilities), create / send / status / cancel / history of jobs, with scripted endings
+//! ([`Ending`]) and failures ([`FakeConfig`]). It stores every job's ticket and document
+//! ([`FakeJob`]) and logs every request ([`Recorded`]) so a test can assert on what was sent.
+//!
+//! ```
+//! use std::sync::Arc;
+//! use craft_print::wsd::WsdBackend;
+//! use craft_print::wsd::testing::{FakeConfig, FakePrinter, MemTransport};
+//!
+//! let printer = FakePrinter::new(FakeConfig::default());
+//! let backend = WsdBackend::new().with_transport(MemTransport(Arc::clone(&printer)));
+//! let id = backend.add("http://127.0.0.1:5357/print")?;
+//! assert_eq!(printer.jobs(), 0);
+//! # let _ = id;
+//! # Ok::<(), craft_print::PrintError>(())
+//! ```
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use craft_print::wsd::adapter::{DeviceUrl, Request, Response, Transport, WireError};
-use craft_wsd::mtom::param;
-#[allow(unused_imports)]
-pub use craft_wsd::testing::{HttpRequest, Server, raw_response};
+use super::adapter::{DeviceUrl, Request, Response, Transport, WireError, param};
+pub use super::adapter::{HttpRequest, Server, raw_response};
 
 pub const SOAP: &str = "http://www.w3.org/2003/05/soap-envelope";
 pub const WSA: &str = "http://schemas.xmlsoap.org/ws/2004/08/addressing";
 pub const WPRT: &str = "http://schemas.microsoft.com/windows/2006/08/wdp/print";
 const ACTION_BASE: &str = "http://schemas.microsoft.com/windows/2006/08/wdp/print";
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// What the fake does with a job as it is polled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,8 +50,10 @@ pub enum Ending {
     Vanishes,
 }
 
+/// How the fake printer behaves; the default is a colour printer that accepts every job and completes it
+/// after two polls.
 #[derive(Clone, Debug)]
-pub struct Config {
+pub struct FakeConfig {
     pub formats: Vec<&'static str>,
     pub compressions: Vec<&'static str>,
     pub sides: Vec<&'static str>,
@@ -55,7 +75,7 @@ pub struct Config {
     pub media: Vec<&'static str>,
 }
 
-impl Default for Config {
+impl Default for FakeConfig {
     fn default() -> Self {
         Self {
             formats: vec!["application/pdf", "image/pwg-raster"],
@@ -76,8 +96,9 @@ impl Default for Config {
     }
 }
 
+/// A job the fake printer stores: the ticket and the document as they arrived.
 #[derive(Clone, Debug)]
-pub struct Job {
+pub struct FakeJob {
     /// `JobName` and `JobOriginatingUserName` of the ticket.
     pub name: String,
     pub user: String,
@@ -90,6 +111,7 @@ pub struct Job {
     polls: u32,
 }
 
+/// One request the fake received.
 #[derive(Clone, Debug)]
 pub struct Recorded {
     pub action: String,
@@ -100,12 +122,13 @@ pub struct Recorded {
 #[derive(Default)]
 struct State {
     next_id: u32,
-    jobs: BTreeMap<u32, Job>,
+    jobs: BTreeMap<u32, FakeJob>,
     log: Vec<Recorded>,
 }
 
+/// The fake printer. Share it with [`Arc`]: [`MemTransport`] and [`printer_server`] take a clone.
 pub struct FakePrinter {
-    pub config: Mutex<Config>,
+    pub config: Mutex<FakeConfig>,
     state: Mutex<State>,
 }
 
@@ -185,29 +208,29 @@ fn unbase64(s: &str) -> Vec<u8> {
 }
 
 impl FakePrinter {
-    pub fn new(config: Config) -> Arc<Self> {
+    pub fn new(config: FakeConfig) -> Arc<Self> {
         Arc::new(Self { config: Mutex::new(config), state: Mutex::new(State { next_id: 1, ..Default::default() }) })
     }
 
     pub fn log(&self) -> Vec<Recorded> {
-        self.state.lock().unwrap().log.clone()
+        lock(&self.state).log.clone()
     }
 
     pub fn actions(&self) -> Vec<String> {
         self.log().into_iter().map(|r| r.action.rsplit('/').next().unwrap_or("").to_owned()).collect()
     }
 
-    pub fn job(&self, id: u32) -> Option<Job> {
-        self.state.lock().unwrap().jobs.get(&id).cloned()
+    pub fn job(&self, id: u32) -> Option<FakeJob> {
+        lock(&self.state).jobs.get(&id).cloned()
     }
 
     pub fn jobs(&self) -> usize {
-        self.state.lock().unwrap().jobs.len()
+        lock(&self.state).jobs.len()
     }
 
     /// Handle one POST: returns (status, content type, body).
     pub fn handle(&self, content_type: &str, body: &[u8]) -> (u16, String, Vec<u8>) {
-        let cfg = self.config.lock().unwrap().clone();
+        let cfg = lock(&self.config).clone();
         if let Some(code) = cfg.http_error {
             return (code, "text/plain".into(), Vec::new());
         }
@@ -234,7 +257,7 @@ impl FakePrinter {
             .unwrap_or_default();
         let op = action.strip_prefix(&format!("{ACTION_BASE}/")).unwrap_or("").to_owned();
         let payload = env.children().find(|c| c.is_element() && local(*c) == "Body").and_then(|b| b.children().find(|c| c.is_element()));
-        self.state.lock().unwrap().log.push(Recorded { action: action.clone(), content_type: content_type.to_owned(), body_len: body.len() });
+        lock(&self.state).log.push(Recorded { action: action.clone(), content_type: content_type.to_owned(), body_len: body.len() });
         let ok = |name: &str, inner: &str| {
             (
                 200u16,
@@ -247,7 +270,7 @@ impl FakePrinter {
             (500u16, "application/soap+xml; charset=utf-8".to_owned(), fault(&msg_id, role, sub, reason).into_bytes())
         };
         let Some(payload) = payload else { return flt("Sender", "wprt:InvalidArgs", "empty body") };
-        let mut st = self.state.lock().unwrap();
+        let mut st = lock(&self.state);
         match op.as_str() {
             "GetPrinterElements" => {
                 let wanted: Vec<String> = payload
@@ -293,7 +316,7 @@ impl FakePrinter {
                 st.next_id += 1;
                 st.jobs.insert(
                     id,
-                    Job {
+                    FakeJob {
                         name: text_of("JobName"),
                         user: text_of("JobOriginatingUserName"),
                         state: "Pending",

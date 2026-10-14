@@ -44,6 +44,13 @@ fn wire_safety(error: WireError, idempotent: bool) -> RetrySafety {
     }
 }
 
+/// The loopback HTTP server and the media-type parameter reader of `craft-wsd`'s `testing` feature,
+/// for [`super::testing`].
+#[cfg(feature = "testing")]
+pub use craft_wsd::mtom::param;
+#[cfg(feature = "testing")]
+pub use craft_wsd::testing::{HttpRequest, Server, raw_response};
+
 /// A transport the backend can hold and share between threads.
 pub type SharedTransport = Arc<dyn Transport + Send + Sync>;
 

@@ -78,9 +78,9 @@ is no on/off readback), so `LampError` is `On` or `NotReported`.
 | any other reason | `Other("<reason>")` |
 
 `DeviceView::problems()` yields the warnings and errors; `worst_severity()` the highest.
-`DeviceConnection` is named apart from craft-scan's `Connection`: `Usb`, `Network` and `Other`
-map one to one, craft-scan's remaining variants map to `Local` (a port or virtual device) or
-`Unknown`.
+`DeviceConnection` is named apart from craft-scan's `Connection`: `Usb` maps to `Usb`, `Wsd` to
+`Network`, `Other` to `Other` and `Unknown` to `Unknown`. `Local` (a local port or virtual device)
+has no scan counterpart today; a print spooler port uses it.
 
 ## Vocabulary: existing names
 

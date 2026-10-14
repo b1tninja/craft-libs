@@ -54,7 +54,7 @@ eventing::dispatch(&posted_bytes, &my_sink)?;                 // from the applic
 
 | Failure | Value |
 |---------|-------|
-| Transport | `Error::Transport { kind, stage, message }`; `TransportKind` is `Refused`, `Unreachable`, `ConnectTimeout`, `Timeout`, `Redirect`, `ConnectionClosed` or `Other` |
+| Transport | `Error::Transport { kind, stage, message }`; `TransportKind` is `Refused`, `Unreachable`, `ConnectTimeout`, `Timeout`, `Redirect`, `ConnectionClosed`, `InvalidResponse` (the peer did not speak HTTP; not retryable) or `Io` (an I/O error that fits no other kind; retryable) |
 | HTTP status, no SOAP fault | `Error::Http { status, retry_after }` |
 | SOAP fault | `Error::Fault(Box<Fault>)` (`Error::from_fault`): `role`, `code`, `nested` sub-codes, `reason`, `detail`, `retry_after` |
 | Nothing sent | `Policy`, `Invalid`, `Cancelled`, `Timeout` (deadline), `NotFound` |

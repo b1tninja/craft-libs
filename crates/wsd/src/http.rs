@@ -55,7 +55,7 @@ fn from_io(io: &std::io::Error) -> Error {
         K::HostUnreachable | K::NetworkUnreachable | K::NetworkDown => Error::transport(TransportKind::Unreachable, format!("unreachable ({io})")),
         K::TimedOut | K::WouldBlock => Error::transport(TransportKind::Timeout, format!("timed out ({io})")),
         K::UnexpectedEof | K::ConnectionReset | K::ConnectionAborted | K::BrokenPipe => Error::transport(TransportKind::ConnectionClosed, CLOSED),
-        _ => Error::transport(TransportKind::Other, io.to_string()),
+        _ => Error::transport(TransportKind::Io, io.to_string()),
     }
 }
 
@@ -73,7 +73,13 @@ fn map_error(e: ureq::Error) -> Error {
         U::Io(io) => from_io(&io),
         U::HostNotFound | U::ConnectionFailed => Error::transport_at(TransportKind::Unreachable, Stage::Connect, message),
         U::TooManyRedirects | U::RedirectFailed => Error::transport_at(TransportKind::Redirect, Stage::Reply, message),
-        _ => Error::transport_at(TransportKind::Other, Stage::Reply, message),
+        // The peer did not speak HTTP.
+        U::Protocol(_) | U::LargeResponseHeader(..) => Error::transport_at(TransportKind::InvalidResponse, Stage::Reply, message),
+        // Our own request could not be built (nothing was sent; the url and headers are fixed by
+        // the policy, so this is a bug or a ureq limit rather than the device).
+        U::Http(_) | U::BadUri(_) | U::InvalidProxyUrl | U::BodyExceedsLimit(_) | U::RequireHttpsOnly(_) => Error::Invalid(message),
+        // Anything ureq adds later or that fits nothing above: a transient, unclassified failure.
+        _ => Error::transport_at(TransportKind::Io, Stage::Reply, message),
     }
 }
 
@@ -157,7 +163,8 @@ mod tests {
             (K::ConnectionReset, T::ConnectionClosed, Stage::Reply),
             (K::ConnectionAborted, T::ConnectionClosed, Stage::Reply),
             (K::BrokenPipe, T::ConnectionClosed, Stage::Reply),
-            (K::PermissionDenied, T::Other, Stage::Reply),
+            (K::PermissionDenied, T::Io, Stage::Reply),
+            (K::InvalidData, T::Io, Stage::Reply),
         ] {
             assert_eq!(kind_stage(&map_error(ureq::Error::Io(IoError::from(k)))), (Some(want), stage), "{k:?}");
             assert_eq!(kind_stage(&map_body_error(IoError::from(k))), (Some(want), stage), "{k:?} while reading the body");
@@ -180,7 +187,8 @@ mod tests {
             (ureq::Error::ConnectionFailed, T::Unreachable, Stage::Connect),
             (ureq::Error::TooManyRedirects, T::Redirect, Stage::Reply),
             (ureq::Error::RedirectFailed, T::Redirect, Stage::Reply),
-            (ureq::Error::BadUri("x".into()), T::Other, Stage::Reply),
+            (ureq::Error::LargeResponseHeader(70000, 65536), T::InvalidResponse, Stage::Reply),
+            (ureq::Error::TlsRequired, T::Io, Stage::Reply),
         ];
         for (e, want, stage) in cases {
             let text = e.to_string();
@@ -188,6 +196,9 @@ mod tests {
             assert_eq!(kind_stage(&got), (Some(want), stage), "{text}");
             assert!(got.to_string().contains(&text), "{got} / {text}");
         }
+        // Our own malformed request is not a transport failure and nothing was sent.
+        let bad = map_error(ureq::Error::BadUri("x".into()));
+        assert!(matches!(bad, Error::Invalid(_)) && bad.stage() == Stage::Prepare, "{bad:?}");
         // A ureq timeout that arrives wrapped in an io::Error while the body is read keeps its kind.
         let wrapped = IoError::other(ureq::Error::Timeout(UT::RecvBody));
         assert_eq!(kind_stage(&map_body_error(wrapped)), (Some(T::Timeout), Stage::Reply));

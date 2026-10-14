@@ -31,14 +31,26 @@ pub enum TransportKind {
     /// The device closed or reset the connection without a reply. What an embedded server does
     /// with a request it cannot handle right now.
     ConnectionClosed,
-    /// Anything else (a malformed HTTP exchange, an I/O error that fits no other kind).
-    Other,
+    /// The peer did not speak HTTP: a bad status line, bad headers or framing, an oversized header
+    /// block. Not retryable: asking again gets the same nonsense.
+    InvalidResponse,
+    /// An OS-level I/O error that matched no other kind (a broken pipe or reset that is not
+    /// recognised as a close, a permission error). Retryable as transient.
+    Io,
 }
 
 impl TransportKind {
     /// Every kind, for tables and exhaustive tests.
-    pub const ALL: [Self; 7] =
-        [Self::Refused, Self::Unreachable, Self::ConnectTimeout, Self::Timeout, Self::Redirect, Self::ConnectionClosed, Self::Other];
+    pub const ALL: [Self; 8] = [
+        Self::Refused,
+        Self::Unreachable,
+        Self::ConnectTimeout,
+        Self::Timeout,
+        Self::Redirect,
+        Self::ConnectionClosed,
+        Self::InvalidResponse,
+        Self::Io,
+    ];
 
     /// A stable lowercase name.
     pub const fn name(self) -> &'static str {
@@ -49,7 +61,8 @@ impl TransportKind {
             Self::Timeout => "timeout",
             Self::Redirect => "redirect",
             Self::ConnectionClosed => "connection_closed",
-            Self::Other => "other",
+            Self::InvalidResponse => "invalid_response",
+            Self::Io => "io",
         }
     }
 
@@ -64,9 +77,9 @@ impl TransportKind {
     }
 
     /// Would the same request plausibly work if tried again later? Connection and timeout problems
-    /// yes; a refused redirect or an unclassified failure no.
+    /// and other I/O errors yes; a refused redirect or a peer that does not speak HTTP no.
     pub const fn is_retryable(self) -> bool {
-        !matches!(self, Self::Redirect | Self::Other)
+        !matches!(self, Self::Redirect | Self::InvalidResponse)
     }
 }
 
@@ -360,7 +373,7 @@ mod tests {
             assert_eq!(Error::http(s).is_retryable(), r, "{s}");
         }
         for k in TransportKind::ALL {
-            assert_eq!(Error::transport(k, "t").is_retryable(), !matches!(k, TransportKind::Redirect | TransportKind::Other), "{k}");
+            assert_eq!(Error::transport(k, "t").is_retryable(), !matches!(k, TransportKind::Redirect | TransportKind::InvalidResponse), "{k}");
         }
         assert!(!Error::Protocol(String::new()).is_retryable());
         assert!(!Error::Cancelled.is_retryable() && !Error::Timeout.is_retryable());
@@ -411,6 +424,8 @@ mod tests {
             (t(TransportKind::Timeout, Stage::Reply), Stage::Reply, OutcomeUnknown, Idempotent),
             (Error::transport(TransportKind::ConnectionClosed, ""), Stage::Reply, OutcomeUnknown, Idempotent),
             (Error::transport(TransportKind::Redirect, ""), Stage::Reply, OutcomeUnknown, Idempotent),
+            (Error::transport(TransportKind::InvalidResponse, ""), Stage::Reply, OutcomeUnknown, Idempotent),
+            (Error::transport(TransportKind::Io, ""), Stage::Reply, OutcomeUnknown, Idempotent),
             (Error::http(503), Stage::Reply, Safe, Safe),
             (Error::http(429), Stage::Reply, Safe, Safe),
             (Error::http(500), Stage::Reply, OutcomeUnknown, Idempotent),
@@ -441,7 +456,7 @@ mod tests {
     fn names_are_stable() {
         assert_eq!(
             TransportKind::ALL.map(TransportKind::name),
-            ["refused", "unreachable", "connect_timeout", "timeout", "redirect", "connection_closed", "other"]
+            ["refused", "unreachable", "connect_timeout", "timeout", "redirect", "connection_closed", "invalid_response", "io"]
         );
         assert_eq!([Stage::Prepare, Stage::Connect, Stage::Request, Stage::Reply].map(Stage::name), ["prepare", "connect", "request", "reply"]);
         assert_eq!(Stage::Reply.to_string(), "reply");

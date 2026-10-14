@@ -598,7 +598,7 @@ fn hostile_replies_are_typed_errors_and_never_a_panic() {
             ErrorKind::Failed,
         ),
         ("garbage multipart", Box::new(|_| raw_response(200, "multipart/related; boundary=b", b"<html>")), ErrorKind::Failed),
-        ("not http at all", Box::new(|_| b"not http at all".to_vec()), ErrorKind::Unavailable),
+        ("not http at all", Box::new(|_| b"not http at all".to_vec()), ErrorKind::Failed),
         ("connection closed with no reply", Box::new(|_| Vec::new()), ErrorKind::Unavailable),
     ];
     for (what, respond, kind) in cases {

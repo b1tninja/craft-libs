@@ -198,13 +198,11 @@ impl WsdError {
                 use TransportKind as T;
                 let kind_of = match kind {
                     T::ConnectTimeout | T::Timeout => K::Timeout,
-                    // Not transient: a refused redirect.
-                    T::Redirect => K::Failed,
-                    // Refused, unreachable, closed without a reply, and a malformed exchange or an
-                    // I/O error that fits no other kind (an embedded server's usual way of being
-                    // busy), and any kind added later. `craft-wsd` calls `Other` not retryable;
-                    // this layer keeps retrying it, the request being safe or idempotent to repeat
-                    // per the safety below.
+                    // Not transient, like the HTTP errors that are not retryable: a refused redirect
+                    // and a malformed exchange or an I/O error that fits no other kind. `craft-wsd`
+                    // calls both not retryable and so does this layer.
+                    T::Redirect | T::Other => K::Failed,
+                    // Refused, unreachable, closed without a reply, and any kind added later.
                     _ => K::Unavailable,
                 };
                 let phase = match stage {
@@ -470,7 +468,7 @@ mod tests {
             (transport(TransportKind::ConnectTimeout, Stage::Connect), ErrorKind::Timeout),
             (transport(TransportKind::Timeout, Stage::Reply), ErrorKind::Timeout),
             (transport(TransportKind::Redirect, Stage::Reply), ErrorKind::Failed),
-            (transport(TransportKind::Other, Stage::Reply), ErrorKind::Unavailable),
+            (transport(TransportKind::Other, Stage::Reply), ErrorKind::Failed),
             (http(503), ErrorKind::Unavailable),
             (http(429), ErrorKind::Busy),
             (http(404), ErrorKind::Failed),
@@ -553,10 +551,10 @@ mod tests {
             (transport(T::Redirect, G::Reply), Op::Query, K::Failed, P::Reply, S::Idempotent, None),
             (transport(T::Redirect, G::Reply), Op::Status, K::Failed, P::Poll, S::Idempotent, None),
             // A malformed exchange or an unclassified I/O error: transient here, read carefully.
-            (transport(T::Other, G::Reply), Op::Create, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
-            (transport(T::Other, G::Reply), Op::Query, K::Unavailable, P::Reply, S::Idempotent, None),
+            (transport(T::Other, G::Reply), Op::Create, K::Failed, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::Other, G::Reply), Op::Query, K::Failed, P::Reply, S::Idempotent, None),
             // An error from before the wire (a transport that refuses to start) is a preparation failure.
-            (transport(T::Other, G::Prepare), Op::Send, K::Unavailable, P::Prepare, S::Safe, None),
+            (transport(T::Other, G::Prepare), Op::Send, K::Failed, P::Prepare, S::Safe, None),
             // HTTP.
             (http(408), Op::Send, K::Timeout, P::Request, S::Safe, None),
             (http(425), Op::Create, K::Busy, P::Request, S::Safe, Some(2)),
@@ -642,7 +640,7 @@ mod tests {
 
     /// Every typed transport kind x every operation, at the stage the kind usually happens in: the
     /// neutral kind, the phase and the safety follow from the typed values alone, and the
-    /// retryability agrees with `craft-wsd` (except `Other`, see `classify`).
+    /// retryability agrees with `craft-wsd`.
     #[test]
     fn every_transport_kind_for_every_operation() {
         use ErrorKind as K;
@@ -656,11 +654,10 @@ mod tests {
                 TransportKind::Timeout => (K::Timeout, P::Reply, true),
                 TransportKind::ConnectionClosed => (K::Unavailable, P::Reply, true),
                 TransportKind::Redirect => (K::Failed, P::Reply, false),
-                TransportKind::Other => (K::Unavailable, P::Reply, true),
+                TransportKind::Other => (K::Failed, P::Reply, false),
                 _ => panic!("a new transport kind needs a row here"),
             };
-            // craft-wsd calls `Other` not retryable; this layer keeps it transient (see `classify`).
-            assert!(kind == TransportKind::Other || kind.is_retryable() == retryable, "{kind}: agrees with craft-wsd");
+            assert_eq!(kind.is_retryable(), retryable, "{kind}: agrees with craft-wsd");
             let sent = stage.may_have_reached_device();
             for op in Op::ALL {
                 let e = transport(kind, stage);

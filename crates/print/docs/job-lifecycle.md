@@ -169,7 +169,7 @@ is pinned by `the_retry_table_for_every_kind` in `src/wsd/error.rs`.
 | Transport `connection_closed` (stage reply; request, if it was being written) | `Unavailable` | yes | Reply (Request) | OutcomeUnknown | Idempotent | none |
 | Transport `timeout` (stage reply) | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
 | The caller's deadline passed | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
-| Transport `other` (a malformed exchange, an I/O error that fits no kind) | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | none |
+| Transport `other` (a malformed exchange, an I/O error that fits no kind) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
 | Transport `redirect` (refused) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
 | HTTP 408 | `Timeout` | yes | Request | Safe | Safe | none |
 | HTTP 425 | `Busy` | yes | Request | Safe | Safe | 2 s, or the printer's |

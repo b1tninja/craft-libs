@@ -267,8 +267,8 @@ pub mod device {
         }
 
         fn handle(&self, path: &str, request: &Request) -> Result<Response> {
-            let text =
-                std::str::from_utf8(&request.body).map_err(|_| Error::transport(TransportKind::Other, "the fake device got a non-text body"))?;
+            let text = std::str::from_utf8(&request.body)
+                .map_err(|_| Error::transport(TransportKind::InvalidResponse, "the fake device got a non-text body"))?;
             let doc = xml::parse(text)?;
             let env = doc.root_element();
             let header = xml::child(env, ns::SOAP, "Header").ok_or_else(|| Error::Protocol("no Header".into()))?;

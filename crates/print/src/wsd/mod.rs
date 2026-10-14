@@ -22,7 +22,8 @@
 //! * [`WsdBackend`]: the registry-facing backend (`backend.rs`).
 //! * [`client::Client`]: one method per WS-Print operation over any transport; [`job`] is the flow
 //!   that negotiates a format, plans the [`ticket::PrintTicket`], creates the job, sends the
-//!   document (MTOM or inline base64) and watches it to an end state. [`encoder`] and [`pwg`] make
+//!   document (MTOM or inline base64): [`job::submit_document`] returns when the printer has accepted
+//!   it, [`print_document`] adds a blocking watch for callers that want one. [`encoder`] and [`pwg`] make
 //!   the document bytes (pass-through, a chain of alternatives, or PWG raster from a renderer).
 //! * `adapter.rs`: the only file that names `craft-wsd`.
 //!
@@ -32,7 +33,15 @@
 //! `DocumentProcessing`. [`ticket::TicketShape`] lists smaller tickets for them; the default is the
 //! full ticket, and a smaller one is opt-in: [`WsdBackend::with_ticket_shape`]. Settings that a
 //! smaller ticket cannot carry (copies, sides, ...) are refused before anything is sent, or dropped
-//! with a warning in the receipt when [`WsdBackend::with_drop_ticket_settings`] is set.
+//! with a warning in the result when [`WsdBackend::with_drop_ticket_settings`] is set.
+//!
+//! # Submit, watch, retry
+//!
+//! [`WsdBackend`]'s `submit` returns a [`crate::Submitted`] as soon as the printer has accepted the
+//! document. Following the job is a separate, polled step (`job_status` is one `GetJobElements`),
+//! and failures are classified by [`WsdError::classify`]: transient or not, safe to repeat or not
+//! ([`Op`] says whether the failed request was a query or a send), and where it failed. After an
+//! outcome-unknown failure, [`WsdBackend::reconcile`] looks for the job before anything is resent.
 
 pub mod adapter;
 pub mod client;
@@ -53,12 +62,14 @@ mod backend;
 #[cfg(test)]
 mod testutil;
 
-pub use backend::WsdBackend;
+pub use backend::{JobMatch, Reconciled, WsdBackend};
 pub use client::Client;
 pub use encoder::{ColorMode, DocumentEncoder, PassThrough, RasterEncoder};
-pub use error::{KINDS, Result, WsdError};
+pub use error::{Class, KINDS, Op, Result, WsdError};
 pub use fault::{Fault, FaultCode};
-pub use job::{JobOutcome, JobResult, PollPolicy, PrintOptions, print_document, print_document_with_progress, printer_info};
+pub use job::{
+    Accepted, JobOutcome, JobResult, PollPolicy, PrintOptions, print_document, print_document_with_progress, printer_info, submit_document,
+};
 pub use model::{Capabilities, JobState, PrinterElements};
 pub use mtom::Transfer;
 pub use policy::{NetworkLimits, PrinterUrl};

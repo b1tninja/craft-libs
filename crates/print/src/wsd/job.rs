@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use super::client::Client;
 use super::encoder::{ColorMode, DocumentEncoder, EncodeContext};
-use super::error::{Result, WsdError};
+use super::error::{Op, Result, WsdError};
 use super::fault::FaultCode;
 use super::model::*;
 use super::mtom::Transfer;
 use super::ticket::{Compression, DocumentDescription, Orientation, PrintTicket, Quality, Sides, TicketShape};
-use crate::{CancelToken, UserConfirmed};
+use crate::{CancelToken, RetrySafety, UserConfirmed};
 
 use super::adapter::Transport;
 
@@ -282,9 +282,26 @@ pub fn printer_info<T: Transport>(client: &Client<T>) -> Result<PrinterElements>
     client.get_printer_elements(&[Section::Description, Section::Status, Section::Capabilities])
 }
 
-/// The number of phases [`print_document_with_progress`] reports: capabilities read, job created,
-/// document sent, job ended.
+/// The number of phases [`submit_document`] reports: capabilities read, job created, document
+/// accepted.
+pub const SUBMIT_PHASES: usize = 3;
+
+/// The number of phases [`print_document_with_progress`] reports: the three of [`submit_document`]
+/// and the job ended.
 pub const PHASES: usize = 4;
+
+/// What a printer accepted: the result of [`submit_document`], before anything is known about the
+/// printing itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Accepted {
+    pub job_id: u32,
+    /// The format the document was sent in, as the printer spells it.
+    pub format: String,
+    pub bytes_sent: usize,
+    pub printer_name: String,
+    /// Settings that were dropped or changed because the printer does not list them.
+    pub warnings: Vec<String>,
+}
 
 /// Print one document. See the module docs; `confirmed` is the person's yes.
 pub fn print_document<T: Transport>(
@@ -298,8 +315,9 @@ pub fn print_document<T: Transport>(
 }
 
 /// [`print_document`] that also calls `progress(done, PHASES)` after each phase: the printer's
-/// capabilities were read (1), the job exists (2), the document is sent (3), the job reached an end
-/// state or the wait ended (4). These are protocol phases, not sheets.
+/// capabilities were read (1), the job exists (2), the document is accepted (3), the job reached an
+/// end state or the wait ended (4). These are protocol phases, not sheets. It is
+/// [`submit_document`] followed by a blocking watch; the backend uses the first half only.
 ///
 /// `cancel` is polled before every phase and while the job is watched. Before the document is
 /// sent, a set token is [`WsdError::Cancelled`] (a job that was already created is cancelled on the
@@ -309,14 +327,52 @@ pub fn print_document_with_progress<T: Transport>(
     client: &Client<T>,
     encoder: &dyn DocumentEncoder,
     options: &PrintOptions,
-    _confirmed: UserConfirmed,
+    confirmed: UserConfirmed,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Result<JobResult> {
+    let mut op = Op::Query;
+    let accepted = submit_document(client, encoder, options, confirmed, cancel, &mut |done, _| progress(done, PHASES), &mut op)?;
+    let watched = watch(client, accepted.job_id, options.poll, cancel)?;
+    progress(PHASES, PHASES);
+    Ok(JobResult {
+        job_id: accepted.job_id,
+        outcome: watched.outcome,
+        state: watched.status.as_ref().map(|s| s.state.clone()),
+        reasons: watched.status.as_ref().map(|s| s.reasons.clone()).unwrap_or_default(),
+        format: accepted.format,
+        bytes_sent: accepted.bytes_sent,
+        sheets_completed: watched.status.as_ref().map_or(0, |s| s.sheets_completed),
+        printer_name: accepted.printer_name,
+        warnings: accepted.warnings,
+    })
+}
+
+/// Create the job and send the document, and return as soon as the printer has **accepted** it. No
+/// waiting for the job: following it is a separate step ([`Client::job_status`], [`watch_job`]).
+/// Calls `progress(done, SUBMIT_PHASES)` after each phase. `op` is set to the operation in flight,
+/// so that on an error the caller can classify it ([`WsdError::classify`]): a failed create or send
+/// whose outcome is unknown must not be repeated blindly.
+///
+/// `cancel` is polled before every phase. A job that exists when the token is set, or whose document
+/// the printer **refused**, is cancelled on the printer (it would sit there until the document
+/// timeout). When the failure leaves the outcome unknown (the connection closed or timed out after
+/// the document was written) the job is left alone: cancelling could abort a job that is printing,
+/// and a reconcile can find it.
+pub fn submit_document<T: Transport>(
+    client: &Client<T>,
+    encoder: &dyn DocumentEncoder,
+    options: &PrintOptions,
+    _confirmed: UserConfirmed,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(usize, usize),
+    op: &mut Op,
+) -> Result<Accepted> {
     let cancelled = || if cancel.is_cancelled() { Err(WsdError::Cancelled) } else { Ok(()) };
+    *op = Op::Query;
     cancelled()?;
     let info = printer_info(client)?;
-    progress(1, PHASES);
+    progress(1, SUBMIT_PHASES);
     let caps = info.capabilities.clone().ok_or_else(|| WsdError::Protocol("the printer did not return its capabilities".into()))?;
     let description = info.description.clone().unwrap_or_default();
     let format = negotiate_format(&encoder.formats(), &caps)?;
@@ -327,8 +383,9 @@ pub fn print_document_with_progress<T: Transport>(
     let ctx = EncodeContext { color: plan.color, dpi: plan.dpi, sides: plan.ticket.sides, media_size: plan.ticket.media_size.clone() };
     let data = encoder.encode(&format, &ctx)?;
     cancelled()?;
+    *op = Op::Create;
     let job_id = client.create_print_job(&plan.ticket)?;
-    progress(2, PHASES);
+    progress(2, SUBMIT_PHASES);
     if cancel.is_cancelled() {
         // The job exists until the document timeout: do not leave it behind.
         let _ = cancel_job_tolerant(client, job_id);
@@ -341,25 +398,17 @@ pub fn print_document_with_progress<T: Transport>(
         name: options.document_name.clone(),
         must_honor_format: false,
     };
+    *op = Op::Send;
     if let Err(e) = client.send_document(job_id, &desc, &plan.ticket, true, &data, options.transfer) {
-        // The job exists until the document timeout: tidy up, keep the real error.
-        let _ = client.cancel_job(job_id);
+        // The job exists until the document timeout. Tidy up when the printer refused the document,
+        // not when it may have received it. The real error is kept either way.
+        if e.classify(Op::Send).safety != RetrySafety::OutcomeUnknown {
+            let _ = client.cancel_job(job_id);
+        }
         return Err(e);
     }
-    progress(3, PHASES);
-    let watched = watch(client, job_id, options.poll, cancel)?;
-    progress(4, PHASES);
-    Ok(JobResult {
-        job_id,
-        outcome: watched.outcome,
-        state: watched.status.as_ref().map(|s| s.state.clone()),
-        reasons: watched.status.as_ref().map(|s| s.reasons.clone()).unwrap_or_default(),
-        format,
-        bytes_sent: data.len(),
-        sheets_completed: watched.status.as_ref().map_or(0, |s| s.sheets_completed),
-        printer_name: description.name,
-        warnings: plan.warnings,
-    })
+    progress(3, SUBMIT_PHASES);
+    Ok(Accepted { job_id, format, bytes_sent: data.len(), printer_name: description.name, warnings: plan.warnings })
 }
 
 struct Watched {
@@ -416,10 +465,16 @@ fn watch<T: Transport>(client: &Client<T>, job_id: u32, poll: PollPolicy, cancel
                 let outcome = if cancel_sent { JobOutcome::Canceled { at_device: false } } else { JobOutcome::Forgotten };
                 return Ok(Watched { outcome, status: last });
             }
-            Err(e @ (WsdError::Transport(_) | WsdError::ConnectionClosed | WsdError::Http(_))) => {
+            // A transient failure (the condition, not the operation: a status read can always be
+            // repeated) is tried a few more times, waiting at least as long as the printer asks.
+            Err(e) if e.is_retryable() => {
                 failures += 1;
                 if failures > 3 {
                     return Err(e);
+                }
+                if let Some(wait) = e.classify(Op::Status).retry_after {
+                    let waited = started.elapsed();
+                    std::thread::sleep(wait.min(poll.max_wait.saturating_sub(waited)));
                 }
             }
             Err(e) => return Err(e),

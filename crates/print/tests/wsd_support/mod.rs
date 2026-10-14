@@ -78,6 +78,9 @@ impl Default for Config {
 
 #[derive(Clone, Debug)]
 pub struct Job {
+    /// `JobName` and `JobOriginatingUserName` of the ticket.
+    pub name: String,
+    pub user: String,
     pub state: &'static str,
     pub reason: &'static str,
     pub ticket: String,
@@ -124,6 +127,10 @@ pub fn fault(relates: &str, role: &str, sub: &str, reason: &str) -> String {
 
 fn local<'a>(n: roxmltree::Node<'a, '_>) -> &'a str {
     n.tag_name().name()
+}
+
+fn child_text_deep(n: roxmltree::Node<'_, '_>, name: &str) -> String {
+    n.descendants().find(|c| c.is_element() && local(*c) == name).map(|c| c.text().unwrap_or("").trim().to_owned()).unwrap_or_default()
 }
 
 fn child_text(n: roxmltree::Node<'_, '_>, name: &str) -> Option<String> {
@@ -281,11 +288,14 @@ impl FakePrinter {
                 {
                     return flt("Sender", "wprt:InvalidArgs", "copies");
                 }
+                let text_of = |name: &str| child_text_deep(ticket, name);
                 let id = st.next_id;
                 st.next_id += 1;
                 st.jobs.insert(
                     id,
                     Job {
+                        name: text_of("JobName"),
+                        user: text_of("JobOriginatingUserName"),
                         state: "Pending",
                         reason: "JobIncoming",
                         ticket: ticket_text.to_owned(),
@@ -384,7 +394,7 @@ impl FakePrinter {
                     .jobs
                     .iter()
                     .filter(|(_, j)| active != matches!(j.state, "Completed" | "Canceled" | "Aborted"))
-                    .map(|(id, j)| format!("<wprt:JobSummary><wprt:JobId>{id}</wprt:JobId><wprt:JobState>{}</wprt:JobState><wprt:JobName>job {id}</wprt:JobName><wprt:JobOriginatingUserName>u</wprt:JobOriginatingUserName><wprt:KOctetsProcessed>0</wprt:KOctetsProcessed><wprt:MediaSheetsCompleted>0</wprt:MediaSheetsCompleted><wprt:NumberOfDocuments>1</wprt:NumberOfDocuments></wprt:JobSummary>", j.state))
+                    .map(|(id, j)| format!("<wprt:JobSummary><wprt:JobId>{id}</wprt:JobId><wprt:JobState>{}</wprt:JobState><wprt:JobName>{}</wprt:JobName><wprt:JobOriginatingUserName>{}</wprt:JobOriginatingUserName><wprt:KOctetsProcessed>0</wprt:KOctetsProcessed><wprt:MediaSheetsCompleted>0</wprt:MediaSheetsCompleted><wprt:NumberOfDocuments>1</wprt:NumberOfDocuments></wprt:JobSummary>", j.state, j.name, j.user))
                     .collect();
                 let wrap = if active { "ActiveJobs" } else { "JobHistory" };
                 ok(&op, &format!("<wprt:{wrap}>{rows}</wprt:{wrap}>"))

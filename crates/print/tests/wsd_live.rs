@@ -8,14 +8,14 @@
 use std::time::Duration;
 
 use craft_print::backends::Backend;
-use craft_print::wsd::{PollPolicy, PrinterUrl, WsdBackend};
-use craft_print::{Document, ErrorKind, Job, Registry, SubmitRequest, UserConfirmed, namespaced_id};
+use craft_print::wsd::{PrinterUrl, WsdBackend};
+use craft_print::{Document, ErrorKind, Job, Registry, SubmitRequest, UserConfirmed, WaitPolicy, namespaced_id, wait_for_job};
 
 fn live() -> Option<(String, Registry)> {
     let url = std::env::var("FAKEPRINT_URL").ok().filter(|u| !u.is_empty())?;
     let parsed = PrinterUrl::parse(&url).expect("FAKEPRINT_URL must be a numeric loopback or private http URL");
     assert!(parsed.host().is_loopback(), "the live test only talks to loopback");
-    let backend = WsdBackend::new().with_poll(PollPolicy { interval: Duration::from_millis(200), max_wait: Duration::from_secs(30) });
+    let backend = WsdBackend::new().with_poll_interval(Duration::from_millis(200));
     let native = backend.add(&url).expect("the URL is allowed");
     let registry = Registry::new();
     registry.register(Box::new(backend)).expect("register");
@@ -39,8 +39,14 @@ fn a_document_prints_to_an_end_state() {
     let bytes: &[u8] = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
     let job = Job { printer: Some(id), title: "craft-print live test".into(), ..Job::default() };
     let request = SubmitRequest::new(Document::new(format, bytes), job).with_consent(UserConfirmed::interactive());
-    match registry.submit(request) {
-        Ok(receipt) => assert_eq!(receipt.backend, "wsd"),
+    match registry.submit_job(request) {
+        Ok(submitted) => {
+            assert_eq!(submitted.backend, "wsd");
+            // Accepted is not printed: follow it for a bounded time.
+            let job = submitted.job.expect("a job handle");
+            let outcome = wait_for_job(&registry, &job, WaitPolicy::default().with_max_wait(Duration::from_secs(30))).expect("routable");
+            assert!(!matches!(outcome, craft_print::WatchOutcome::Failed(_)), "{outcome:?}");
+        }
         // The fake may judge a stub document of another format harshly; a typed refusal is fine.
         Err(e) => assert!(matches!(e.kind(), ErrorKind::UnsupportedFormat | ErrorKind::Rejected | ErrorKind::Failed), "{e}"),
     }

@@ -2,19 +2,20 @@
 
 use std::fmt;
 use std::sync::{Arc, PoisonError, RwLock};
+use std::time::Duration;
 
 use super::adapter::{SharedTransport, Transport, default_transport};
 use super::client::Client;
 use super::encoder::{ColorMode, PassThrough};
-use super::job::{self, JobOutcome, JobResult, PollPolicy, PrintOptions};
-use super::model::{JobReason, PrinterElements};
+use super::error::{Op, WsdError};
+use super::fault::FaultCode;
+use super::job::{self, PrintOptions};
+use super::model::{self, JobReason, PrinterElements};
 use super::mtom::Transfer;
 use super::policy::{NetworkLimits, PrinterUrl};
 use super::ticket::{Sides, TicketShape};
-use crate::backends::{
-    Backend, BackendClass, DocumentFormat, JobHint, PrinterDetails, PrinterRef, PrinterState, PrinterStatus, Receipt, SubmitRequest,
-};
-use crate::{Duplex, ErrorKind, Job, PrintError, Scaling};
+use crate::backends::{Backend, BackendClass, DocumentFormat, JobHint, PrinterDetails, PrinterRef, PrinterState, PrinterStatus, SubmitRequest};
+use crate::{Duplex, ErrorKind, Job, JobRef, JobStatus, PrintError, Scaling, Submitted, WatchSupport};
 
 /// The registry name and id prefix.
 const NAME: &str = "wsd";
@@ -40,7 +41,7 @@ struct Config {
     drop_ticket_settings: bool,
     strict: bool,
     transfer: Transfer,
-    poll: PollPolicy,
+    poll_interval: Duration,
     user_name: String,
     limits: NetworkLimits,
 }
@@ -52,7 +53,7 @@ impl Default for Config {
             drop_ticket_settings: false,
             strict: false,
             transfer: Transfer::Mtom,
-            poll: PollPolicy::default(),
+            poll_interval: Duration::from_secs(2),
             user_name: "craft".into(),
             limits: NetworkLimits::default(),
         }
@@ -195,12 +196,12 @@ impl WsdBackend {
         self.configured(|c| c.transfer = transfer)
     }
 
-    /// How long and how often a job is watched. A submit blocks for at most `max_wait` after the
-    /// document is sent (the default is five minutes); a job still running then is reported as
-    /// accepted and left running on the printer.
+    /// The poll interval this backend recommends for [`Backend::job_status`] (default two seconds).
+    /// It is advice for [`crate::JobWatch`] and UIs: the backend itself never polls, and `submit`
+    /// does not wait for the job.
     #[must_use]
-    pub fn with_poll(self, poll: PollPolicy) -> Self {
-        self.configured(|c| c.poll = poll)
+    pub fn with_poll_interval(self, interval: Duration) -> Self {
+        self.configured(|c| c.poll_interval = interval)
     }
 
     /// The `JobOriginatingUserName` sent with jobs. Defaults to a fixed `craft`, never the account name.
@@ -256,7 +257,6 @@ impl WsdBackend {
             ticket_shape: config.ticket_shape,
             drop_ticket_settings: config.drop_ticket_settings,
             transfer: config.transfer,
-            poll: config.poll,
             ..PrintOptions::default()
         };
         (options, notes)
@@ -332,15 +332,23 @@ impl Backend for WsdBackend {
     /// One `GetPrinterElements` (description, status, capabilities) to the printer.
     fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
         let entry = self.entry(native_id)?;
-        let elements = job::printer_info(&self.client(&entry)).map_err(PrintError::from)?;
+        let elements = job::printer_info(&self.client(&entry)).map_err(|e| e.print_error(Op::Query))?;
         Ok(details_of(&entry, elements))
     }
 
-    /// Create the job, send the document, and watch it to an end state. Blocks for the whole job
-    /// (see [`WsdBackend::with_poll`]). `request.job.printer` must name an added printer; there is
-    /// no default. Progress is `(done, 4)` protocol phases (capabilities read, job created,
-    /// document sent, job ended), not sheets.
-    fn submit(&self, request: SubmitRequest<'_>) -> Result<Receipt, PrintError> {
+    /// Create the job and send the document; returns as soon as the printer has **accepted** it
+    /// (the reply to `SendDocument`), never waiting for the job to print. The call makes four bounded
+    /// requests at most (capabilities, create, send, and a cleanup cancel when the send is refused),
+    /// each limited by the configured request timeout. `request.job.printer` must name an added
+    /// printer; there is no default. Progress is `(done, 3)` protocol phases (capabilities read, job
+    /// created, document accepted), not sheets.
+    ///
+    /// Follow the job with [`Backend::job_status`] (through the registry, or a
+    /// [`crate::JobWatch`]). Failures say whether sending again is safe: a refusal is
+    /// [`crate::RetrySafety::Safe`]; a connection that closed or timed out **after** the request was
+    /// written is [`crate::RetrySafety::OutcomeUnknown`] (the job may exist) and the backend then
+    /// leaves any created job alone; call [`WsdBackend::reconcile`] before submitting again.
+    fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         let SubmitRequest { document, job, consent, cancel, progress } = request;
         // The registry checks this too; a caller that holds the backend directly gets the same answer.
         let Some(consent) = consent else {
@@ -360,44 +368,175 @@ impl Backend for WsdBackend {
             Some(p) => p,
             None => &mut none,
         };
-        let result =
-            job::print_document_with_progress(&self.client(&entry), &encoder, &options, consent, &cancel, progress).map_err(PrintError::from)?;
-        receipt(&entry, result, notes)
-    }
-}
-
-/// The receipt of a job that was accepted, or the error of one that ended badly.
-fn receipt(entry: &Entry, result: JobResult, notes: Vec<String>) -> Result<Receipt, PrintError> {
-    let JobResult { job_id, outcome, reasons, printer_name, mut warnings, .. } = result;
-    warnings.extend(notes);
-    let who = format!("job {job_id} on {} ({printer_name})", entry.url.as_url());
-    let reason_text = || reasons.iter().filter(|r| **r != JobReason::None).map(JobReason::name).collect::<Vec<_>>().join(", ");
-    let ok = |what: &str| {
-        let mut message = format!("{who} {what}");
+        let mut op = Op::Query;
+        let accepted =
+            job::submit_document(&self.client(&entry), &encoder, &options, consent, &cancel, progress, &mut op).map_err(|e| e.print_error(op))?;
+        let mut warnings = accepted.warnings;
+        warnings.extend(notes);
+        let url = entry.url.as_url();
+        let mut message = format!("job {} on {url} ({}) was accepted", accepted.job_id, accepted.printer_name);
         if !warnings.is_empty() {
             message.push_str(&format!(" (warnings: {})", warnings.join("; ")));
         }
-        Ok(Receipt { backend: NAME, message, job_id: Some(job_id.to_string()) })
-    };
-    match outcome {
-        JobOutcome::Completed => ok("completed"),
-        JobOutcome::CompletedWithWarnings => ok("completed with warnings from the printer"),
-        JobOutcome::Forgotten => ok("is no longer listed by the printer, which most likely finished it"),
-        JobOutcome::StillRunning => ok("was accepted and is still running on the printer"),
-        JobOutcome::CompletedWithErrors => Err(PrintError::new(ErrorKind::Failed, format!("{who} completed with errors ({})", reason_text()))),
-        JobOutcome::Canceled { at_device } => {
-            let by = if at_device { "at the printer" } else { "by request" };
-            Err(PrintError::new(ErrorKind::Cancelled, format!("{who} was cancelled {by}")))
-        }
-        JobOutcome::Aborted { reason } => {
-            let kind = match reason {
-                Some(JobReason::DocumentFormatError | JobReason::UnsupportedDocumentFormat | JobReason::UnsupportedCompression) => {
-                    ErrorKind::UnsupportedFormat
+        Ok(Submitted::new(NAME, message).with_job(JobRef::new(job_native(&url, accepted.job_id))).with_warnings(warnings))
+    }
+
+    /// WS-Print has no event listener here: callers poll.
+    fn watch_support(&self) -> WatchSupport {
+        WatchSupport::Poll
+    }
+
+    fn recommended_poll_interval(&self) -> Option<Duration> {
+        Some(self.config.poll_interval)
+    }
+
+    /// One `GetJobElements`. A job the printer does not list is [`ErrorKind::NotFound`] and the
+    /// message says what that usually means: printers forget finished jobs, so a job that was
+    /// accepted and is now unknown most likely finished.
+    fn job_status(&self, job: &JobRef) -> Result<JobStatus, PrintError> {
+        let (entry, id) = self.job_target(job)?;
+        match self.client(&entry).job_status(id) {
+            Ok(status) => Ok(neutral_status(&status)),
+            Err(WsdError::Fault(f)) if f.code == FaultCode::ClientErrorJobIdNotFound => Err(forgotten(&entry, id, &WsdError::Fault(f))),
+            Err(e) => {
+                let mut error = e.print_error(Op::Status);
+                if error.kind() == ErrorKind::NotFound {
+                    // Only the printer's own "no such job" means forgotten; anything else is a failure.
+                    error = PrintError::new(ErrorKind::Failed, error.message().to_owned())
+                        .with_phase(crate::Phase::Poll)
+                        .with_safety(crate::RetrySafety::Idempotent);
                 }
-                Some(JobReason::PrinterStopped) => ErrorKind::Unavailable,
-                _ => ErrorKind::Rejected,
-            };
-            Err(PrintError::new(kind, format!("{who} was aborted by the printer ({})", reason_text())))
+                Err(error)
+            }
         }
+    }
+
+    /// `CancelJob`, treating "too late" as success (see [`job::cancel_job_tolerant`]).
+    fn cancel_job(&self, job: &JobRef) -> Result<(), PrintError> {
+        let (entry, id) = self.job_target(job)?;
+        job::cancel_job_tolerant(&self.client(&entry), id).map_err(|e| e.print_error(Op::Cancel))
+    }
+}
+
+/// The backend's job handle: `<printer url>#<job id>`. A printer URL never contains `#` (the policy
+/// refuses fragments), so the last `#` separates.
+fn job_native(url: &str, job_id: u32) -> String {
+    format!("{url}#{job_id}")
+}
+
+/// A job a printer no longer lists. Printers drop finished jobs quickly, so "unknown" after an
+/// accepted job means finished, cancelled or lost; the neutral kind is [`ErrorKind::NotFound`] and a
+/// [`crate::JobWatch`] reports it as forgotten.
+fn forgotten(entry: &Entry, job_id: u32, cause: &WsdError) -> PrintError {
+    let phase = cause.print_error(Op::Status).phase().unwrap_or(crate::Phase::Poll);
+    PrintError::new(
+        ErrorKind::NotFound,
+        format!(
+            "the printer at {} does not list job {job_id}: printers forget finished jobs, so it most likely finished (or was cancelled)",
+            entry.url.as_url()
+        ),
+    )
+    .with_phase(phase)
+    .with_safety(crate::RetrySafety::Safe)
+}
+
+/// The neutral status for a WS-Print job status.
+fn neutral_status(status: &model::JobStatus) -> JobStatus {
+    let has = |r: JobReason| status.reasons.contains(&r);
+    let state = match &status.state {
+        model::JobState::Pending => crate::JobState::Pending,
+        model::JobState::PendingHeld => crate::JobState::Held,
+        model::JobState::Processing | model::JobState::Started | model::JobState::Terminating => crate::JobState::Processing,
+        model::JobState::ProcessingStopped => crate::JobState::Stopped,
+        model::JobState::Completed if has(JobReason::JobCompletedWithErrors) => crate::JobState::CompletedWithErrors,
+        model::JobState::Completed if has(JobReason::JobCompletedWithWarnings) => crate::JobState::CompletedWithWarnings,
+        model::JobState::Completed => crate::JobState::Completed,
+        model::JobState::Canceled => crate::JobState::Cancelled,
+        model::JobState::Aborted => crate::JobState::Aborted,
+        model::JobState::Other(_) => crate::JobState::Unknown,
+    };
+    let mut out = JobStatus::new(state);
+    out.reasons = status.reasons.iter().filter(|r| **r != JobReason::None).map(|r| r.name().to_owned()).collect();
+    out.sheets_done = Some(u32::try_from(status.sheets_completed).unwrap_or(u32::MAX));
+    out
+}
+
+/// The result of [`WsdBackend::reconcile`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reconciled {
+    /// The printer lists no job with this name from this backend's user: as far as it can tell, the
+    /// document did not arrive, and submitting again will not duplicate it.
+    NotFound,
+    /// Exactly one job matches: the earlier attempt did create it.
+    Found(JobMatch),
+    /// Several match (the same title was printed before and the printer still lists it). Newest first
+    /// (highest job id); look at the states to choose.
+    Ambiguous(Vec<JobMatch>),
+}
+
+/// A job found by [`WsdBackend::reconcile`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobMatch {
+    /// The registry's id for the job (`wsd:<printer url>#<id>`), usable with `job_status` and
+    /// `cancel_job` of a [`crate::Registry`] that holds this backend.
+    pub job: JobRef,
+    pub name: String,
+    pub status: JobStatus,
+}
+
+impl WsdBackend {
+    /// The printer and job number of a job handle made by this backend. The printer must still be
+    /// added: a request only ever reaches what the app chose. A handle that is not one of ours, or
+    /// whose printer was removed, is [`ErrorKind::InvalidRequest`] (not `NotFound`: that means a
+    /// forgotten job).
+    fn job_target(&self, job: &JobRef) -> Result<(Entry, u32), PrintError> {
+        let bad = |why: &str| {
+            PrintError::new(ErrorKind::InvalidRequest, format!("{} is not a job of the wsd backend: {why}", job.id)).with_phase(crate::Phase::Prepare)
+        };
+        let (url, number) = job.native.rsplit_once('#').ok_or_else(|| bad("no job number"))?;
+        let number: u32 = number.parse().map_err(|_| bad("the job number is not a number"))?;
+        let entry = self.entry(url).map_err(|e| if e.kind() == ErrorKind::NotFound { bad("its printer is not added to this backend") } else { e })?;
+        Ok((entry, number))
+    }
+
+    /// After an error that says the outcome is unknown ([`PrintError::outcome_unknown`], for
+    /// example a connection that closed with no reply to `SendDocument`), find out whether the
+    /// printer made the job **before** sending again. It reads the printer's active jobs and its
+    /// history (`GetActiveJobs`, `GetJobHistory`: idempotent reads) and looks for jobs named
+    /// `job_title` (the title of the [`crate::Job`], cut to the 255 characters this backend sends)
+    /// from this backend's user name.
+    ///
+    /// WS-Print job summaries carry no creation time, so the window is whatever the printer still
+    /// lists; a title that was printed earlier may match too ([`Reconciled::Ambiguous`]). A job that
+    /// was created but never received its document shows as pending: cancel it with the registry's
+    /// `cancel_job`. Nothing is sent that changes a job.
+    pub fn reconcile(&self, printer: &str, job_title: &str) -> Result<Reconciled, PrintError> {
+        let entry = self.entry(printer)?;
+        let client = self.client(&entry);
+        let name: String = job_title.chars().take(255).collect();
+        let user = self.config.user_name.as_str();
+        let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
+        // History is best effort when the printer refuses it (a fault), not when the wire fails.
+        let history = match client.get_job_history() {
+            Ok(rows) => rows,
+            Err(WsdError::Fault(_)) => Vec::new(),
+            Err(e) => return Err(e.print_error(Op::Query)),
+        };
+        let url = entry.url.as_url();
+        let mut found: Vec<(u32, JobMatch)> = Vec::new();
+        for row in active.into_iter().chain(history) {
+            if row.job_name != name || row.user_name != user || found.iter().any(|(id, _)| *id == row.status.job_id) {
+                continue;
+            }
+            let job = JobRef::namespaced(NAME, &job_native(&url, row.status.job_id));
+            found.push((row.status.job_id, JobMatch { job, name: row.job_name.clone(), status: neutral_status(&row.status) }));
+        }
+        found.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
+        let mut matches: Vec<JobMatch> = found.into_iter().map(|(_, m)| m).collect();
+        Ok(match matches.len() {
+            0 => Reconciled::NotFound,
+            1 => matches.pop().map_or(Reconciled::NotFound, Reconciled::Found),
+            _ => Reconciled::Ambiguous(matches),
+        })
     }
 }

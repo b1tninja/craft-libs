@@ -332,7 +332,7 @@ fn job_lists_split_active_from_history() {
     assert_eq!(active.iter().map(|j| j.status.job_id).collect::<Vec<_>>(), [a]);
     let history = c.get_job_history().unwrap();
     assert_eq!(history.iter().map(|j| j.status.job_id).collect::<Vec<_>>(), [b]);
-    assert_eq!(active[0].job_name, format!("job {a}"));
+    assert_eq!(active[0].job_name, "j");
 }
 
 #[test]

@@ -169,7 +169,20 @@ mod tests {
 
     #[test]
     fn retryability_follows_the_status() {
-        for (status, retryable) in [(500, true), (502, true), (503, true), (504, true), (429, true), (400, false), (401, false), (404, false)] {
+        for (status, retryable) in [
+            (500, true),
+            (502, true),
+            (503, true),
+            (504, true),
+            (429, true),
+            (408, true),
+            (425, true),
+            (501, false),
+            (505, false),
+            (400, false),
+            (401, false),
+            (404, false),
+        ] {
             let e = err(&client(status, Some("text/html"), "<html>x</html>"));
             assert_eq!((e.kind(), e.is_retryable()), ("http", retryable), "{status}");
         }

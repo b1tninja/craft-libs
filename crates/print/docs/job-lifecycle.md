@@ -218,3 +218,8 @@ its own. `every_transport_kind_for_every_operation` pins every kind against ever
 (`Found`, `Ambiguous`, `NotFound`). WS-Print job summaries carry no creation time, so "created in the
 window" is whatever the printer still lists. After a failed send with an unknown outcome the backend
 deliberately does **not** cancel the job it created: cancelling could abort a job that is printing.
+
+**One level up.** Following a remote job, retrying safely and reconciling are combined into one
+object per user-visible print, `PrintJob`, with an idempotency tag that makes the reconcile exact where
+the backend can carry one; see [job-tracking.md](job-tracking.md). `Registry::find_job` is the
+backend-neutral form of `WsdBackend::reconcile`.

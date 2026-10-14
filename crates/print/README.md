@@ -111,6 +111,52 @@ match watch.tick(registry) {
   has the survey of how CUPS/IPP, WS-Print and the Windows spooler separate accepting from printing.
 * `Registry::submit` and `submit_to_backend` still return a `Receipt`; it now means "accepted".
 
+### Tracked print jobs (`PrintJob`)
+
+`submit_job` plus a `JobWatch` follows one remote job. A person pressed Print once and expects one
+sheet, however many connections, retries and printer-side restarts that takes, so `PrintJob` is the
+lifecycle record of **one user-visible print**, stable across retries. You advance it; it owns no thread,
+timer or runtime, waits on an injectable `Clock` and keeps everything in memory.
+
+```rust,no_run
+use craft_print::{BytesSource, DocumentFormat, Job, PrintJob, UserConfirmed};
+
+let registry = craft_print::registry();
+let job = Job { printer: Some("wsd:http://192.0.2.1:5357/p".into()), title: "Quarterly report".into(), ..Job::default() };
+let mut print = PrintJob::new(job, BytesSource::new(DocumentFormat::Pdf, pdf_bytes)).with_consent(UserConfirmed::interactive());
+// In a worker loop or a frame loop. Each advance makes at most ONE bounded request, and only when one is due:
+let step = print.advance(registry);          // step.next_in: when to come back; None: nothing happens on its own
+let view = print.snapshot();                 // cheap and immutable: for the UI, every frame
+// view.state, view.simple, view.progress, view.reasons, view.last_error, view.advice, view.attempts(), view.trail()
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+* **Lifecycle** (separate from the printer's `JobState`): `Preparing`, `Submitting`, `Accepted`,
+  `Watching(JobState)`, `RetryScheduled { attempt, next_at }`, `NeedsAttention` (the outcome of a send is
+  unknown) and `Terminal(Completed | CompletedWithWarnings | Failed | Cancelled | Aborted)`.
+* **Retry.** Safe, transient failures are retried automatically under a `RetryPolicy` (on by default, at
+  most 3 attempts, the device's `retry_after` honoured; `with_retry(None)` turns it off). An
+  `OutcomeUnknown` failure is **never** retried automatically: the print waits in `NeedsAttention`, and
+  `reconcile` asks the backend whether the earlier attempt created the job (`Found`, `Ambiguous`,
+  `NotFound`); then `accept(job)` adopts it or `retry()` sends again. A printer-side abort or cancel is a
+  manual `retry()` as well: a new attempt, a new remote `JobId`, the history kept.
+* **`retry_advice()`** is the one question a UI has: `RetryNow`, `RetryAfter(duration)`,
+  `CheckPrinterFirst` or `DoNotRetry`. `cancel()` works in every state.
+* **The idempotency tag.** Each `PrintJob` makes a short random tag (`abc123de`) once and puts it on every
+  attempt where the backend can carry it (`SubmitRequest::with_tag`, `Backend::tag_support()`: a
+  job-name suffix `"title [ref abc123de]"`, a document name, a native attribute, or nothing), so that
+  reconcile finds the job a lost reply created instead of guessing from the title. **On by default for
+  network backends, off for the local spooler**; `TagPolicy::{Auto, Always, Never}` overrides it per job.
+* **Document source.** The job keeps the document's length, format and a content hash, never the bytes:
+  a `DocumentSource` (`BytesSource`, `FnSource`) supplies them again for each attempt.
+* **Common base for other job sources.** `RemoteJob { id, title, user, created, state, reasons, ours, .. }`,
+  `JobFilter`, `Fingerprint`, `Reconciled` and `JobQueryCaps` are backend-neutral; a backend opts in with
+  `Backend::list_jobs`, `find_job` (defaults to the former), `tag_support` and `job_query_caps`, and the
+  registry routes `Registry::list_jobs` and `find_job` by printer id. Foreign jobs are listed too
+  (`ours == false`). The WS-Print backend implements them; the built-in CUPS and Windows-spooler adapters
+  answer `Unsupported` for `list_jobs` in this version. The mapping of CUPS, IPP, the Windows spooler and
+  WS-Print onto these types, and the reasoning, are in [docs/job-tracking.md](docs/job-tracking.md).
+
 ### Per-job options and totals
 
 * `SubmitRequest::with_options(JobOptions)` carries per-job **hints** beside the spooler's own `Job`:
@@ -172,6 +218,11 @@ craft-print = { version = "0.1", features = ["testing"] }
   handle of your choosing. Clones share state, so register one and keep one:
   `submissions()` (printer, format, bytes, the `Job`, the `JobOptions`, whether consent came),
   `status_calls()` and `cancels()` say what your app did.
+* `FakeBackend::cups_like(name)` (local, no status, no tag support, no job listing) and
+  `FakeBackend::ipp_like(name)` (network, pollable, a job listing with creation time, user and history,
+  the tag in a native attribute) are presets for the two shapes of backend a `PrintJob` meets;
+  `with_submit_script(vec![SubmitStep::LoseReply(error), ..])` makes a send whose reply is lost (the job
+  exists, the call fails), `seed_job` adds a foreign job and `remote_jobs()` shows the fake's queue.
 * `craft_print::wsd::testing` (needs `wsd` too) is an in-memory WS-Print printer:
   `FakePrinter::new(FakeConfig { .. })` (formats, sides, copies, colour, media, how jobs end
   with `Ending`, faults, HTTP errors), `MemTransport(printer)` for

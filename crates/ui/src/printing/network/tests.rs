@@ -109,6 +109,38 @@ fn only_listed_options_are_offered() {
 }
 
 #[test]
+fn photo_is_a_quality_with_a_token_and_a_label() {
+    assert_eq!(Quality::ALL.last().copied(), Some(Quality::Photo));
+    assert_eq!(Quality::Photo.token(), "Photo");
+    assert_eq!(Quality::from_token("photo"), Some(Quality::Photo));
+    assert_eq!(Quality::from_token(" High "), Some(Quality::High));
+    assert_eq!(Quality::from_token("Best"), None);
+    assert!(Quality::ALL.iter().all(|q| Quality::from_token(q.token()) == Some(*q)));
+    assert_eq!(labels().quality_label(Quality::Photo), "Foto");
+}
+
+#[test]
+fn photo_is_offered_and_requested_only_for_a_printer_that_lists_it() {
+    let mut photo_printer = printer();
+    photo_printer.caps.qualities = vec!["High".into(), "Photo".into(), "Vendor".into()];
+    let mut d = Draft { url: "192.0.2.5".into(), ..Default::default() };
+    let g = d.begin_query();
+    d.finish_query(g, &d.normalized_url(), Ok(photo_printer));
+    assert_eq!(d.offered_qualities(), [Quality::High, Quality::Photo], "in the dialog's order; a vendor value is not a choice");
+    d.quality = Some(Quality::Photo);
+    assert_eq!(d.request(None).quality, Some(Quality::Photo));
+
+    // Another printer that does not list it: the choice is dropped, not sent.
+    let mut plain = printer();
+    plain.caps.qualities = vec!["Normal".into(), "High".into()];
+    let g = d.begin_query();
+    d.finish_query(g, "http://192.0.2.5", Ok(plain));
+    assert_eq!((d.quality, d.request(None).quality), (None, None));
+    d.quality = Some(Quality::Photo);
+    assert_eq!(d.request(None).quality, None, "a stale choice is never sent");
+}
+
+#[test]
 fn a_request_is_limited_to_what_the_printer_lists() {
     let mut d = queried("192.0.2.5");
     d.copies = 3;

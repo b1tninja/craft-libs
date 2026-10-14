@@ -11,7 +11,8 @@
 //! * [`transport`]: the [`Transport`] seam; [`http`] (cargo feature `http`, not built for
 //!   `wasm32`) is a hardened blocking implementation on `ureq` with no proxy, no redirects, a
 //!   timeout and a body cap; it only connects to addresses that [`DeviceUrl`] admits.
-//! * [`error`]: the shared [`Error`].
+//! * [`error`]: the shared [`Error`], with typed transport failures ([`TransportKind`], [`Stage`]),
+//!   HTTP status, `Retry-After` and fault accessors; [`retry`]: [`RetrySafety`] and `Retry-After` parsing.
 //! * `testing` (feature `testing`): a loopback HTTP server for tests.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -29,6 +30,7 @@ pub mod metadata;
 pub mod mtom;
 pub mod ns;
 pub mod policy;
+pub mod retry;
 pub mod service;
 pub mod soap;
 pub mod transport;
@@ -39,10 +41,11 @@ pub mod testing;
 
 pub use addressing::{EndpointRef, ReferenceParameter};
 pub use cancel::CancelToken;
-pub use error::{Error, KINDS, Result};
+pub use error::{Error, KINDS, Result, Stage, TransportKind};
 pub use fault::{Fault, Role, SubCode};
 pub use metadata::DeviceMetadata;
 pub use policy::{DeviceUrl, NetworkLimits};
+pub use retry::{MAX_RETRY_AFTER, RetrySafety, parse_retry_after};
 pub use service::{ServiceDescriptor, ServiceKind};
 pub use soap::{Attachment, Call, SoapClient};
 pub use transport::{Request, Response, Transport};

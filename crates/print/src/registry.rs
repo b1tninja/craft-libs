@@ -6,15 +6,15 @@
 //! registered prefix is [`ErrorKind::UnknownBackend`], never a guess.
 //!
 //! A job is a printer-side object with an id of the same shape (`"<backend>:<native id>"`, see
-//! [`JobRef`]). [`Registry::submit_job`] returns once the printer has accepted the document;
+//! [`JobId`]). [`Registry::submit_job`] returns once the printer has accepted the document;
 //! [`Registry::job_status`] and [`Registry::cancel_job`] are single bounded requests routed by the
-//! job id's prefix; [`Registry::job_watch`] builds a caller-driven [`JobWatch`] for a job.
+//! job id's backend; [`Registry::job_watch`] builds a caller-driven [`JobWatch`] for a job.
 
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
-use crate::backend::{Backend, BackendClass, ErrorKind, PrintError, PrinterDetails, PrinterRef, Receipt, SubmitRequest};
-use crate::job::{JobRef, JobStatus, Submitted, WatchSupport};
+use crate::backend::{Backend, BackendClass, ErrorKind, PrintError, PrinterDetails, PrinterRef, Progress, Receipt, SubmitRequest};
+use crate::job::{ExpectedTotals, JobId, JobStatus, Submitted, WatchSupport};
 use crate::watch::{JobWatch, WaitPolicy};
 
 /// Why [`Registry::register`] refused a backend.
@@ -230,11 +230,27 @@ impl Registry {
             ));
         }
         request.job.printer = native;
-        let mut submitted = backend.submit(request)?;
-        submitted.backend = backend.name();
-        submitted.job = submitted.job.map(|job| JobRef::namespaced(backend.name(), &job.native));
+        let expected = ExpectedTotals::for_request(&request.job, &request.options);
+        let SubmitRequest { document, job, options, consent, cancel, progress } = request;
+        // A backend that reports sheets but no total gets the caller's page count as the total.
+        let has_callback = progress.is_some();
+        let mut caller = progress;
+        let mut with_total = |event: Progress| {
+            if let Some(report) = caller.as_deref_mut() {
+                report(event.or_expected(expected.sheets));
+            }
+        };
+        let forwarded = SubmitRequest { document, job, options, consent, cancel, progress: if has_callback { Some(&mut with_total) } else { None } };
+        let mut submitted = backend.submit(forwarded)?;
+        let name = backend.name();
+        submitted.backend = name;
+        submitted.job = submitted.job.map(|job| JobId::new(name, job.native()));
         submitted.watch = backend.watch_support();
         submitted.poll_interval = backend.recommended_poll_interval();
+        submitted.expected = expected;
+        if let Some(status) = submitted.status.as_mut() {
+            expected.apply(status);
+        }
         Ok(submitted)
     }
 
@@ -244,47 +260,52 @@ impl Registry {
         self.submit_job(request).map(|submitted| submitted.receipt())
     }
 
-    /// The backend and the job for a registry job id.
-    fn route_job(backends: &[Arc<dyn Backend>], id: &str) -> Result<(Arc<dyn Backend>, JobRef), PrintError> {
-        let (backend, native) = Self::route_noun(backends, id, "job")?;
-        Ok((Arc::clone(backend), JobRef { id: id.to_owned(), native: native.to_owned() }))
+    /// The backend that owns a job.
+    fn backend_of(backends: &[Arc<dyn Backend>], job: &JobId) -> Result<Arc<dyn Backend>, PrintError> {
+        if backends.is_empty() {
+            return Err(unsupported());
+        }
+        match backends.iter().find(|backend| backend.name() == job.backend()) {
+            Some(backend) => Ok(Arc::clone(backend)),
+            None => Err(PrintError::new(
+                ErrorKind::UnknownBackend,
+                format!("no print backend named {:?} for job {job} (registered: {})", job.backend(), Self::names_text(backends)),
+            )),
+        }
     }
 
     /// One reading of an accepted job's status: a single bounded request to the backend that owns
-    /// the job id. See [`crate::backends::Backend::job_status`].
-    pub fn job_status(&self, id: &str) -> Result<JobStatus, PrintError> {
+    /// the job. See [`crate::backends::Backend::job_status`]. A status carries no caller-supplied
+    /// totals: a [`JobWatch`] applies [`Submitted::expected`] to what it reads.
+    pub fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
         let backends = self.snapshot();
-        let (backend, job) = Self::route_job(&backends, id)?;
-        backend.job_status(&job)
+        Self::backend_of(&backends, job)?.job_status(job)
     }
 
     /// Ask the owning backend to cancel an accepted job. See
     /// [`crate::backends::Backend::cancel_job`].
-    pub fn cancel_job(&self, id: &str) -> Result<(), PrintError> {
+    pub fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {
         let backends = self.snapshot();
-        let (backend, job) = Self::route_job(&backends, id)?;
-        backend.cancel_job(&job)
+        Self::backend_of(&backends, job)?.cancel_job(job)
     }
 
     /// Whether (and how) the backend that owns this job id can report on it.
-    pub fn watch_support(&self, id: &str) -> Result<WatchSupport, PrintError> {
+    pub fn watch_support(&self, job: &JobId) -> Result<WatchSupport, PrintError> {
         let backends = self.snapshot();
-        let (backend, _) = Self::route_noun(&backends, id, "job")?;
-        Ok(backend.watch_support())
+        Ok(Self::backend_of(&backends, job)?.watch_support())
     }
 
     /// How often to ask [`Self::job_status`] for this job; `None` when the backend cannot report.
-    pub fn recommended_poll_interval(&self, id: &str) -> Result<Option<Duration>, PrintError> {
+    pub fn recommended_poll_interval(&self, job: &JobId) -> Result<Option<Duration>, PrintError> {
         let backends = self.snapshot();
-        let (backend, _) = Self::route_noun(&backends, id, "job")?;
-        Ok(backend.recommended_poll_interval())
+        Ok(Self::backend_of(&backends, job)?.recommended_poll_interval())
     }
 
     /// A [`JobWatch`] for an accepted job, with the backend's support and recommended interval.
     /// Drive it with [`JobWatch::tick`] against this registry. `Err` when the id names no backend.
-    pub fn job_watch(&self, job: &JobRef, policy: WaitPolicy) -> Result<JobWatch, PrintError> {
+    pub fn job_watch(&self, job: &JobId, policy: WaitPolicy) -> Result<JobWatch, PrintError> {
         let backends = self.snapshot();
-        let (backend, _) = Self::route_noun(&backends, &job.id, "job")?;
+        let backend = Self::backend_of(&backends, job)?;
         Ok(JobWatch::new(job.clone(), policy).with_support(backend.watch_support()).with_recommended_interval(backend.recommended_poll_interval()))
     }
 }
@@ -333,11 +354,11 @@ pub fn submit_job(request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
 }
 
 /// One reading of a job's status through the process-wide registry. See [`Registry::job_status`].
-pub fn job_status(id: &str) -> Result<JobStatus, PrintError> {
-    registry().job_status(id)
+pub fn job_status(job: &JobId) -> Result<JobStatus, PrintError> {
+    registry().job_status(job)
 }
 
 /// Cancel a job through the process-wide registry. See [`Registry::cancel_job`].
-pub fn cancel_job(id: &str) -> Result<(), PrintError> {
-    registry().cancel_job(id)
+pub fn cancel_job(job: &JobId) -> Result<(), PrintError> {
+    registry().cancel_job(job)
 }

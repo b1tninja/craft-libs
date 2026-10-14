@@ -84,13 +84,13 @@ fact and the system print queue UI follows the job. For our purposes it is the C
 
 * `Backend::submit` returns `Submitted` when the printer has accepted the document. It is bounded by
   the backend's per-request timeouts and never waits for output.
-* `Backend::job_status(&JobRef) -> JobStatus` is **one request**. `JobState` is Pending, Held,
+* `Backend::job_status(&JobId) -> JobStatus` is **one request**. `JobState` is Pending, Held,
   Processing, Stopped, Completed, CompletedWithWarnings, CompletedWithErrors, Cancelled, Aborted or
   Unknown; `Unknown` means "accepted, outcome unknown" and is not terminal. `Backend::cancel_job`
   cancels (and "too late" is not an error).
 * `Backend::watch_support()` is `None` (cannot report: do not poll), `Poll` or `Events`
   (`recommended_poll_interval()` is the cadence; events remain a future option, nothing listens).
-* The registry routes jobs by the id's backend prefix exactly as it routes printers
+* The registry routes jobs by the `JobId`'s backend exactly as it routes printers
   (`submit_job`, `job_status`, `cancel_job`, `watch_support`, `job_watch`).
 * `JobWatch` is a caller-driven state machine: no thread, no timer. `tick(source)` makes at most one
   request and only when one is due, otherwise says when to come back; every wait is measured on an

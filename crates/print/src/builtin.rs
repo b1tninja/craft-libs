@@ -27,7 +27,7 @@ pub(crate) fn register_builtin(registry: &Registry) {
 mod spooler {
     use crate::backend::{Backend, ErrorKind, JobHint, PrintError, PrinterDetails, PrinterRef, SubmitRequest};
     use crate::job::Submitted;
-    use crate::{Printer, printers, submit_with_progress};
+    use crate::{Printer, Progress, printers, submit_with_progress};
 
     /// The system spooler as a [`Backend`]: CUPS (`lp`, `lpstat`) on macOS and Linux, the Windows
     /// print spooler on Windows. Local class: no consent needed. PDF only.
@@ -88,11 +88,15 @@ mod spooler {
         /// It gives no job handle and cannot be asked about the job later, so the result is
         /// "accepted, outcome unknown" ([`crate::WatchSupport::None`]).
         fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-            let SubmitRequest { document, job, progress, .. } = request;
+            let SubmitRequest { document, mut job, options, progress, .. } = request;
+            // The spooler honours the colour choice only; media, orientation, quality and
+            // resolution are the driver's (CUPS: `Job::options`), so they are ignored here.
+            job.grayscale = options.colour.is_mono(job.grayscale);
             let mut progress = progress;
             let message = submit_with_progress(document.bytes, &job, &mut |done, total| {
                 if let Some(report) = progress.as_deref_mut() {
-                    report(done, total);
+                    let clamp = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+                    report(Progress::of(clamp(done), clamp(total)));
                 }
             })?;
             Ok(Submitted::new(NAME, message))

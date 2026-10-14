@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use craft_print::backends::Backend;
 use craft_print::{
-    CancelToken, Document, ErrorKind, Job, JobRef, JobState, JobStatus, JobWatch, ManualClock, Phase, PrintError, PrinterDetails, PrinterRef,
-    Registry, RetrySafety, SubmitRequest, Submitted, UserConfirmed, WaitPolicy, WatchOutcome, WatchStep, WatchSupport, wait_for_job,
+    CancelToken, Document, ErrorKind, Job, JobId, JobOptions, JobState, JobStatus, JobWatch, ManualClock, ParseJobIdErrorKind, Phase, PrintError,
+    PrinterDetails, PrinterRef, Progress, Registry, RetrySafety, SubmitRequest, Submitted, UserConfirmed, WaitPolicy, WatchOutcome, WatchStep,
+    WatchSupport, wait_for_job,
 };
 
 /// What the fake printer does with the job it accepted.
@@ -48,7 +49,7 @@ impl Backend for Shared {
     fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         *self.0.submitted_at.lock().unwrap() = Some(Instant::now());
         let printer = request.job.printer.unwrap_or_default();
-        Ok(Submitted::new("ignored-by-registry", "accepted").with_job(JobRef::new(format!("{printer}#7"))))
+        Ok(Submitted::new("ignored-by-registry", "accepted").with_job(JobId::new("net", format!("{printer}#7"))))
     }
     fn watch_support(&self) -> WatchSupport {
         WatchSupport::Poll
@@ -56,15 +57,15 @@ impl Backend for Shared {
     fn recommended_poll_interval(&self) -> Option<Duration> {
         Some(Duration::from_millis(1500))
     }
-    fn job_status(&self, job: &JobRef) -> Result<JobStatus, PrintError> {
-        assert_eq!(job.native, "p1#7", "the backend gets its native handle");
-        assert_eq!(job.id, "net:p1#7", "and the namespaced id");
+    fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
+        assert_eq!(job.native(), "p1#7", "the backend gets its native handle");
+        assert_eq!(job.to_string(), "net:p1#7", "and the typed, namespaced id");
         self.0.status_calls.fetch_add(1, Ordering::SeqCst);
         let mut script = self.0.script.lock().unwrap();
         if script.len() > 1 { script.remove(0) } else { script[0].clone() }
     }
-    fn cancel_job(&self, job: &JobRef) -> Result<(), PrintError> {
-        self.0.cancels.lock().unwrap().push(job.native.clone());
+    fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {
+        self.0.cancels.lock().unwrap().push(job.native().to_owned());
         Ok(())
     }
 }
@@ -82,8 +83,12 @@ impl Backend for Silent {
         Ok(PrinterDetails { id: native_id.into(), name: native_id.into(), ..PrinterDetails::default() })
     }
     fn submit(&self, _: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-        Ok(Submitted::new("lp", "request id is q-1").with_job(JobRef::new("q-1")))
+        Ok(Submitted::new("lp", "request id is q-1").with_job(JobId::new("lp", "q-1")))
     }
+}
+
+fn jid(text: &str) -> JobId {
+    text.parse().unwrap()
 }
 
 fn status(state: JobState) -> JobStatus {
@@ -110,7 +115,7 @@ fn submit_returns_the_accepted_job_without_waiting_and_the_registry_fills_in_the
     assert!(started.elapsed() < Duration::from_secs(5), "submit never waits for the job: the printer keeps it Processing forever");
     assert_eq!(printer.status_calls.load(Ordering::SeqCst), 0, "submit asks nothing after acceptance");
     assert_eq!(submitted.backend, "net", "the registry sets the backend name");
-    assert_eq!(submitted.job.as_ref().map(|j| (j.id.as_str(), j.native.as_str())), Some(("net:p1#7", "p1#7")));
+    assert_eq!(submitted.job.as_ref().map(|j| (j.to_string(), j.native().to_owned())), Some(("net:p1#7".to_string(), "p1#7".to_string())));
     assert_eq!(submitted.watch, WatchSupport::Poll);
     assert_eq!(submitted.poll_interval, Some(Duration::from_millis(1500)));
     assert_eq!(submitted.receipt().job_id.as_deref(), Some("p1#7"));
@@ -119,21 +124,35 @@ fn submit_returns_the_accepted_job_without_waiting_and_the_registry_fills_in_the
 }
 
 #[test]
-fn status_and_cancel_route_by_the_job_ids_prefix() {
+fn status_and_cancel_route_by_the_job_ids_backend() {
     let printer = Reporting::new(vec![Ok(status(JobState::Pending)), Ok(status(JobState::Processing))]);
     let registry = registry(&printer);
-    assert_eq!(registry.job_status("net:p1#7").unwrap().state, JobState::Pending);
-    assert_eq!(registry.job_status("net:p1#7").unwrap().state, JobState::Processing);
-    registry.cancel_job("net:p1#7").unwrap();
+    let job = jid("net:p1#7");
+    assert_eq!(registry.job_status(&job).unwrap().state, JobState::Pending);
+    assert_eq!(registry.job_status(&job).unwrap().state, JobState::Processing);
+    registry.cancel_job(&job).unwrap();
     assert_eq!(*printer.cancels.lock().unwrap(), ["p1#7"]);
-    assert_eq!(registry.watch_support("net:p1#7").unwrap(), WatchSupport::Poll);
-    assert_eq!(registry.recommended_poll_interval("net:p1#7").unwrap(), Some(Duration::from_millis(1500)));
-    for bad in ["p1#7", "nope:p1#7"] {
-        assert_eq!(registry.job_status(bad).unwrap_err().kind(), ErrorKind::UnknownBackend, "{bad}");
-        assert_eq!(registry.cancel_job(bad).unwrap_err().kind(), ErrorKind::UnknownBackend, "{bad}");
-    }
-    assert!(registry.job_status("p1#7").unwrap_err().message().contains("job id"), "the message names a job, not a printer");
-    assert_eq!(Registry::new().job_status("net:x").unwrap_err().kind(), ErrorKind::Unsupported);
+    assert_eq!(registry.watch_support(&job).unwrap(), WatchSupport::Poll);
+    assert_eq!(registry.recommended_poll_interval(&job).unwrap(), Some(Duration::from_millis(1500)));
+    let stranger = jid("nope:p1#7");
+    assert_eq!(registry.job_status(&stranger).unwrap_err().kind(), ErrorKind::UnknownBackend);
+    assert_eq!(registry.cancel_job(&stranger).unwrap_err().kind(), ErrorKind::UnknownBackend);
+    assert!(registry.job_status(&stranger).unwrap_err().message().contains("job nope:p1#7"), "the message names a job, not a printer");
+    assert_eq!(Registry::new().job_status(&jid("net:x")).unwrap_err().kind(), ErrorKind::Unsupported);
+}
+
+#[test]
+fn a_submitted_job_id_round_trips_through_text_and_is_accepted_back() {
+    let printer = Reporting::new(vec![Ok(status(JobState::Processing))]);
+    let registry = registry(&printer);
+    let submitted = registry.submit_job(request("net:p1")).unwrap();
+    let job = submitted.job.unwrap();
+    assert_eq!((job.backend(), job.native()), ("net", "p1#7"));
+    let kept: JobId = job.to_string().parse().unwrap();
+    assert_eq!(kept, job);
+    assert_eq!(registry.job_status(&kept).unwrap().state, JobState::Processing);
+    assert!(registry.job_watch(&kept, WaitPolicy::default()).is_ok());
+    assert_eq!("p1#7".parse::<JobId>().unwrap_err().kind(), ParseJobIdErrorKind::MissingSeparator);
 }
 
 #[test]
@@ -143,12 +162,12 @@ fn a_backend_that_cannot_report_is_accepted_outcome_unknown_and_is_not_polled() 
     let submitted = registry.submit_job(request("lp:q")).unwrap();
     assert_eq!(submitted.watch, WatchSupport::None);
     assert_eq!(submitted.poll_interval, None);
-    let status = registry.job_status(&submitted.job.as_ref().unwrap().id).unwrap();
+    let status = registry.job_status(submitted.job.as_ref().unwrap()).unwrap();
     assert_eq!(status.state, JobState::Unknown);
     assert!(!status.terminal(), "unknown is 'accepted, outcome unknown', not an ending");
     let mut watch = JobWatch::for_submitted(&submitted, WaitPolicy::default()).unwrap();
     assert_eq!(watch.tick(&registry), WatchStep::Done(WatchOutcome::NoStatus));
-    assert_eq!(registry.cancel_job("lp:q-1").unwrap_err().kind(), ErrorKind::Unsupported, "a backend with no cancel says so");
+    assert_eq!(registry.cancel_job(&jid("lp:q-1")).unwrap_err().kind(), ErrorKind::Unsupported, "a backend with no cancel says so");
 }
 
 #[test]
@@ -187,11 +206,11 @@ fn the_blocking_convenience_is_built_on_the_polls_and_gives_up_at_max_wait() {
     assert!(matches!(outcome, WatchOutcome::TimedOut { last: Some(ref s) } if s.state == JobState::Processing), "{outcome:?}");
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(printer.status_calls.load(Ordering::SeqCst) >= 2);
-    assert_eq!(wait_for_job(&registry, &JobRef::new("no-prefix"), WaitPolicy::default()).unwrap_err().kind(), ErrorKind::UnknownBackend);
+    assert_eq!(wait_for_job(&registry, &JobId::new("nope", "1"), WaitPolicy::default()).unwrap_err().kind(), ErrorKind::UnknownBackend);
     // Finishing is also seen by the convenience.
     let done = Reporting::new(vec![Ok(status(JobState::Processing)), Ok(status(JobState::CompletedWithWarnings))]);
     let registry = self::registry(&done);
-    let outcome = wait_for_job(&registry, &JobRef::namespaced("net", "p1#7"), WaitPolicy::every(Duration::from_millis(10))).unwrap();
+    let outcome = wait_for_job(&registry, &JobId::new("net", "p1#7"), WaitPolicy::every(Duration::from_millis(10))).unwrap();
     assert!(outcome.is_success());
 }
 
@@ -202,7 +221,7 @@ fn a_watch_can_cancel_through_the_registry() {
     let cancel = CancelToken::new();
     cancel.cancel();
     let mut watch = registry
-        .job_watch(&JobRef::namespaced("net", "p1#7"), WaitPolicy::every(Duration::from_millis(5)))
+        .job_watch(&JobId::new("net", "p1#7"), WaitPolicy::every(Duration::from_millis(5)))
         .unwrap()
         .with_cancel(cancel)
         .with_clock(Arc::new(ManualClock::new()));
@@ -240,4 +259,66 @@ fn error_kinds_carry_a_default_retry_safety_a_backend_can_override() {
     assert_eq!((e.retry_safety(), e.phase(), e.retry_after()), (RetrySafety::Idempotent, Some(Phase::Poll), Some(Duration::from_secs(3))));
     assert!(e.is_retryable() && !e.outcome_unknown());
     assert!(UserConfirmed::attest(Some(true)).is_ok());
+}
+
+#[test]
+fn expected_pages_become_the_total_only_where_the_backend_reports_none() {
+    // The backend reports sheets done and never a total (a network printer's way).
+    let printer = Reporting::new(vec![
+        Ok(JobStatus { sheets_done: Some(1), ..status(JobState::Processing) }),
+        Ok(JobStatus { sheets_done: Some(3), ..status(JobState::Processing) }),
+        Ok(JobStatus { sheets_done: Some(4), sheets_total: Some(4), ..status(JobState::Completed) }),
+    ]);
+    let registry = registry(&printer);
+    let options = JobOptions::new().with_expected_pages(6);
+    let duplex = Job { printer: Some("net:p1".into()), duplex: Some(craft_print::Duplex::LongEdge), ..Job::default() };
+    let submitted = registry.submit_job(SubmitRequest::new(Document::pdf(b"%PDF-1.7"), duplex).with_options(options)).unwrap();
+    assert_eq!((submitted.expected.pages, submitted.expected.sheets), (Some(6), Some(3)));
+    let mut watch =
+        JobWatch::for_submitted(&submitted, WaitPolicy::every(Duration::from_millis(10))).unwrap().with_clock(Arc::new(ManualClock::new()));
+    let mut fractions = Vec::new();
+    let outcome = watch.run(&registry, &mut |step| {
+        if let WatchStep::Update(s) = step {
+            fractions.push((s.sheets_done, s.sheets_total, s.pages_total, s.sheet_fraction()));
+        }
+    });
+    assert_eq!(fractions, [(Some(1), Some(3), Some(6), Some(1.0 / 3.0)), (Some(3), Some(3), Some(6), Some(1.0))]);
+    assert!(matches!(outcome, WatchOutcome::Terminal(ref s) if s.sheets_total == Some(4)), "the reported total wins over the estimate: {outcome:?}");
+}
+
+#[test]
+fn progress_events_get_the_expected_sheets_as_their_total() {
+    struct Reports(Vec<Progress>);
+    impl Backend for Reports {
+        fn name(&self) -> &'static str {
+            "rep"
+        }
+        fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
+            Ok(vec![PrinterRef { id: "p".into(), name: "P".into(), default: true, two_sided: None }])
+        }
+        fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
+            Ok(PrinterDetails { id: native_id.into(), name: native_id.into(), ..PrinterDetails::default() })
+        }
+        fn submit(&self, mut request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
+            if let Some(progress) = request.progress.as_deref_mut() {
+                self.0.iter().for_each(|event| progress(*event));
+            }
+            Ok(Submitted::new("rep", "accepted"))
+        }
+    }
+    let run = |events: Vec<Progress>, pages: Option<u32>| {
+        let registry = Registry::new();
+        registry.register(Box::new(Reports(events))).unwrap();
+        let mut seen = Vec::new();
+        let mut callback = |event: Progress| seen.push(event);
+        let mut options = JobOptions::new();
+        options.expected_pages = pages;
+        let request = SubmitRequest::new(Document::pdf(b"%PDF"), Job::default()).with_options(options).with_progress(&mut callback);
+        registry.submit_job(request).unwrap();
+        seen
+    };
+    let unknown = vec![Progress::done_only(1), Progress::done_only(2)];
+    assert_eq!(run(unknown.clone(), Some(5)), [Progress::of(1, 5), Progress::of(2, 5)]);
+    assert_eq!(run(unknown, None), [Progress::done_only(1), Progress::done_only(2)], "no page count, no invented total");
+    assert_eq!(run(vec![Progress::of(1, 9)], Some(5)), [Progress::of(1, 9)], "a backend-reported total wins");
 }

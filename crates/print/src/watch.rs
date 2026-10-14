@@ -7,11 +7,11 @@
 //! injectable [`Clock`], so a test drives it without sleeping.
 //!
 //! ```
-//! use craft_print::{JobRef, JobWatch, ManualClock, Registry, WaitPolicy, WatchStep};
+//! use craft_print::{JobId, JobWatch, ManualClock, Registry, WaitPolicy, WatchStep};
 //! # use std::sync::Arc;
 //! let clock = Arc::new(ManualClock::new());
 //! let registry = Registry::new();
-//! let mut watch = JobWatch::new(JobRef::namespaced("wsd", "job-1"), WaitPolicy::default()).with_clock(clock);
+//! let mut watch = JobWatch::new(JobId::new("wsd", "job-1"), WaitPolicy::default()).with_clock(clock);
 //! // Nothing is registered, so the first poll fails for good; with a backend it would be a status.
 //! assert!(matches!(watch.tick(&registry), WatchStep::Done(_)));
 //! ```
@@ -20,24 +20,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::{CancelToken, ErrorKind, PrintError};
-use crate::job::{JobRef, JobState, JobStatus, Submitted, WatchSupport};
+use crate::job::{ExpectedTotals, JobId, JobState, JobStatus, Submitted, WatchSupport};
 use crate::registry::Registry;
 use crate::retry::{CANCEL_SLICE, Clock, Jitter, RetryPolicy, SystemClock};
 
 /// Where a watch gets status from and sends cancels to. The [`Registry`] is one (by job id); a
 /// test can supply its own.
 pub trait JobSource {
-    fn job_status(&self, job: &JobRef) -> Result<JobStatus, PrintError>;
-    fn cancel_job(&self, job: &JobRef) -> Result<(), PrintError>;
+    fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError>;
+    fn cancel_job(&self, job: &JobId) -> Result<(), PrintError>;
 }
 
 impl JobSource for Registry {
-    fn job_status(&self, job: &JobRef) -> Result<JobStatus, PrintError> {
-        Registry::job_status(self, &job.id)
+    fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
+        Registry::job_status(self, job)
     }
 
-    fn cancel_job(&self, job: &JobRef) -> Result<(), PrintError> {
-        Registry::cancel_job(self, &job.id)
+    fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {
+        Registry::cancel_job(self, job)
     }
 }
 
@@ -147,7 +147,7 @@ pub enum WatchStep {
 
 /// A caller-driven follower of one job. Advance it with [`Self::tick`]; see the module docs.
 pub struct JobWatch {
-    job: JobRef,
+    job: JobId,
     support: WatchSupport,
     base_interval: Duration,
     interval: Duration,
@@ -160,6 +160,7 @@ pub struct JobWatch {
     failures: u32,
     polls: u32,
     last: Option<JobStatus>,
+    expected: ExpectedTotals,
     cancel_sent: bool,
     done: Option<WatchOutcome>,
 }
@@ -167,7 +168,7 @@ pub struct JobWatch {
 impl std::fmt::Debug for JobWatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JobWatch")
-            .field("job", &self.job.id)
+            .field("job", &self.job.to_string())
             .field("support", &self.support)
             .field("polls", &self.polls)
             .field("failures", &self.failures)
@@ -184,7 +185,7 @@ const FALLBACK_INTERVAL: Duration = Duration::from_secs(2);
 impl JobWatch {
     /// Follow `job`, assuming the backend can be polled ([`WatchSupport::Poll`]); the clock is the
     /// system's. Use [`Self::for_submitted`] to take support and interval from the backend.
-    pub fn new(job: JobRef, policy: WaitPolicy) -> Self {
+    pub fn new(job: JobId, policy: WaitPolicy) -> Self {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         Self::build(job, WatchSupport::Poll, None, policy, clock)
     }
@@ -194,10 +195,10 @@ impl JobWatch {
     pub fn for_submitted(submitted: &Submitted, policy: WaitPolicy) -> Option<Self> {
         let job = submitted.job.clone()?;
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        Some(Self::build(job, submitted.watch, submitted.poll_interval, policy, clock))
+        Some(Self::build(job, submitted.watch, submitted.poll_interval, policy, clock).with_expected(submitted.expected))
     }
 
-    fn build(job: JobRef, support: WatchSupport, recommended: Option<Duration>, policy: WaitPolicy, clock: Arc<dyn Clock>) -> Self {
+    fn build(job: JobId, support: WatchSupport, recommended: Option<Duration>, policy: WaitPolicy, clock: Arc<dyn Clock>) -> Self {
         let base_interval = policy.interval.or(recommended).unwrap_or(FALLBACK_INTERVAL).max(MIN_INTERVAL);
         let started = clock.now();
         Self {
@@ -214,6 +215,7 @@ impl JobWatch {
             failures: 0,
             polls: 0,
             last: None,
+            expected: ExpectedTotals::default(),
             cancel_sent: false,
             done: None,
         }
@@ -253,6 +255,15 @@ impl JobWatch {
         self
     }
 
+    /// Totals to fill into every reading that lacks them (a backend-reported total wins). Taken
+    /// from the [`Submitted`] by [`Self::for_submitted`]; set it yourself for a watch built with
+    /// [`Self::new`] or [`Registry::job_watch`], for example from the page count you know.
+    #[must_use]
+    pub fn with_expected(mut self, expected: ExpectedTotals) -> Self {
+        self.expected = expected;
+        self
+    }
+
     /// Replace the jitter source (a fixed seed in tests).
     #[must_use]
     pub fn with_jitter(mut self, jitter: Jitter) -> Self {
@@ -260,7 +271,7 @@ impl JobWatch {
         self
     }
 
-    pub fn job(&self) -> &JobRef {
+    pub fn job(&self) -> &JobId {
         &self.job
     }
 
@@ -359,8 +370,9 @@ impl JobWatch {
     fn poll(&mut self, source: &dyn JobSource, now: Duration) -> WatchStep {
         self.polls = self.polls.saturating_add(1);
         match source.job_status(&self.job) {
-            Ok(status) => {
+            Ok(mut status) => {
                 self.failures = 0;
+                self.expected.apply(&mut status);
                 if status.terminal() {
                     self.last = Some(status.clone());
                     return self.finish(WatchOutcome::Terminal(status));
@@ -431,7 +443,7 @@ impl JobWatch {
 /// non-blocking primitives (never part of `submit`). Waits at most `policy.max_wait` (two minutes
 /// by default) and reports [`WatchOutcome::TimedOut`] if the job is still running; the job is not
 /// touched. `Err` only when the job id names no registered backend.
-pub fn wait_for_job(registry: &Registry, job: &JobRef, policy: WaitPolicy) -> Result<WatchOutcome, PrintError> {
+pub fn wait_for_job(registry: &Registry, job: &JobId, policy: WaitPolicy) -> Result<WatchOutcome, PrintError> {
     let mut watch = registry.job_watch(job, policy)?;
     Ok(watch.run(registry, &mut |_| {}))
 }
@@ -465,13 +477,13 @@ mod tests {
     }
 
     impl JobSource for Script {
-        fn job_status(&self, _: &JobRef) -> Result<JobStatus, PrintError> {
+        fn job_status(&self, _: &JobId) -> Result<JobStatus, PrintError> {
             *self.seen_polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
             let mut polls = self.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if polls.len() > 1 { polls.remove(0) } else { polls.first().cloned().unwrap_or_else(|| Ok(JobStatus::unknown())) }
         }
 
-        fn cancel_job(&self, _: &JobRef) -> Result<(), PrintError> {
+        fn cancel_job(&self, _: &JobId) -> Result<(), PrintError> {
             *self.seen_cancels.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
             let mut cancels = self.cancels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if cancels.is_empty() { Ok(()) } else { cancels.remove(0) }
@@ -484,7 +496,7 @@ mod tests {
 
     fn watch(policy: WaitPolicy) -> (JobWatch, ManualClock) {
         let clock = ManualClock::new();
-        let watch = JobWatch::new(JobRef::namespaced("t", "1"), policy).with_clock(Arc::new(clock.clone())).with_jitter(Jitter::new(3));
+        let watch = JobWatch::new(JobId::new("t", "1"), policy).with_clock(Arc::new(clock.clone())).with_jitter(Jitter::new(3));
         (watch, clock)
     }
 
@@ -695,12 +707,12 @@ mod tests {
     fn a_watch_for_a_submission_takes_support_and_interval_from_it() {
         let mut submitted = Submitted::new("t", "ok");
         assert!(JobWatch::for_submitted(&submitted, WaitPolicy::default()).is_none(), "no job handle, nothing to follow");
-        submitted.job = Some(JobRef::namespaced("t", "1"));
+        submitted.job = Some(JobId::new("t", "1"));
         submitted.watch = WatchSupport::Poll;
         submitted.poll_interval = Some(Duration::from_secs(7));
         let mut watch = JobWatch::for_submitted(&submitted, WaitPolicy::default())
             .map(|w| w.with_clock(Arc::new(ManualClock::new())))
-            .unwrap_or_else(|| JobWatch::new(JobRef::new("x"), WaitPolicy::default()));
+            .unwrap_or_else(|| JobWatch::new(JobId::new("x", "1"), WaitPolicy::default()));
         let script = Script::new(vec![Ok(status(JobState::Processing))]);
         assert!(matches!(watch.tick(&script), WatchStep::Update(_)));
         assert_eq!(watch.next_poll_in(), Some(Duration::from_secs(7)));

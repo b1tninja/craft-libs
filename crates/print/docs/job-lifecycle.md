@@ -169,7 +169,8 @@ is pinned by `the_retry_table_for_every_kind` in `src/wsd/error.rs`.
 | Transport `connection_closed` (stage reply; request, if it was being written) | `Unavailable` | yes | Reply (Request) | OutcomeUnknown | Idempotent | none |
 | Transport `timeout` (stage reply) | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
 | The caller's deadline passed | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
-| Transport `other` (a malformed exchange, an I/O error that fits no kind) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
+| Transport `invalid_response` (a peer that did not speak HTTP) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
+| Transport `io` (an I/O error that fits no other kind) | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | none |
 | Transport `redirect` (refused) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
 | HTTP 408 | `Timeout` | yes | Request | Safe | Safe | none |
 | HTTP 425 | `Busy` | yes | Request | Safe | Safe | 2 s, or the printer's |
@@ -202,14 +203,14 @@ jobs is in a mode that lasts (15 s), a temporary error clears sooner (5 s), a do
 processed sooner still (2 s). `RetryPolicy` takes the larger of this and its own backoff.
 
 Nothing is read from text. `craft-wsd` reports a transport failure as a typed kind (`refused`,
-`unreachable`, `connect_timeout`, `timeout`, `redirect`, `connection_closed`, `other`) and the stage
+`unreachable`, `connect_timeout`, `timeout`, `redirect`, `connection_closed`, `invalid_response`, `io`) and the stage
 the exchange reached (prepare, connect, request, reply). The stage gives the phase and, through
 `craft-wsd`'s own `retry_safety(idempotent)`, the safety: nothing sent (prepare, connect) is `Safe`,
 anything that may have arrived is `OutcomeUnknown` for a create or send and `Idempotent` for the
 rest. HTTP 429 and 503 are a decline and `Safe` there too. What this crate adds is the print
 service's own reading: 408 and 425 are declines, 501, 505 and the other 4xx are definite refusals, a
-SOAP fault is a definite answer, and an unclassified (`other`) failure stays transient here although
-`craft-wsd` does not call it retryable. A closed connection is a transport kind, not an error kind of
+SOAP fault is a definite answer. A request the HTTP client could not build is not a transport failure
+at all: `craft-wsd` reports it as `Invalid`, which is a preparation failure and `Safe`. A closed connection is a transport kind, not an error kind of
 its own. `every_transport_kind_for_every_operation` pins every kind against every operation.
 
 **Reconcile.** `WsdBackend::reconcile(printer, title)` is the answer to `OutcomeUnknown`: read

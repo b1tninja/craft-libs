@@ -199,10 +199,12 @@ impl WsdError {
                 let kind_of = match kind {
                     T::ConnectTimeout | T::Timeout => K::Timeout,
                     // Not transient, like the HTTP errors that are not retryable: a refused redirect
-                    // and a malformed exchange or an I/O error that fits no other kind. `craft-wsd`
-                    // calls both not retryable and so does this layer.
-                    T::Redirect | T::Other => K::Failed,
-                    // Refused, unreachable, closed without a reply, and any kind added later.
+                    // and a peer that did not speak HTTP. `craft-wsd` calls both not retryable and
+                    // so does this layer.
+                    T::Redirect | T::InvalidResponse => K::Failed,
+                    // Refused, unreachable, closed without a reply, an I/O error that matched no
+                    // other kind (transient), and any kind added later.
+                    T::Refused | T::Unreachable | T::ConnectionClosed | T::Io => K::Unavailable,
                     _ => K::Unavailable,
                 };
                 let phase = match stage {
@@ -468,7 +470,8 @@ mod tests {
             (transport(TransportKind::ConnectTimeout, Stage::Connect), ErrorKind::Timeout),
             (transport(TransportKind::Timeout, Stage::Reply), ErrorKind::Timeout),
             (transport(TransportKind::Redirect, Stage::Reply), ErrorKind::Failed),
-            (transport(TransportKind::Other, Stage::Reply), ErrorKind::Failed),
+            (transport(TransportKind::InvalidResponse, Stage::Reply), ErrorKind::Failed),
+            (transport(TransportKind::Io, Stage::Reply), ErrorKind::Unavailable),
             (http(503), ErrorKind::Unavailable),
             (http(429), ErrorKind::Busy),
             (http(404), ErrorKind::Failed),
@@ -550,11 +553,24 @@ mod tests {
             (transport(T::Redirect, G::Reply), Op::Create, K::Failed, P::Reply, S::OutcomeUnknown, None),
             (transport(T::Redirect, G::Reply), Op::Query, K::Failed, P::Reply, S::Idempotent, None),
             (transport(T::Redirect, G::Reply), Op::Status, K::Failed, P::Poll, S::Idempotent, None),
-            // A malformed exchange or an unclassified I/O error: transient here, read carefully.
-            (transport(T::Other, G::Reply), Op::Create, K::Failed, P::Reply, S::OutcomeUnknown, None),
-            (transport(T::Other, G::Reply), Op::Query, K::Failed, P::Reply, S::Idempotent, None),
+            // A peer that did not speak HTTP: not retryable, the request may have arrived.
+            (transport(T::InvalidResponse, G::Reply), Op::Create, K::Failed, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::InvalidResponse, G::Reply), Op::Send, K::Failed, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::InvalidResponse, G::Reply), Op::Query, K::Failed, P::Reply, S::Idempotent, None),
+            (transport(T::InvalidResponse, G::Reply), Op::Status, K::Failed, P::Poll, S::Idempotent, None),
+            (transport(T::InvalidResponse, G::Reply), Op::Cancel, K::Failed, P::Reply, S::Idempotent, None),
+            // An I/O error that matched no other kind: transient, the request may have arrived.
+            (transport(T::Io, G::Reply), Op::Create, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::Io, G::Reply), Op::Send, K::Unavailable, P::Reply, S::OutcomeUnknown, None),
+            (transport(T::Io, G::Reply), Op::Query, K::Unavailable, P::Reply, S::Idempotent, None),
+            (transport(T::Io, G::Reply), Op::Status, K::Unavailable, P::Poll, S::Idempotent, None),
+            (transport(T::Io, G::Reply), Op::Cancel, K::Unavailable, P::Reply, S::Idempotent, None),
             // An error from before the wire (a transport that refuses to start) is a preparation failure.
-            (transport(T::Other, G::Prepare), Op::Send, K::Failed, P::Prepare, S::Safe, None),
+            (transport(T::Io, G::Prepare), Op::Send, K::Unavailable, P::Prepare, S::Safe, None),
+            // A request the HTTP client could not even build arrives as `Invalid`: nothing was sent.
+            (WsdError::Invalid("bad uri".into()), Op::Create, K::InvalidRequest, P::Prepare, S::Safe, None),
+            (WsdError::from(WireError::Invalid("bad uri".into())), Op::Send, K::InvalidRequest, P::Prepare, S::Safe, None),
+            (WsdError::from(WireError::Invalid("bad uri".into())), Op::Status, K::InvalidRequest, P::Prepare, S::Safe, None),
             // HTTP.
             (http(408), Op::Send, K::Timeout, P::Request, S::Safe, None),
             (http(425), Op::Create, K::Busy, P::Request, S::Safe, Some(2)),
@@ -654,7 +670,8 @@ mod tests {
                 TransportKind::Timeout => (K::Timeout, P::Reply, true),
                 TransportKind::ConnectionClosed => (K::Unavailable, P::Reply, true),
                 TransportKind::Redirect => (K::Failed, P::Reply, false),
-                TransportKind::Other => (K::Failed, P::Reply, false),
+                TransportKind::InvalidResponse => (K::Failed, P::Reply, false),
+                TransportKind::Io => (K::Unavailable, P::Reply, true),
                 _ => panic!("a new transport kind needs a row here"),
             };
             assert_eq!(kind.is_retryable(), retryable, "{kind}: agrees with craft-wsd");

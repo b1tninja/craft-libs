@@ -25,7 +25,8 @@ pub(crate) fn register_builtin(registry: &Registry) {
 
 #[cfg(any(test, windows, all(unix, not(target_arch = "wasm32"))))]
 mod spooler {
-    use crate::backend::{Backend, ErrorKind, JobHint, PrintError, PrinterDetails, PrinterRef, Receipt, SubmitRequest};
+    use crate::backend::{Backend, ErrorKind, JobHint, PrintError, PrinterDetails, PrinterRef, SubmitRequest};
+    use crate::job::Submitted;
     use crate::{Printer, printers, submit_with_progress};
 
     /// The system spooler as a [`Backend`]: CUPS (`lp`, `lpstat`) on macOS and Linux, the Windows
@@ -83,7 +84,10 @@ mod spooler {
             Ok(details_for(printer, options))
         }
 
-        fn submit(&self, request: SubmitRequest<'_>) -> Result<Receipt, PrintError> {
+        /// The spooler's own answer is the receipt: `lp` (or the Windows spooler) took the document.
+        /// It gives no job handle and cannot be asked about the job later, so the result is
+        /// "accepted, outcome unknown" ([`crate::WatchSupport::None`]).
+        fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
             let SubmitRequest { document, job, progress, .. } = request;
             let mut progress = progress;
             let message = submit_with_progress(document.bytes, &job, &mut |done, total| {
@@ -91,7 +95,7 @@ mod spooler {
                     report(done, total);
                 }
             })?;
-            Ok(Receipt { backend: NAME, message, job_id: None })
+            Ok(Submitted::new(NAME, message))
         }
     }
 }

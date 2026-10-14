@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use craft_print::backends::Backend;
 use craft_print::{
     BackendClass, CancelToken, Document, DocumentFormat, ErrorKind, Job, JobHint, NativeCode, PrintError, PrinterDetails, PrinterOption, PrinterRef,
-    PrinterState, PrinterStatus, Receipt, RegisterError, Registry, SubmitRequest, UserConfirmed, namespaced_id, split_id,
+    PrinterState, PrinterStatus, Receipt, RegisterError, Registry, SubmitRequest, Submitted, UserConfirmed, namespaced_id, split_id,
 };
 
 type Seen = Arc<Mutex<Vec<(Option<String>, DocumentFormat, usize)>>>;
@@ -51,9 +51,9 @@ impl Backend for CupsLike {
             ..PrinterDetails::default()
         })
     }
-    fn submit(&self, request: SubmitRequest<'_>) -> Result<Receipt, PrintError> {
+    fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         record(&self.seen, &request);
-        Ok(Receipt { backend: "cups", message: "request id is Office-1".into(), job_id: Some("Office-1".into()) })
+        Ok(Receipt { backend: "cups", message: "request id is Office-1".into(), job_id: Some("Office-1".into()) }.into())
     }
 }
 
@@ -76,12 +76,12 @@ impl Backend for IppLike {
             ..PrinterDetails::default()
         })
     }
-    fn submit(&self, mut request: SubmitRequest<'_>) -> Result<Receipt, PrintError> {
+    fn submit(&self, mut request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         if let Some(progress) = request.progress.as_deref_mut() {
             progress(0, 2);
             progress(2, 2);
         }
-        Ok(Receipt { backend: "ipp", message: "accepted".into(), job_id: None })
+        Ok(Receipt { backend: "ipp", message: "accepted".into(), job_id: None }.into())
     }
 }
 
@@ -105,7 +105,7 @@ impl Backend for WsdLike {
     fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
         Ok(PrinterDetails { id: native_id.into(), name: native_id.into(), ..PrinterDetails::default() })
     }
-    fn submit(&self, request: SubmitRequest<'_>) -> Result<Receipt, PrintError> {
+    fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         record(&self.seen, &request);
         Err(PrintError::new(ErrorKind::Busy, "the device is busy").with_native(NativeCode {
             domain: "wsd-fault",
@@ -127,7 +127,7 @@ impl Backend for Broken {
     fn printer_details(&self, _: &str) -> Result<PrinterDetails, PrintError> {
         Err(PrintError::new(ErrorKind::Unavailable, "the service is down"))
     }
-    fn submit(&self, _: SubmitRequest<'_>) -> Result<Receipt, PrintError> {
+    fn submit(&self, _: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         Err(PrintError::new(ErrorKind::Unavailable, "the service is down"))
     }
 }
@@ -342,7 +342,7 @@ fn names_are_validated_and_kinds_say_whether_to_retry() {
         fn printer_details(&self, _: &str) -> Result<PrinterDetails, PrintError> {
             Err(PrintError::new(ErrorKind::NotFound, "none"))
         }
-        fn submit(&self, _: SubmitRequest<'_>) -> Result<Receipt, PrintError> {
+        fn submit(&self, _: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
             Err(PrintError::new(ErrorKind::Failed, "none"))
         }
     }

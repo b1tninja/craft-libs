@@ -58,16 +58,71 @@ let receipt = craft_print::submit_to_backend(SubmitRequest::new(Document::pdf(&p
   backends (`BackendClass::Local`, the default) ignore it; a `BackendClass::Network` backend only
   ever receives requests that carry one, which the registry enforces.
 
+### Job lifecycle
+
+Submitting and watching are separate. `Registry::submit_job` returns a `Submitted` as soon as the
+printer has **accepted** the document (a bounded call; it never waits for the paper). What happens
+next is asked for, one request at a time, with the job's id:
+
+```rust,no_run
+use craft_print::{Document, Job, JobWatch, SubmitRequest, WaitPolicy, WatchStep};
+
+let registry = craft_print::registry();
+let job = Job { printer: Some("wsd:http://192.0.2.1:5357/p".into()), ..Job::default() };
+let request = SubmitRequest::new(Document::pdf(&pdf_bytes), job).with_consent(craft_print::UserConfirmed::interactive());
+let submitted = registry.submit_job(request)?;            // accepted; not printed yet
+let Some(mut watch) = JobWatch::for_submitted(&submitted, WaitPolicy::default()) else { return Ok(()) };
+// In a UI frame or a worker loop; each tick makes at most one request, and only when one is due:
+match watch.tick(registry) {
+    WatchStep::Pending { next_in } => { /* come back in next_in */ }
+    WatchStep::Update(status) => { /* status.state, status.sheet_fraction() */ }
+    WatchStep::Retrying { error, next_in, .. } => { /* a poll failed transiently */ }
+    WatchStep::Done(outcome) => { /* Terminal, Forgotten, NoStatus, TimedOut or Failed */ }
+    _ => {}
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+* `Submitted` carries the namespaced `JobRef` (`id` such as `"wsd:<printer>#7"`, plus the backend's
+  `native` handle), `accepted_at`, warnings, a message, and what the backend can do afterwards
+  (`watch: WatchSupport`, `poll_interval`). The job is `None` for a spooler that gives no handle.
+* `WatchSupport::None` means the backend cannot report (a fire-and-forget spooler): the status is
+  `JobState::Unknown`, "accepted, outcome unknown", which is not terminal and not a failure. Do not
+  poll it. `Poll` means ask every `poll_interval`; `Events` is reserved (nothing listens yet).
+* `JobStatus` has a `JobState` (Pending, Held, Processing, Stopped, Completed, CompletedWithWarnings,
+  CompletedWithErrors, Cancelled, Aborted, Unknown), reasons, optional sheet and page counters and
+  `terminal()`. A job the device has forgotten is `ErrorKind::NotFound`; a watch reports it as
+  `WatchOutcome::Forgotten` (most likely finished).
+* `Registry::job_status(id)` and `cancel_job(id)` are single bounded requests routed by prefix.
+* `JobWatch` is a state machine **you** advance: no thread, no timer. It has an interval that backs
+  off while nothing changes, a `max_wait`, a `CancelToken` (one cancel is sent, then it keeps watching
+  for the end state), failure retries under a `RetryPolicy`, and an injectable `Clock` (`ManualClock`
+  in tests). `poll_status` forces a read now. `wait_for_job(registry, &job, WaitPolicy)` is the
+  blocking convenience for a CLI, built on the same ticks; `max_wait` is finite (two minutes by
+  default) and the job is left alone when it runs out.
+* **Retry.** `PrintError::is_retryable()` says the condition is transient; `retry_safety()` says
+  whether sending again is safe: `Safe` (nothing was accepted), `Idempotent` (a query or cancel) or
+  `OutcomeUnknown` (the request may have arrived: reconcile before resubmitting). `phase()` and
+  `retry_after()` complete it, and `RetryPolicy` (`next_delay`, `delay`, the `retry` helper) is a
+  bounded exponential backoff with jitter that never repeats an `OutcomeUnknown` error. The neutral
+  defaults per `ErrorKind` are tabulated in [docs/job-lifecycle.md](docs/job-lifecycle.md), which also
+  has the survey of how CUPS/IPP, WS-Print and the Windows spooler separate accepting from printing.
+* `Registry::submit` and `submit_to_backend` still return a `Receipt`; it now means "accepted".
+
 ### Writing a backend (the extension points for a network backend)
 
-* The trait is object safe and **blocking**: `Backend: Send + Sync`, stored as `Arc<dyn Backend>`.
-  There is no async runtime here; a network backend blocks on its own transport inside `submit`,
-  as the callers already submit from a worker thread. Cancellation is a cloneable `CancelToken`
-  in the `SubmitRequest` that the backend polls between round trips (the registry also checks it
-  before calling); progress is the same `(processed, sheets)` callback as `submit_with_progress`.
-* Implement `name`, `list_printers`, `printer_details` and `submit`; override `class` (network
-  backends return `BackendClass::Network`) and `accepted_formats` (for example raster or the
-  printer's own language) as needed. Use native ids; the registry adds the prefix.
+* The trait is object safe and **blocking but bounded**: `Backend: Send + Sync`, stored as
+  `Arc<dyn Backend>`. There is no async runtime here; a network backend blocks on its own transport
+  for at most its per-request timeouts, never for the length of a print (see "Job lifecycle").
+  Cancellation is a cloneable `CancelToken` in the `SubmitRequest` that the backend polls between
+  round trips (the registry also checks it before calling); progress is the same
+  `(processed, sheets)` callback as `submit_with_progress`.
+* Implement `name`, `list_printers`, `printer_details` and `submit` (which returns `Submitted` once the
+  printer has accepted the document). Override `watch_support`, `job_status` and `cancel_job` if the
+  protocol can tell what happened to a job afterwards; the defaults say "accepted, outcome unknown".
+  Override `class` (network backends return `BackendClass::Network`) and `accepted_formats` (for
+  example raster or the printer's own language) as needed. Use native ids; the registry adds the
+  prefix, to printers and to jobs.
 * Register once at start-up: `craft_print::register(Box::new(MyBackend::new()))?`, or on a
   `Registry` you own. A backend that needs extra dependencies can live behind a cargo feature
   that registers it; the base crate is complete without it.

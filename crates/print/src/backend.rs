@@ -8,9 +8,15 @@
 //! # Writing a backend
 //!
 //! * **Object safe, blocking, `Send + Sync`.** The registry stores `Arc<dyn Backend>` and calls
-//!   from whatever thread the app uses (a worker, by convention; printing is synchronous, as it is
-//!   for [`crate::submit`]). A backend that speaks a network protocol blocks on its own transport
-//!   inside [`Backend::submit`]; there is no async runtime in this crate.
+//!   from whatever thread the app uses (a worker, by convention). Every call is **bounded**: a
+//!   network backend blocks on its own transport for at most its per-request timeouts, never for
+//!   the length of a print. There is no async runtime in this crate.
+//! * **Submit and watch are separate.** [`Backend::submit`] returns a [`Submitted`] as soon as the
+//!   printer has *accepted* the document. What happens next is an optional capability: declare it
+//!   with [`Backend::watch_support`] and answer [`Backend::job_status`] (one request, no waiting)
+//!   and [`Backend::cancel_job`]. A backend that cannot say keeps the defaults: the status is
+//!   [`JobState::Unknown`], "accepted, outcome unknown". Callers follow a job with a
+//!   [`crate::JobWatch`]; [`crate::wait_for_job`] is the blocking convenience for a CLI.
 //! * **Cancellation and progress travel in the request**: [`SubmitRequest::cancel`] is polled at
 //!   the backend's own checkpoints (between sheets, between network round trips); progress is the
 //!   same `(processed, sheets)` callback as [`crate::submit_with_progress`]. Neither is required:
@@ -29,13 +35,18 @@
 //! * **Consent.** A backend whose [`Backend::class`] is [`BackendClass::Network`] only receives
 //!   requests that carry a [`UserConfirmed`]; the registry enforces it so a backend cannot forget.
 //! * **Errors are neutral**: choose an [`ErrorKind`] and attach the native code with
-//!   [`PrintError::with_native`].
+//!   [`PrintError::with_native`]. Say where it failed ([`PrintError::with_phase`]) and whether a
+//!   retry could print twice ([`PrintError::with_safety`]; [`RetrySafety::OutcomeUnknown`] after a
+//!   request that may have arrived). Offer a way to reconcile if you can.
 //! * **Registration**: `registry.register(Box::new(MyBackend::new()))`, once at start-up. The
 //!   process-wide registry ([`crate::registry`]) already holds the platform's built-in backend.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
+use crate::job::{JobRef, JobState, JobStatus, Submitted, WatchSupport};
+use crate::retry::{Phase, RetrySafety};
 use crate::{Error, Job, PrinterOption};
 
 /// A native error code and the domain that owns it. `domain` names the code space:
@@ -82,9 +93,23 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    /// Whether trying the same request again later can succeed.
+    /// Whether the condition is transient: trying the same request again later can succeed.
+    /// This says nothing about whether a retry is *safe*; see [`PrintError::retry_safety`].
     pub const fn is_retryable(self) -> bool {
         matches!(self, Self::Unavailable | Self::Busy | Self::Timeout)
+    }
+
+    /// The retry safety an error of this kind has unless its backend says otherwise.
+    ///
+    /// Refusals and conditions that arise before anything is accepted are [`RetrySafety::Safe`];
+    /// a timeout or a failure of unknown cause may have followed a delivered request, so it is
+    /// [`RetrySafety::OutcomeUnknown`]. A backend that knows better (a connect failure, a query)
+    /// overrides it with [`PrintError::with_safety`].
+    pub const fn default_retry_safety(self) -> RetrySafety {
+        match self {
+            Self::Timeout | Self::Failed => RetrySafety::OutcomeUnknown,
+            _ => RetrySafety::Safe,
+        }
     }
 }
 
@@ -94,11 +119,35 @@ pub struct PrintError {
     kind: ErrorKind,
     message: String,
     native: Option<NativeCode>,
+    phase: Option<Phase>,
+    safety: Option<RetrySafety>,
+    retry_after: Option<Duration>,
 }
 
 impl PrintError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into(), native: None }
+        Self { kind, message: message.into(), native: None, phase: None, safety: None, retry_after: None }
+    }
+
+    /// Where the failure happened ([`Phase`]).
+    #[must_use]
+    pub fn with_phase(mut self, phase: Phase) -> Self {
+        self.phase = Some(phase);
+        self
+    }
+
+    /// Whether repeating the request could duplicate it ([`RetrySafety`]).
+    #[must_use]
+    pub fn with_safety(mut self, safety: RetrySafety) -> Self {
+        self.safety = Some(safety);
+        self
+    }
+
+    /// How long the device (or the backend's sensible default for a busy device) says to wait.
+    #[must_use]
+    pub fn with_retry_after(mut self, wait: Duration) -> Self {
+        self.retry_after = Some(wait);
+        self
     }
 
     /// Attach the backend's own error code.
@@ -120,8 +169,32 @@ impl PrintError {
         self.native
     }
 
+    /// Whether the condition is transient (see [`ErrorKind::is_retryable`]). Not a licence to
+    /// resend: check [`Self::retry_safety`].
     pub fn is_retryable(&self) -> bool {
         self.kind.is_retryable()
+    }
+
+    /// Where it failed, when the backend said.
+    pub fn phase(&self) -> Option<Phase> {
+        self.phase
+    }
+
+    /// Whether a retry could print twice. When the backend did not say, the kind's default
+    /// ([`ErrorKind::default_retry_safety`]).
+    pub fn retry_safety(&self) -> RetrySafety {
+        self.safety.unwrap_or_else(|| self.kind.default_retry_safety())
+    }
+
+    /// The wait the device or backend suggests before another try, when there is one.
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
+    /// The request may have been delivered: reconcile (find out whether the job exists) before
+    /// submitting again.
+    pub fn outcome_unknown(&self) -> bool {
+        self.retry_safety() == RetrySafety::OutcomeUnknown
     }
 }
 
@@ -304,7 +377,8 @@ pub struct PrinterDetails {
     pub status: Option<PrinterStatus>,
 }
 
-/// What a backend returns for an accepted job. Receipts are messages, not portable job ids.
+/// A message about an accepted job and the backend's own job id, if any. The older view of a
+/// [`Submitted`] ([`Submitted::receipt`]); receipts are messages, not portable job ids.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Receipt {
     /// The backend's registry name.
@@ -374,7 +448,45 @@ pub trait Backend: Send + Sync {
     /// What one printer (a native id) can do. [`ErrorKind::NotFound`] for an unknown printer.
     fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError>;
 
-    /// Print. `request.job.printer` is a native id or `None` for the backend's default. The
-    /// registry has already checked the format, the consent and that the token is not cancelled.
-    fn submit(&self, request: SubmitRequest<'_>) -> Result<Receipt, PrintError>;
+    /// Hand the document to the printer and return **as soon as it has accepted it**: the call is
+    /// bounded by the backend's own per-request timeouts and never waits for the job to print.
+    /// `request.job.printer` is a native id or `None` for the backend's default. The registry has
+    /// already checked the format, the consent and that the token is not cancelled.
+    ///
+    /// Return [`Submitted::job`] when the backend has a handle for the job (`JobRef::new(native)`;
+    /// the registry namespaces it). An error that follows a request which may have arrived must say
+    /// so: [`PrintError::with_safety`]`(`[`RetrySafety::OutcomeUnknown`]`)`.
+    fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError>;
+
+    /// Whether and how this backend can report on a job after [`Backend::submit`]. Defaults to
+    /// [`WatchSupport::None`]: "accepted, outcome unknown".
+    fn watch_support(&self) -> WatchSupport {
+        WatchSupport::None
+    }
+
+    /// How often a caller should ask [`Backend::job_status`]; `None` when it should not.
+    /// Defaults from [`Backend::watch_support`]: 2 s for polling, 15 s as a safety net for events.
+    fn recommended_poll_interval(&self) -> Option<Duration> {
+        match self.watch_support() {
+            WatchSupport::None => None,
+            WatchSupport::Poll => Some(Duration::from_secs(2)),
+            WatchSupport::Events => Some(Duration::from_secs(15)),
+        }
+    }
+
+    /// The job's status: **one bounded request**, no waiting. Its errors are idempotent (repeating
+    /// is harmless). A job the device no longer knows is [`ErrorKind::NotFound`] (finished jobs are
+    /// forgotten; the message says so). The default answers [`JobState::Unknown`]: a backend that
+    /// cannot report keeps it, and callers do not poll it ([`WatchSupport::None`]).
+    fn job_status(&self, job: &JobRef) -> Result<JobStatus, PrintError> {
+        let _ = job;
+        Ok(JobStatus::new(JobState::Unknown))
+    }
+
+    /// Ask the device to cancel an accepted job. Cancelling a job that already ended is not an
+    /// error. The default is [`ErrorKind::Unsupported`].
+    fn cancel_job(&self, job: &JobRef) -> Result<(), PrintError> {
+        let _ = job;
+        Err(PrintError::new(ErrorKind::Unsupported, format!("the {} backend cannot cancel a job once it is accepted", self.name())))
+    }
 }

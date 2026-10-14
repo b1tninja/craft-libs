@@ -13,15 +13,18 @@
 
 mod backend;
 mod builtin;
+mod job;
 #[cfg(any(test, windows))]
 mod progress;
 mod registry;
+mod retry;
 #[cfg(any(test, windows))]
 mod sheets;
 #[cfg(test)]
 mod tests;
 #[cfg(any(test, windows))]
 mod ticket;
+mod watch;
 #[cfg(windows)]
 mod windows;
 
@@ -43,9 +46,13 @@ pub use backend::{
 };
 #[cfg(any(windows, all(unix, not(target_arch = "wasm32"))))]
 pub use builtin::SystemSpooler;
+pub use job::{JobRef, JobState, JobStatus, Submitted, WatchSupport};
 pub use registry::{
-    BackendError, Listing, RegisterError, Registry, list_printers, namespaced_id, printer_details, register, registry, split_id, submit_to_backend,
+    BackendError, Listing, RegisterError, Registry, cancel_job, job_status, list_printers, namespaced_id, printer_details, register, registry,
+    split_id, submit_job, submit_to_backend,
 };
+pub use retry::{CANCEL_SLICE, Clock, Jitter, ManualClock, Phase, RetryPolicy, RetrySafety, SystemClock, retry};
+pub use watch::{JobSource, JobWatch, WaitPolicy, WatchOutcome, WatchStep, wait_for_job};
 
 /// A system spooler failure. Document permissions belong to the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]

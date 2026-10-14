@@ -39,7 +39,7 @@ the domain crate's business. Public enums and records are `#[non_exhaustive]`; b
 | `id` | `JobId` of the accepted job (`wsd:...`, `cups:...`) | `JobId` of the acquisition (`wia:...`, `escl:...`) |
 | `kind` | `Print` | `Scan` |
 | `title` | job name as submitted (with the tag suffix) | the scan's name |
-| `state` | queued `Pending`, printing `Processing`, `Held`, `Completed`, `Cancelled`, `Aborted` | `Processing` while pages arrive; `NeedsAttention` for empty feeder or jam with pages kept; `CompletedWithErrors` for a partial stack |
+| `state` | queued `Pending`, printing `Processing`, `Held`, `Completed`, `Cancelled`, `Aborted`; `Abandoned` when the printer never reported an outcome | `Processing` while pages arrive; `NeedsAttention` for empty feeder or jam with pages kept; `CompletedWithErrors` for a partial stack |
 | `reasons` | printer state reasons as text | interrupt cause text |
 | `progress` | sheets done and expected total | pages received |
 | `times` | created, started, finished from the device or the caller | started and finished by the caller |

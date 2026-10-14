@@ -8,6 +8,10 @@
 //!
 //! The spooler is also available as a [`backends::Backend`] in a [`Registry`] that can hold other
 //! backends beside it (see the README); the functions of this crate are unchanged.
+//!
+//! With the `wsd` cargo feature (on by default, not for `wasm32`) there is also a WS-Print network
+//! backend, [`wsd::WsdBackend`]: it lists only printers the app adds, discovers nothing and needs
+//! consent for every job (see the README).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -27,6 +31,8 @@ mod ticket;
 mod watch;
 #[cfg(windows)]
 mod windows;
+#[cfg(all(feature = "wsd", not(target_arch = "wasm32")))]
+pub mod wsd;
 
 /// Native Windows driver settings, printable geometry and explicit RGB/GDI transport.
 /// Callers perform ICC conversion and compose page pixels/vector strokes. Other platforms

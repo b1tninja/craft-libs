@@ -11,8 +11,24 @@ description = "System PDF print spooler for the Craft apps: CUPS and Windows"
 # Safe API; Win32 calls are isolated in this maintained MIT OR Apache-2.0 dependency.
 craft-winprint-gdi = { git = "https://github.com/storytold/winprint.rs", rev = "417ac3c4d14d3da5485a99c7d5ce8f05664ec312" }
 
+[features]
+default = ["wsd"]
+# A WS-Print backend (`craft_print::wsd::WsdBackend`) for the registry. Its extra dependencies are
+# `craft-wsd` (and through it `thiserror` and `ureq`, a plain-http client with no TLS) and
+# `roxmltree`; nothing else, and none of them is built without the feature (or on wasm32).
+# Nothing in it discovers or connects until an app adds a printer; every job needs consent.
+# Without it the crate is CUPS and Windows printing only.
+wsd = ["dep:craft-wsd", "dep:roxmltree"]
+
 [lints]
 workspace = true
+
+# Not built for wasm32: there is no native HTTP client there, and the backend is cfg'd out.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# craft-wsd is pinned to the pull request's ref until that merges; then pin an immutable revision.
+craft-wsd = { git = "https://github.com/storytold/craft-libs", version = "0.1.0", rev = "refs/pull/113/head", optional = true }
+# Reading the printer's replies (the same crate and version the Windows code uses).
+roxmltree = { version = "0.20", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Printing without starting anything (storytold/pdfcraft#1107): the printer list (EnumPrinters)
@@ -32,6 +48,8 @@ roxmltree = "0.20"
 miniz_oxide = "0.8"
 
 [dev-dependencies]
+# The loopback `Server` for the WS-Print tests (needs the `wsd` feature; those tests are cfg-gated).
+craft-wsd = { git = "https://github.com/storytold/craft-libs", version = "0.1.0", rev = "refs/pull/113/head", features = ["testing"] }
 tempfile = "3"
 roxmltree = "0.20"
 miniz_oxide = "0.8"

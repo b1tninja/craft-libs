@@ -398,3 +398,14 @@ fn the_default_printers_details_are_used_when_the_request_names_no_printer() {
     registry.submit_job(SubmitRequest::new(Document::pdf(b"%PDF-1.7"), Job::default())).unwrap();
     assert_eq!(converter.calls()[0].2.resolution, Resolution::square(250));
 }
+
+#[test]
+fn per_printer_formats_are_read_for_the_default_printer_too() {
+    let details = PrinterDetails { formats: vec![PwgRaster], ..PrinterDetails::default() };
+    let device = Device::new(&[Pdf, PwgRaster]).per_printer().with_details(details);
+    let converter = Converter::making(&[PwgRaster]);
+    let registry = registry_with(&device, Some(converter.clone()));
+    let submitted = registry.submit_job(SubmitRequest::new(Document::pdf(b"%PDF-1.7"), Job::default())).unwrap();
+    assert_eq!(submitted.conversion.unwrap().to, PwgRaster);
+    assert_eq!(device.detail_calls(), 1);
+}

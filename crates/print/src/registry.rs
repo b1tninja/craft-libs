@@ -331,11 +331,11 @@ impl Registry {
         if details.is_none()
             && per_printer
             && converter.is_some()
-            && let Some(native) = native
+            && let Some(id) = printer_to_ask_about(backend, native)
         {
             // Asking a network printer is contact: it needs the person's yes like a job does.
             require_consent(backend, request)?;
-            details = Some(backend.printer_details(native)?);
+            details = Some(backend.printer_details(&id)?);
         }
         let accepted: Vec<DocumentFormat> = match details.as_ref().filter(|d| per_printer && !d.formats.is_empty()) {
             Some(d) => d.formats.iter().copied().filter(|f| backend.accepted_formats().contains(f)).collect(),
@@ -371,9 +371,7 @@ impl Registry {
         // The resolutions and the colour report come from the details; a backend whose list is exact
         // was not asked yet, and not being able to say is only a default.
         if details.is_none() {
-            // The default printer has no id in the request: its listing says which one it is.
-            let id = native.map(str::to_owned).or_else(|| backend.list_printers().ok()?.into_iter().find(|p| p.default).map(|p| p.id));
-            details = id.and_then(|id| backend.printer_details(&id).ok());
+            details = printer_to_ask_about(backend, native).and_then(|id| backend.printer_details(&id).ok());
         }
         let resolution = request
             .options
@@ -463,6 +461,15 @@ impl Registry {
         let backends = self.snapshot();
         let backend = Self::backend_of(&backends, job)?;
         Ok(JobWatch::new(job.clone(), policy).with_support(backend.watch_support()).with_recommended_interval(backend.recommended_poll_interval()))
+    }
+}
+
+/// The native id of the printer the request is for: the one it names, else the backend's default
+/// (its listing says which); `None` when there is neither.
+fn printer_to_ask_about(backend: &dyn Backend, native: Option<&str>) -> Option<String> {
+    match native {
+        Some(id) => Some(id.to_owned()),
+        None => backend.list_printers().ok()?.into_iter().find(|printer| printer.default).map(|printer| printer.id),
     }
 }
 

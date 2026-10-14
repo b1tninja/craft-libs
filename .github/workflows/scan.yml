@@ -25,4 +25,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy -p craft-scan --all-targets -- -D warnings
       - run: cargo test -p craft-scan --locked
+      - run: cargo clippy -p craft-scan --all-targets --features serde -- -D warnings
+      - run: cargo test -p craft-scan --features serde --locked
       - run: cargo check --target wasm32-unknown-unknown -p craft-scan --locked
+      - run: cargo check --target wasm32-unknown-unknown -p craft-scan --features serde --locked

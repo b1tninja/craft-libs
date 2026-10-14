@@ -116,6 +116,10 @@ No thread, clock, async or I/O. There is **no idempotency tag for a scan** (`Bac
 `TagSupport::None` everywhere) and a duplicate `acquire` moves the carriage and pulls paper. The states,
 continuation rules, what survives which failure and the limits are in [docs/scan-job.md](docs/scan-job.md).
 
+The optional `serde` feature (off by default) adds `Serialize`/`Deserialize` on the snapshot, a `ScanJobJournal` that a
+command-line run writes beside its pages, and the contract enums with their existing wire strings;
+`ScanJob::continuing_from(..)` starts a later run from the journal. Page bytes and tokens are never serialised.
+
 ## Environment variables
 
 | Variable | Meaning |

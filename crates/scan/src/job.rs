@@ -62,6 +62,7 @@ static NEXT_LOCAL_ID: AtomicU64 = AtomicU64::new(1);
 /// The id of a scan job inside this process. It never changes across attempts, so a UI row can bind to it.
 /// (A scan has no device-side job handle to use instead: see the design note.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LocalJobId(u64);
 
 impl LocalJobId {
@@ -83,6 +84,8 @@ impl fmt::Display for LocalJobId {
 /// that it can.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Continuation {
     /// Keep the pages and scan the missing ones after them. The attempt asks for what is left (when the
     /// total is known); the person has put the remaining sheets in the feeder.
@@ -104,6 +107,8 @@ impl Continuation {
 /// How a finished scan job ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum Outcome {
     /// Every page that was wanted arrived (or the feeder emptied normally).
     Completed,
@@ -134,6 +139,8 @@ impl Outcome {
 /// The lifecycle of the job as a whole. It is separate from anything the device reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ScanJobState {
     /// Created; the first attempt has not begun.
     Preparing,
@@ -173,6 +180,8 @@ impl ScanJobState {
 /// What a command-line tool maps to an exit code. Stable names; coarser than [`ScanJobState`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum ExitClass {
     /// Every wanted page arrived (or the feeder emptied normally).
     Completed,
@@ -367,6 +376,7 @@ pub struct AttemptPlan {
 
 /// One page, without its bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct PageInfo {
     /// 1-based position in the job.
     pub number: u32,
@@ -384,6 +394,8 @@ pub struct PageInfo {
 /// How an attempt ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum AttemptOutcome {
     /// Still running.
     InProgress,
@@ -402,6 +414,7 @@ pub enum AttemptOutcome {
 
 /// A failure of one attempt, as data.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttemptFailure {
     /// The kind, phase, native code and sentence of the error (see [`ScanErrorInfo`]).
     pub info: ScanErrorInfo,
@@ -414,13 +427,16 @@ pub struct AttemptFailure {
 
 /// One entry of the attempt timeline.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttemptRecord {
     pub number: u32,
     pub started: Timestamp,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub ended: Option<Timestamp>,
     pub continuation: Continuation,
     pub source_requested: Source,
     /// The source the transfer used, when known.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub source_used: Option<Source>,
     pub pages_before: u32,
     /// New pages this attempt kept (also when it failed).
@@ -428,11 +444,13 @@ pub struct AttemptRecord {
     /// How far it got when it stopped (`BeforeFirstPage`, `BetweenPages`, `MidPage`).
     pub phase: Option<Phase>,
     pub outcome: AttemptOutcome,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub error: Option<AttemptFailure>,
 }
 
 /// The page currently crossing the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct InFlight {
     pub percent: Option<u8>,
     pub bytes_received: u64,
@@ -442,30 +460,38 @@ pub struct InFlight {
 /// A cheap picture of the job: no page bytes, nothing that blocks. Clone it to a UI every frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScanJobSnapshot {
     pub id: LocalJobId,
     pub title: String,
     /// `ScanSettings::device` as given.
     pub device: String,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub device_name: Option<String>,
     pub state: ScanJobState,
     /// Nothing more will happen without a person or a new start.
     pub settled: bool,
     /// The pages kept so far, in order, with their sizes and sources. First-class: they survive a failed attempt.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub pages: Vec<PageInfo>,
     /// Bytes of the kept pages.
     pub bytes: u64,
     /// Pages wanted, when known (`ScanSettings::pages`, not for hardware duplex). `None` is "the whole feeder".
     pub expected_pages: Option<u32>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub in_flight: Option<InFlight>,
     pub source_requested: Source,
     /// The source of the latest attempt, when known.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub source_in_use: Option<Source>,
     /// Attempts made, including ones dropped from the timeline.
     pub attempts_total: u32,
     /// The latest attempts, oldest first (bounded by `ScanJobConfig::timeline_len`).
+    #[cfg_attr(feature = "serde", serde(default))]
     pub attempts: Vec<AttemptRecord>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub last_error: Option<AttemptFailure>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub warnings: Vec<String>,
     pub advice: RetryAdvice,
     /// The person asked to stop; the running attempt has not ended yet.
@@ -476,7 +502,99 @@ pub struct ScanJobSnapshot {
     pub tag_support: TagSupport,
 }
 
+/// `PageInfo` as read: `format` is a `&'static str`, so it is matched against the formats a page can carry
+/// (`bmp`, `png`, `jpeg`, `tiff`, `pdf`); anything else reads as `bin`, which [`crate::image_format`] also
+/// answers for bytes it does not know.
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for PageInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            number: u32,
+            #[serde(default)]
+            attempt: u32,
+            #[serde(default)]
+            source: Option<Source>,
+            format: String,
+            #[serde(default)]
+            width: u32,
+            #[serde(default)]
+            height: u32,
+            #[serde(default)]
+            dpi: u32,
+            #[serde(default)]
+            bytes: u64,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let format = ["bmp", "png", "jpeg", "tiff", "pdf"].into_iter().find(|f| *f == wire.format).unwrap_or("bin");
+        Ok(Self {
+            number: wire.number,
+            attempt: wire.attempt,
+            source: wire.source,
+            format,
+            width: wire.width,
+            height: wire.height,
+            dpi: wire.dpi,
+            bytes: wire.bytes,
+        })
+    }
+}
+
+/// What a command-line run writes down so a later run can continue: [`ScanJobSnapshot::into_journal`] makes
+/// it, [`ScanJob::continuing_from`] reads it. Plain data (with the `serde` feature, also JSON); the app owns
+/// the file and the page files it describes. Never page bytes, tokens or the request itself: the app keeps
+/// its own `ScanSettings` (device, resolution, colour, ...) and passes it back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ScanJobJournal {
+    /// [`Self::VERSION`] when written. A reader ignores fields it does not know and defaults ones it lacks.
+    #[cfg_attr(feature = "serde", serde(default = "ScanJobJournal::current_version"))]
+    pub version: u32,
+    pub title: String,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub device: String,
+    pub state: ScanJobState,
+    /// The wanted page count, when one was set.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub expected_pages: Option<u32>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub attempts_total: u32,
+    /// The kept pages, without bytes.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub pages: Vec<PageInfo>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub last_error: Option<AttemptFailure>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub warnings: Vec<String>,
+}
+
+impl ScanJobJournal {
+    /// The journal format version this crate writes.
+    pub const VERSION: u32 = 1;
+
+    #[cfg(feature = "serde")]
+    fn current_version() -> u32 {
+        Self::VERSION
+    }
+}
+
 impl ScanJobSnapshot {
+    /// The part of the snapshot a later run needs; see [`ScanJobJournal`].
+    pub fn into_journal(self) -> ScanJobJournal {
+        ScanJobJournal {
+            version: ScanJobJournal::VERSION,
+            title: self.title,
+            device: self.device,
+            state: self.state,
+            expected_pages: self.expected_pages,
+            attempts_total: self.attempts_total,
+            pages: self.pages,
+            last_error: self.last_error,
+            warnings: self.warnings,
+        }
+    }
+
     /// [`ScanJobState::exit_class`] of the state.
     pub fn exit_class(&self) -> ExitClass {
         self.state.exit_class()
@@ -632,6 +750,31 @@ impl ScanJob {
         }
         job.state = ScanJobState::Interrupted;
         job.advice = RetryAdvice::DoNotRetry;
+        job
+    }
+
+    /// [`Self::continuing`] from a [`ScanJobJournal`]. The job starts `NeedsAttention` if the journal says the
+    /// outcome was unknown (and stays `CheckDeviceFirst`), else `Interrupted`; the last error, the warnings and
+    /// the attempt count carry over. `settings` is the original request; when its `pages` is `0` and the journal
+    /// knows the wanted count, that count is used, so `--continue DIR` needs no `--pages`.
+    pub fn continuing_from(settings: ScanSettings, config: ScanJobConfig, journal: ScanJobJournal) -> Self {
+        let mut settings = settings;
+        if settings.pages == 0 && !settings.duplex {
+            settings.pages = journal.expected_pages.unwrap_or(0);
+        }
+        let unknown = journal.state == ScanJobState::NeedsAttention;
+        let attempts = journal.attempts_total;
+        let mut job = Self::continuing(settings, config, journal.pages);
+        if job.infos.is_empty() {
+            return job;
+        }
+        job.attempts_total = job.attempts_total.max(attempts);
+        job.last_error = journal.last_error;
+        job.warnings = journal.warnings;
+        if unknown {
+            job.state = ScanJobState::NeedsAttention;
+            job.advice = RetryAdvice::CheckDeviceFirst;
+        }
         job
     }
 

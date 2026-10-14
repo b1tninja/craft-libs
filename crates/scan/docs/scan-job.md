@@ -229,3 +229,36 @@ is `ScanJob::new`.
 For the terminal, `ScanJobSnapshot::summary_line()` gives `Archive: interrupted, 12 of 40 pages, 1 attempt, jam`
 (plain ASCII) and `exit_class()` (also on `ScanJobState`) gives an `ExitClass` with stable names: `completed`,
 `needs_attention` (any state that is not an end, and a partial stack), `failed`, `cancelled` (both cancels).
+
+## 12. Journal and the optional `serde` feature
+
+`craft-scan = { features = ["serde"] }` (off by default; it also turns on `craft-job/serde`) derives
+`Serialize` and `Deserialize` on `ScanJobSnapshot`, `ScanJobJournal`, `PageInfo`, `AttemptRecord`, `AttemptFailure`,
+`AttemptOutcome`, `InFlight`, `ScanJobState`, `Outcome`, `ExitClass`, `Continuation`, `LocalJobId`, `ScanErrorInfo`,
+and on the contract enums, **with the wire strings they always had** (`Source`, `Color`, `Intent`, `PageSize`,
+`ImageFormat`, `Compression`, `Connection`, `InterruptKind`, `Phase`, `ListDetails`; `Source` also reads its
+aliases). `ScanJob` itself is deliberately not serialisable: it holds tokens and page bytes.
+
+**The journal.** `snapshot.into_journal()` returns a `ScanJobJournal` (plain data even without the feature):
+`version`, `title`, `device`, `state`, `expected_pages`, `attempts_total`, the kept `pages` (metadata only),
+`last_error` and `warnings`. The CLI writes it as JSON beside the page files after every attempt (and
+`record_progress`, if it wants to survive a crash). A later `scan --continue DIR` reads it and calls
+`ScanJob::continuing_from(settings, config, journal)`:
+
+* the job is `NeedsAttention` (advice `CheckDeviceFirst`) if the journal's state was `NeedsAttention`, else
+  `Interrupted`; the last error, warnings and attempt count carry over;
+* `settings` is the app's own request (device, resolution, colour, ...); the journal does not carry it. If its
+  `pages` is `0` and the journal knows the wanted count, that count is used, so the continuation needs no `--pages`;
+* the app maps `Continuation::Append` to "the person put the remaining sheets in" and asks.
+Without the feature `ScanJob::continuing(settings, config, pages)` does the same from pages the app tracked itself.
+
+**What is deliberately not persisted**: page bytes (the app owns the files), the `ProgressToken` and `CancelToken`,
+the `ScanSettings`, the retry budget and the jitter seed (a new process starts a new budget), and the attempt
+timeline of earlier runs beyond the count and the last error.
+
+**Forward compatibility.** Names are snake_case. Unknown fields are ignored and fields an older writer lacked are
+defaulted. A page `format` this version does not know reads as `bin`; an unknown `InterruptKind` reads as `other`
+(craft-job's `Unknown` fallbacks cover job and device state). Other enums fail on an unknown value rather than
+guess. `version` is written as `ScanJobJournal::VERSION` (1); additions keep it, a change that cannot be read by
+an older reader raises it. Durations and timestamps are milliseconds (craft-job README, "Wire format").
+

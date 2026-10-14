@@ -29,11 +29,12 @@ mod backend;
 pub mod bmp;
 pub mod bw;
 mod contract;
+pub mod job;
 pub mod trace;
 
 pub use backend::{
     Backend, BackendError, Listing, RegisterError, Registry, acquire, backend_names, diagnostic_dump, global, register, scanner_details,
-    scanner_list, scanners, status, supported,
+    scanner_list, scanners, status, supported, tag_support,
 };
 pub use contract::{
     Compression, ErrorContext, ImageFormat, ListDetails, NativeCodeExt, ParseWireError, Phase, Recovery, ScanErrorInfo, contract_json, recovery,

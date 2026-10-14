@@ -50,7 +50,7 @@
 
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
-use craft_job::{BackendName, namespaced_id, split_id};
+use craft_job::{BackendName, TagSupport, namespaced_id, split_id};
 
 use crate::{Acquired, HandlingStatus, ScanError, ScanSettings, Scanner, ScannerRef};
 #[cfg(doc)]
@@ -79,6 +79,16 @@ pub trait Backend: Send + Sync {
     fn status(&self, native_id: &str) -> Option<HandlingStatus> {
         let _ = native_id;
         None
+    }
+
+    /// Whether the backend can carry an idempotency tag through to a job listing, so that a scan whose
+    /// connection dropped could be recognised on the device afterwards. **`None` for every backend there is**:
+    /// WIA and the inbox WSD driver have no job tag to set, SANE has no job list, and nothing in
+    /// [`ScanSettings`] carries a job name. eSCL has `ScanJobs` and WS-Scan has job status, which a backend
+    /// could one day read; until one does, a scan whose outcome is unknown is `CheckDeviceFirst`
+    /// (see `ScanJob`). Reads nothing from the device.
+    fn tag_support(&self) -> TagSupport {
+        TagSupport::None
     }
 
     /// Backend-specific diagnostic text for the devices matching `filter` (an empty filter is every
@@ -245,6 +255,13 @@ impl Registry {
         Ok(backend.status(native))
     }
 
+    /// [`Backend::tag_support`] of the backend that owns the namespaced scanner id.
+    pub fn tag_support(&self, id: &str) -> Result<TagSupport, ScanError> {
+        let backends = self.snapshot();
+        let (backend, _) = Self::by_prefix(&backends, id)?;
+        Ok(backend.tag_support())
+    }
+
     /// Diagnostic text from the backends: one section per backend, headed `== <name> ==`, with a
     /// failing backend's error in its section. A `filter` that starts with a registered prefix
     /// (`sane:pixma`) goes to that backend alone, without the prefix.
@@ -347,6 +364,11 @@ pub fn scanners() -> Result<Listing<Scanner>, ScanError> {
 /// What the paper path is doing before a scan. See [`Registry::status`].
 pub fn status(id: &str) -> Result<Option<HandlingStatus>, ScanError> {
     global().status(id)
+}
+
+/// Whether the scanner's backend can carry a tag. See [`Registry::tag_support`].
+pub fn tag_support(id: &str) -> Result<TagSupport, ScanError> {
+    global().tag_support(id)
 }
 
 /// Backend diagnostics. See [`Registry::diagnostic_dump`].

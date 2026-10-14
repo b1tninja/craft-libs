@@ -370,10 +370,10 @@ impl Registry {
         require_consent(backend, request)?;
         // The resolutions and the colour report come from the details; a backend whose list is exact
         // was not asked yet, and not being able to say is only a default.
-        if details.is_none()
-            && let Some(native) = native
-        {
-            details = backend.printer_details(native).ok();
+        if details.is_none() {
+            // The default printer has no id in the request: its listing says which one it is.
+            let id = native.map(str::to_owned).or_else(|| backend.list_printers().ok()?.into_iter().find(|p| p.default).map(|p| p.id));
+            details = id.and_then(|id| backend.printer_details(&id).ok());
         }
         let resolution = request
             .options

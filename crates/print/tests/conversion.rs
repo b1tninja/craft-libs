@@ -389,3 +389,12 @@ fn an_app_converter_can_pack_pages_with_the_public_pwg_encoder() {
     assert_eq!(submitted.conversion.unwrap().bytes, sent.bytes.len());
     assert_eq!(sent.resolution, Some(Resolution::square(200)));
 }
+
+#[test]
+fn the_default_printers_details_are_used_when_the_request_names_no_printer() {
+    let device = Device::new(&[PwgRaster]).with_details(res(&[100, 250, 600]));
+    let converter = Converter::making(&[PwgRaster]);
+    let registry = registry_with(&device, Some(converter.clone()));
+    registry.submit_job(SubmitRequest::new(Document::pdf(b"%PDF-1.7"), Job::default())).unwrap();
+    assert_eq!(converter.calls()[0].2.resolution, Resolution::square(250));
+}

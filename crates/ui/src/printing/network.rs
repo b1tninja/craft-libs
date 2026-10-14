@@ -64,6 +64,9 @@ impl Orientation {
     }
 }
 
+/// Print quality, the choices of the dialog. `Photo` is offered only for a printer that lists it
+/// ([`Draft::offered_qualities`]); a host maps each to its client's quality setting (`craft-print`
+/// has the same four).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Quality {
     Draft,
@@ -74,6 +77,11 @@ pub enum Quality {
 
 impl Quality {
     pub const ALL: [Quality; 4] = [Self::Draft, Self::Normal, Self::High, Self::Photo];
+
+    /// The quality a printer's token names (`"Photo"`; ASCII case does not matter).
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|q| q.token().eq_ignore_ascii_case(token.trim()))
+    }
 
     pub const fn token(self) -> &'static str {
         match self {

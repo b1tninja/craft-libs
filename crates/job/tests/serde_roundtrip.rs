@@ -45,6 +45,7 @@ fn enums_use_snake_case_and_unknown_values_fall_back() {
     assert_eq!(round(&JobKind::Scan), "\"scan\"");
     assert_eq!(round(&JobState::CompletedWithErrors), "\"completed_with_errors\"");
     assert_eq!(round(&JobState::NeedsAttention), "\"needs_attention\"");
+    assert_eq!(round(&JobState::Abandoned), "\"abandoned\"");
     assert_eq!(serde_json::from_str::<JobState>("\"from_the_future\"").expect("falls back"), JobState::Unknown);
     assert_eq!(serde_json::from_str::<DeviceState>("\"hibernating\"").expect("falls back"), DeviceState::Unknown);
     assert_eq!(serde_json::from_str::<DeviceConnection>("\"bluetooth\"").expect("falls back"), DeviceConnection::Unknown);

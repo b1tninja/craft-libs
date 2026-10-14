@@ -227,6 +227,23 @@ fn an_accepted_job_is_followed_to_completion_with_the_blocking_convenience() {
 }
 
 #[test]
+fn zero_or_too_few_copies_are_refused_before_anything_is_sent_and_never_become_the_maximum() {
+    // The fake lists copies 1..=99.
+    let (p, _b, r) = setup(FakeConfig { max_copies: 99, ..FakeConfig::default() });
+    let e = r.submit(request(Job { copies: 0, ..job(URL) })).unwrap_err();
+    assert_eq!((e.kind(), e.phase(), e.retry_safety()), (ErrorKind::InvalidRequest, Some(Phase::Prepare), RetrySafety::Safe));
+    assert!(!e.is_retryable());
+    assert_eq!(p.jobs(), 0, "no job was created");
+    assert!(!p.actions().iter().any(|a| a == "CreatePrintJob" || a == "SendDocument"), "{:?}", p.actions());
+    // Above the maximum keeps the lowering, with the warning.
+    let receipt = r.submit(request(Job { copies: 120, ..job(URL) })).unwrap();
+    assert!(p.job(1).unwrap().ticket.contains(">99</"));
+    assert!(receipt.message.contains("warnings"), "{}", receipt.message);
+    // One copy and an in-range count are accepted.
+    assert!(r.submit(request(Job { copies: 1, ..job(URL) })).is_ok());
+}
+
+#[test]
 fn network_jobs_need_consent_and_nothing_is_sent_without_it() {
     let (p, _b, r) = setup(FakeConfig::default());
     let e = r.submit(SubmitRequest::new(Document::pdf(PDF), job(URL))).unwrap_err();

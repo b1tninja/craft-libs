@@ -114,6 +114,21 @@ fn a_long_title_is_cut_so_that_the_tag_survives_the_255_character_limit() {
 }
 
 #[test]
+fn zero_copies_end_failed_with_do_not_retry_and_nothing_is_sent() {
+    let rig = rig(0);
+    let job = Job { printer: Some(format!("wsd:{URL}")), title: "Zero".into(), copies: 0, ..Job::default() };
+    let mut job = PrintJob::new(job, BytesSource::new(DocumentFormat::Pdf, PDF.to_vec()))
+        .with_clock(Arc::new(rig.clock.clone()))
+        .with_consent(UserConfirmed::interactive());
+    drive(&mut job, &rig);
+    assert_eq!(job.state(), LifecycleState::Terminal(Outcome::Failed), "{:?}", job.snapshot().last_error);
+    assert_eq!(job.snapshot().advice, RetryAdvice::DoNotRetry);
+    assert_eq!(rig.printer.jobs(), 0, "no job was created");
+    let actions = rig.printer.actions();
+    assert!(!actions.iter().any(|a| a == "CreatePrintJob" || a == "SendDocument"), "{actions:?}");
+}
+
+#[test]
 fn a_lost_send_reply_is_reconciled_by_tag_and_nothing_is_sent_twice() {
     let printer = FakePrinter::new(FakeConfig::default());
     foreign(&registry_over(&printer, 0), "Quarterly report"); // an earlier job with the very same title

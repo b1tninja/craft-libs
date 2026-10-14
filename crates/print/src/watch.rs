@@ -19,10 +19,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use craft_job::{ExpectedTotals, Jitter, JobId, JobState, RetryAdvice, RetryPolicy};
+
 use crate::backend::{CancelToken, ErrorKind, PrintError};
-use crate::job::{ExpectedTotals, JobId, JobState, JobStatus, Submitted, WatchSupport};
+use crate::job::{ExpectedTotalsExt as _, JobStatus, Submitted, WatchSupport};
 use crate::registry::Registry;
-use crate::retry::{CANCEL_SLICE, Clock, Jitter, RetryPolicy, SystemClock};
+use crate::retry::{CANCEL_SLICE, Clock, JitterExt as _, SystemClock, advise_error};
 
 /// Where a watch gets status from and sends cancels to. The [`Registry`] is one (by job id); a
 /// test can supply its own.
@@ -406,7 +408,12 @@ impl JobWatch {
     /// and cancels are idempotent), else end the watch.
     fn failed(&mut self, error: PrintError, now: Duration) -> WatchStep {
         self.failures = self.failures.saturating_add(1);
-        match self.policy.retry.next_delay(&error, self.failures, self.jitter.unit()) {
+        let wait = match advise_error(&error, self.failures, &self.policy.retry, &mut self.jitter) {
+            RetryAdvice::RetryNow => Some(Duration::ZERO),
+            RetryAdvice::RetryAfter(wait) => Some(wait),
+            _ => None,
+        };
+        match wait {
             Some(next_in) => {
                 self.next_at = now.saturating_add(next_in);
                 WatchStep::Retrying { error, attempt: self.failures, next_in }
@@ -538,7 +545,7 @@ mod tests {
             Ok(status(JobState::Processing)),
             Ok(status(JobState::Processing)),
             Ok(status(JobState::Processing)),
-            Ok(status(JobState::Stopped)),
+            Ok(status(JobState::NeedsAttention)),
             Ok(status(JobState::Completed)),
         ]);
         let policy =
@@ -699,7 +706,10 @@ mod tests {
         );
         assert_eq!(t(JobState::CompletedWithErrors, &[]).map(|e| e.kind()), Some(ErrorKind::Failed));
         assert_eq!(t(JobState::Completed, &[]), None);
-        assert_eq!(t(JobState::CompletedWithWarnings, &["w"]), None);
+        let mut warned = status(JobState::Completed);
+        warned.warnings.push("job completed with warnings".into());
+        let outcome = WatchOutcome::Terminal(warned);
+        assert!(outcome.error().is_none() && outcome.is_success(), "warnings are not a failure");
         assert!(WatchOutcome::Forgotten { last: None }.error().is_none() && WatchOutcome::NoStatus.error().is_none());
     }
 

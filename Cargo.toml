@@ -13,7 +13,7 @@ repository = "https://github.com/storytold/craft-libs"
 # internal: add each crate here as `craft-<name> = { path = "crates/<name>" }`
 craft-atomic = { path = "crates/atomic" }
 craft-cms = { path = "crates/cms" }
-craft-job = { path = "crates/job" }
+craft-job = { path = "crates/job", version = "0.1.0" }
 craft-print = { path = "crates/print" }
 craft-quit = { path = "crates/quit" }
 craft-settings = { path = "crates/settings" }

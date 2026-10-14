@@ -32,13 +32,15 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use craft_job::{JobId, JobState, Progress, Tag, TagPlacement, TagSupport};
+
 use crate::backend::{
-    Backend, BackendClass, DocumentFormat, ErrorKind, JobHint, PrintError, PrinterDetails, PrinterRef, PrinterStatus, Progress, SubmitRequest,
+    Backend, BackendClass, DocumentFormat, ErrorKind, JobHint, PrintError, PrinterDetails, PrinterRef, PrinterStatus, SubmitRequest,
 };
-use crate::job::{JobId, JobState, JobStatus, Submitted, WatchSupport};
+use crate::job::{JobStatus, Submitted, WatchSupport};
 use crate::options::JobOptions;
 use crate::remote::{JobFilter, JobQueryCaps, RemoteJob, filter_jobs};
-use crate::tag::{JobTag, TagPlacement, TagSupport};
+use crate::tag::TagExt as _;
 use crate::{Job, PrinterOption};
 
 /// What a [`FakeBackend`] was asked to print.
@@ -56,7 +58,7 @@ pub struct Submission {
     pub consented: bool,
     /// The idempotency tag the request carried (the registry removes it when the fake's
     /// [`TagSupport`] is none).
-    pub tag: Option<JobTag>,
+    pub tag: Option<Tag>,
     /// The document name the tag was put on, with [`TagPlacement::DocumentName`].
     pub document_name: Option<String>,
 }
@@ -152,7 +154,7 @@ impl FakeBackend {
             poll_interval: None,
             can_cancel: true,
             submitted_status: None,
-            tag_support: TagSupport::NONE,
+            tag_support: TagSupport::None,
             query_caps: JobQueryCaps::NONE,
             user: "fake-user".into(),
             created_at: Arc::new(SystemTime::now),
@@ -176,7 +178,7 @@ impl FakeBackend {
         Self::new(name)
             .with_class(BackendClass::Network)
             .with_watch(WatchSupport::Poll)
-            .with_tag_support(TagSupport::new(TagPlacement::Native, true))
+            .with_tag_support(TagSupport::Carried(TagPlacement::NativeAttribute))
             .with_query_caps(JobQueryCaps::ALL)
     }
 
@@ -417,12 +419,12 @@ impl Backend for FakeBackend {
 
     fn submit(&self, mut request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         // The backend carries the tag where its support says, exactly once.
-        let placement = self.config.tag_support.placement;
-        let tag = request.tag.clone();
+        let placement = self.config.tag_support.placement();
+        let tag = request.tag;
         let mut document_name = None;
         if let Some(tag) = &tag {
             match placement {
-                TagPlacement::JobName => request.job.title = tag.apply_to(&request.job.title, self.config.title_max),
+                TagPlacement::JobNameSuffix => request.job.title = tag.apply_to(&request.job.title, self.config.title_max),
                 TagPlacement::DocumentName => document_name = Some(tag.apply_to(&request.job.title, self.config.title_max)),
                 _ => {}
             }
@@ -438,7 +440,7 @@ impl Backend for FakeBackend {
                 job: request.job.clone(),
                 options: request.options.clone(),
                 consented: request.consent.is_some(),
-                tag: tag.clone(),
+                tag,
                 document_name,
             });
             let step = if recorded.submit_script.is_empty() { None } else { Some(recorded.submit_script.remove(0)) };
@@ -466,10 +468,10 @@ impl Backend for FakeBackend {
             if self.config.query_caps.created_time {
                 remote = remote.with_created((self.config.created_at)());
             }
-            if placement == TagPlacement::Native
+            if placement == TagPlacement::NativeAttribute
                 && let Some(tag) = &tag
             {
-                remote = remote.with_tag(tag.clone());
+                remote = remote.with_tag(*tag);
             }
             lock(&self.recorded).jobs.push(remote);
         }

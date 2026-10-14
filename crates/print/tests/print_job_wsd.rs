@@ -13,8 +13,8 @@ use craft_print::wsd::WsdBackend;
 use craft_print::wsd::adapter::{DeviceUrl, Request, Response, Transport, TransportKind, WireError};
 use craft_print::wsd::testing::{FakeConfig, FakePrinter};
 use craft_print::{
-    BytesSource, Document, DocumentFormat, Fingerprint, Job, JobFilter, JobTag, LifecycleState, ManualClock, Outcome, PrintJob, Reconciled, Registry,
-    RetryAdvice, SubmitRequest, TagPlacement, TagPolicy, UserConfirmed,
+    BytesSource, Document, DocumentFormat, Fingerprint, Job, JobFilter, LifecycleState, ManualClock, Outcome, PrintJob, Reconciled, Registry,
+    RetryAdvice, SubmitRequest, Tag, TagExt as _, TagPlacement, TagPolicy, Timestamp, UserConfirmed,
 };
 
 const URL: &str = "http://127.0.0.1:5357/print";
@@ -89,7 +89,7 @@ fn foreign(registry: &Registry, title: &str) {
 fn the_tag_is_a_suffix_of_the_ticket_job_name_and_the_snapshot_says_how_it_was_sent() {
     let rig = rig(0);
     let mut job = print_job(&rig, "Quarterly report");
-    let tag = job.tag().clone();
+    let tag = *job.tag();
     drive(&mut job, &rig);
     assert_eq!(job.state(), LifecycleState::Terminal(Outcome::Completed));
     let stored = rig.printer.job(1).unwrap();
@@ -99,18 +99,18 @@ fn the_tag_is_a_suffix_of_the_ticket_job_name_and_the_snapshot_says_how_it_was_s
     assert!(snapshot.tag_applied);
     let effective = snapshot.native.unwrap().effective.unwrap();
     assert!(effective.contains("ticket shape full"), "{effective}");
-    assert_eq!(rig.registry.backend_info(Some(&format!("wsd:{URL}"))).unwrap().tag_support.placement, TagPlacement::JobName);
+    assert_eq!(rig.registry.backend_info(Some(&format!("wsd:{URL}"))).unwrap().tag_support.placement(), TagPlacement::JobNameSuffix);
 }
 
 #[test]
 fn a_long_title_is_cut_so_that_the_tag_survives_the_255_character_limit() {
     let rig = rig(0);
     let mut job = print_job(&rig, &"x".repeat(400));
-    let tag = job.tag().clone();
+    let tag = *job.tag();
     drive(&mut job, &rig);
     let name = rig.printer.job(1).unwrap().name;
     assert_eq!(name.chars().count(), 255);
-    assert_eq!(JobTag::find_in(&name), Some(tag));
+    assert_eq!(Tag::find_in(&name), Some(tag));
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn a_lost_send_reply_is_reconciled_by_tag_and_nothing_is_sent_twice() {
     assert_eq!(sends(), 2, "the second copy was never sent");
 
     // The same lookup by title alone cannot tell the two apart.
-    let result = rig.registry.find_job(&format!("wsd:{URL}"), &Fingerprint::new("Quarterly report")).unwrap();
+    let result = rig.registry.find_job(&format!("wsd:{URL}"), &Fingerprint::new("Quarterly report", Timestamp::default())).unwrap();
     assert!(matches!(&result, Reconciled::Ambiguous(jobs) if jobs.len() == 2 && jobs.iter().all(|j| !j.ours)), "{result:?}");
 }
 
@@ -156,7 +156,7 @@ fn without_the_tag_a_lost_reply_reconciles_only_by_title_and_is_ambiguous_when_t
     assert_eq!(rig.printer.job(2).unwrap().name, "Quarterly report", "no tag was sent");
     let found = job.reconcile(&rig.registry).unwrap();
     assert!(matches!(&found, Reconciled::Ambiguous(jobs) if jobs.len() == 2 && jobs.iter().all(|j| !j.ours)), "{found:?}");
-    assert_eq!(job.snapshot().advice, RetryAdvice::CheckPrinterFirst);
+    assert_eq!(job.snapshot().advice, RetryAdvice::CheckDeviceFirst);
 }
 
 #[test]
@@ -165,7 +165,7 @@ fn list_jobs_returns_active_and_finished_jobs_with_title_user_and_state() {
     foreign(&rig.registry, "First");
     let mut mine = print_job(&rig, "Second");
     drive(&mut mine, &rig);
-    let listed = rig.registry.list_jobs(&format!("wsd:{URL}"), &JobFilter::new().marking(mine.tag().clone())).unwrap();
+    let listed = rig.registry.list_jobs(&format!("wsd:{URL}"), &JobFilter::new().marking(*mine.tag())).unwrap();
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].id.to_string(), format!("wsd:{URL}#2"), "newest first");
     assert!(listed[0].ours && !listed[1].ours);

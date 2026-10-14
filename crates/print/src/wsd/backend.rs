@@ -15,12 +15,11 @@ use super::mtom::Transfer;
 use super::ops::JobSection;
 use super::policy::{NetworkLimits, PrinterUrl};
 use super::ticket::{self, Sides, TicketShape};
-use crate::backends::{
-    Backend, BackendClass, DocumentFormat, JobHint, PrinterDetails, PrinterRef, PrinterState, PrinterStatus, Progress, SubmitRequest,
-};
+use crate::backends::{Backend, BackendClass, DocumentFormat, JobHint, PrinterDetails, PrinterRef, PrinterState, PrinterStatus, SubmitRequest};
 use crate::{
-    ColourMode, Duplex, ErrorKind, Fingerprint, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobStatus, JobTag, PrintError,
-    Reconciled as FoundJobs, RemoteJob, Scaling, Submitted, TagPlacement, TagSupport, WatchSupport, filter_jobs, reconcile_jobs,
+    ColourMode, Duplex, ErrorKind, Fingerprint, FingerprintExt as _, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobStatus, PrintError,
+    Progress, Reconciled as FoundJobs, RemoteJob, Scaling, Submitted, Tag, TagExt as _, TagPlacement, TagSupport, TagSupportExt as _, WatchSupport,
+    filter_jobs, reconcile_jobs,
 };
 
 /// The registry name and id prefix.
@@ -260,7 +259,7 @@ impl WsdBackend {
     }
 
     /// The options of one job. The returned strings are what could not be applied.
-    fn options(&self, job: &Job, per_job: &JobOptions, tag: Option<&JobTag>) -> (PrintOptions, Vec<String>) {
+    fn options(&self, job: &Job, per_job: &JobOptions, tag: Option<&Tag>) -> (PrintOptions, Vec<String>) {
         let mut notes = Vec::new();
         let config = &*self.config;
         let sides = job.duplex.map(|d| match d {
@@ -530,7 +529,7 @@ impl Backend for WsdBackend {
     /// fits the 255 characters), and `GetActiveJobs` / `GetJobHistory` return the name, so a
     /// listing can match it.
     fn tag_support(&self) -> TagSupport {
-        TagSupport::new(TagPlacement::JobName, true)
+        TagSupport::Carried(TagPlacement::JobNameSuffix)
     }
 
     /// Active jobs and history, with the user; no creation time (job summaries do not carry one).
@@ -551,7 +550,7 @@ impl Backend for WsdBackend {
         let mut fingerprint = fingerprint.clone();
         fingerprint.user.get_or_insert_with(|| self.config.user_name.clone());
         let support = self.tag_support();
-        let jobs = self.list_jobs(printer_native, &fingerprint.filter(support.matchable))?;
+        let jobs = self.list_jobs(printer_native, &fingerprint.filter(support.matchable()))?;
         Ok(reconcile_jobs(jobs, &fingerprint, support))
     }
 }
@@ -585,9 +584,8 @@ fn neutral_status(status: &model::JobStatus) -> JobStatus {
         model::JobState::Pending => crate::JobState::Pending,
         model::JobState::PendingHeld => crate::JobState::Held,
         model::JobState::Processing | model::JobState::Started | model::JobState::Terminating => crate::JobState::Processing,
-        model::JobState::ProcessingStopped => crate::JobState::Stopped,
+        model::JobState::ProcessingStopped => crate::JobState::NeedsAttention,
         model::JobState::Completed if has(JobReason::JobCompletedWithErrors) => crate::JobState::CompletedWithErrors,
-        model::JobState::Completed if has(JobReason::JobCompletedWithWarnings) => crate::JobState::CompletedWithWarnings,
         model::JobState::Completed => crate::JobState::Completed,
         model::JobState::Canceled => crate::JobState::Cancelled,
         model::JobState::Aborted => crate::JobState::Aborted,
@@ -596,6 +594,10 @@ fn neutral_status(status: &model::JobStatus) -> JobStatus {
     let mut out = JobStatus::new(state);
     out.reasons = status.reasons.iter().filter(|r| **r != JobReason::None).map(|r| r.name().to_owned()).collect();
     out.sheets_done = Some(u32::try_from(status.sheets_completed).unwrap_or(u32::MAX));
+    // "Completed with warnings" is a completed job plus the printer's words about it.
+    if state == crate::JobState::Completed && has(JobReason::JobCompletedWithWarnings) {
+        out.warnings.push("the printer completed the job with warnings".to_owned());
+    }
     out
 }
 

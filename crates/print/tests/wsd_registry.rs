@@ -450,7 +450,8 @@ fn the_status_of_a_job_maps_state_reasons_and_counters() {
     assert!(!first.terminal());
     r.job_status(&id).unwrap();
     let last = r.job_status(&id).unwrap();
-    assert_eq!((last.state, last.sheets_done), (JobState::CompletedWithWarnings, Some(1)));
+    assert_eq!((last.state, last.sheets_done), (JobState::Completed, Some(1)));
+    assert_eq!(last.warnings.len(), 1, "completed with warnings is Completed plus a warning: {:?}", last.warnings);
     assert!(last.terminal() && last.state.is_success());
     assert_eq!(last.sheets_total, None, "WS-Print does not say how many sheets there will be");
     drop(p);
@@ -515,7 +516,7 @@ fn job_end_states_map_to_outcomes_and_errors() {
         wait_for_job(&r, &job_ref, fast()).unwrap()
     };
     let warn = run(Ending::Completes("JobCompletedWithWarnings"));
-    assert!(matches!(warn, WatchOutcome::Terminal(ref s) if s.state == JobState::CompletedWithWarnings));
+    assert!(matches!(warn, WatchOutcome::Terminal(ref s) if s.state == JobState::Completed && !s.warnings.is_empty()));
     assert!(warn.is_success() && warn.error().is_none());
     let errors = run(Ending::Completes("JobCompletedWithErrors"));
     assert!(matches!(errors, WatchOutcome::Terminal(ref s) if s.state == JobState::CompletedWithErrors));

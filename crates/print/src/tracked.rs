@@ -33,14 +33,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
+use craft_job::{
+    DocumentRef, ErrorSummary, ExpectedTotals, Fingerprint, Jitter, JobDocuments, JobId, JobKind, JobState, JobTimes, JobView, NativeCode, Progress,
+    RetryAdvice, RetryPolicy, RetrySafety, Tag, Timestamp,
+};
+
 use crate::Job;
-use crate::backend::{CancelToken, Document, DocumentFormat, ErrorKind, NativeCode, PrintError, Progress, SubmitRequest, UserConfirmed};
-use crate::job::{ExpectedTotals, JobId, JobState, JobStatus, Submitted};
+use crate::backend::{CancelToken, Document, DocumentFormat, ErrorKind, PrintError, SubmitRequest, UserConfirmed};
+use crate::job::{ExpectedTotalsExt as _, JobStatus, Submitted};
 use crate::options::JobOptions;
 use crate::registry::{BackendInfo, Registry};
-use crate::remote::{Fingerprint, Reconciled, RemoteJob};
-use crate::retry::{Clock, Jitter, Phase, RetryPolicy, RetrySafety, SystemClock};
-use crate::tag::{JobTag, TagPolicy};
+use crate::remote::{Reconciled, RemoteJob};
+use crate::retry::{Clock, JitterExt as _, Phase, SystemClock, advise_error};
+use crate::tag::{TagExt as _, TagPolicy, TagSupportExt as _};
 use crate::watch::{JobWatch, WaitPolicy, WatchOutcome, WatchStep};
 
 /// The id of a [`PrintJob`] inside this process. It never changes across retries; the remote
@@ -120,8 +125,8 @@ impl<F: Fn() -> Result<Vec<u8>, PrintError> + Send> DocumentSource for FnSource<
 #[non_exhaustive]
 pub enum Outcome {
     Completed,
-    /// Printed, with a printer warning; or the printer forgot the job, so it most likely printed
-    /// (the job's warnings say which).
+    /// Printed, with a printer warning (the job completed and its [`JobStatus::warnings`] say what);
+    /// or the printer forgot the job, so it most likely printed (the job's warnings say which).
     CompletedWithWarnings,
     /// Refused, retries used up, a non-transient error, or the printer completed it with errors.
     Failed,
@@ -232,7 +237,7 @@ fn simplify(state: LifecycleState) -> SimpleState {
             JobState::Pending => SimpleState::Queued,
             JobState::Held => SimpleState::Held,
             JobState::Processing => SimpleState::Printing,
-            JobState::Stopped => SimpleState::PrinterNeedsAttention,
+            JobState::NeedsAttention => SimpleState::PrinterNeedsAttention,
             _ => SimpleState::Sent,
         },
         LifecycleState::RetryScheduled { .. } => SimpleState::Retrying,
@@ -242,23 +247,6 @@ fn simplify(state: LifecycleState) -> SimpleState {
         LifecycleState::Terminal(Outcome::Failed | Outcome::Aborted) => SimpleState::Failed,
         LifecycleState::Terminal(Outcome::Cancelled) => SimpleState::Cancelled,
     }
-}
-
-/// What a UI should offer about trying again. The one question it has.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RetryAdvice {
-    /// Known not to have printed (a safe error, or a reconcile that found nothing on a backend that
-    /// lists finished jobs too): [`PrintJob::retry`] is safe.
-    RetryNow,
-    /// Try again after this long (a retry is scheduled, or the device asked for a wait).
-    RetryAfter(Duration),
-    /// The outcome is unknown, the printer gave up, or the backend cannot be asked: a resubmit could
-    /// print twice. Look at the printer (or reconcile) first.
-    CheckPrinterFirst,
-    /// Nothing to retry: it printed, it is in flight, it was cancelled on purpose, or the error will
-    /// not go away by itself.
-    DoNotRetry,
 }
 
 /// An attempt's failure, typed.
@@ -339,7 +327,7 @@ pub struct RequestRecord {
     pub options: JobOptions,
     pub document: Option<DocumentInfo>,
     /// The tag the requests carried (`None` when the policy or the backend left it out).
-    pub tag: Option<JobTag>,
+    pub tag: Option<Tag>,
     /// How the backend sent it, in its own words ([`Submitted::effective`]).
     pub effective: Option<String>,
 }
@@ -462,7 +450,7 @@ pub struct Snapshot {
     pub attempt: u32,
     /// The current remote job, when there is one.
     pub remote: Option<JobId>,
-    pub tag: JobTag,
+    pub tag: Tag,
     /// Whether the requests carried the tag.
     pub tag_applied: bool,
     pub document: Option<DocumentInfo>,
@@ -472,6 +460,11 @@ pub struct Snapshot {
     pub native: Option<NativeInfo>,
     /// Time since the job was created, on its clock.
     pub elapsed: Duration,
+    /// When the job was created, first sent and ended, as wall-clock times (see
+    /// [`PrintJob::with_wall_clock`]). `started` is the first attempt's send; `finished` is set
+    /// once the print is terminal (and cleared again by a manual [`PrintJob::retry`]).
+    pub times: JobTimes,
+    expected_pages: Option<u32>,
     attempts: Arc<Vec<Attempt>>,
     trail: Arc<Vec<TrailEntry>>,
     /// Lines dropped from the front of the trail.
@@ -487,6 +480,95 @@ impl Snapshot {
     /// The status trail, oldest first (bounded by [`PrintJobConfig::trail_cap`]).
     pub fn trail(&self) -> &[TrailEntry] {
         &self.trail
+    }
+
+    /// The print as a [`craft_job::JobView`]. No I/O; the snapshot already holds everything.
+    ///
+    /// | `JobView` | Filled from |
+    /// |---|---|
+    /// | `id` | the current remote job's [`JobId`] once the printer accepted a document; before that (and after a manual retry cleared it) a local id, `local:print-<n>` ([`LocalJobId`]) |
+    /// | `kind` | [`JobKind::Print`] |
+    /// | `title` | the title the app gave, without the tag suffix |
+    /// | `state` | see below |
+    /// | `reasons` | the printer's reasons, then the print's warnings (a print that completed with warnings has them here) |
+    /// | `progress` | sheets done and the sheet total; pages when no sheets are reported; `None` before anything is reported |
+    /// | `times` | [`Snapshot::times`] |
+    /// | `documents` | the document that was sent: the title as its name, its format, its size, and the expected page count when the options gave one |
+    /// | `attempts` | the number of the latest attempt |
+    /// | `last_error` | the last failure: message, [`ErrorKind::name`], this snapshot's [`Snapshot::advice`] and the native code |
+    /// | `tag` | the tag, when the requests carried it |
+    /// | `device_name` | the namespaced printer id once resolved |
+    ///
+    /// State: `Preparing`, `Submitting` and `RetryScheduled` are [`JobState::Pending`];
+    /// `Accepted` (nothing followed) is [`JobState::Unknown`]; `Watching` is the printer's own state
+    /// (a stopped printer is [`JobState::NeedsAttention`]); [`LifecycleState::NeedsAttention`] (the
+    /// outcome of a send is unknown) is [`JobState::NeedsAttention`]; the endings are `Completed`
+    /// (also [`Outcome::CompletedWithWarnings`]), `Cancelled`, `Aborted` ([`Outcome::Aborted`] and
+    /// a [`Outcome::Failed`] that is not the next case) and `CompletedWithErrors` (a `Failed`
+    /// whose job the printer completed with errors).
+    pub fn view(&self) -> JobView {
+        let id = self.remote.clone().unwrap_or_else(|| JobId::new("local", self.id.to_string()));
+        let mut view = JobView::new(id, JobKind::Print, self.title.clone(), self.job_state())
+            .with_times(self.times)
+            .with_attempts(self.attempt)
+            .with_documents(self.documents());
+        for text in self.reasons.iter().chain(&self.warnings) {
+            view = view.with_reason(text.clone());
+        }
+        let p = &self.progress;
+        let progress = match (p.sheets_done, p.pages_done) {
+            (Some(done), _) => Some(Progress::new(done, p.sheets_total)),
+            (None, Some(done)) => Some(Progress::new(done, p.pages_total)),
+            (None, None) => None,
+        };
+        if let Some(progress) = progress {
+            view = view.with_progress(progress);
+        }
+        if let Some(error) = &self.last_error {
+            let mut summary = ErrorSummary::new(error.message.clone(), error.kind.name()).with_retry_advice(self.advice);
+            if let Some(native) = error.native {
+                summary = summary.with_native(native);
+            }
+            view = view.with_error(summary);
+        }
+        if self.tag_applied {
+            view = view.with_tag(self.tag);
+        }
+        if let Some(printer) = &self.printer {
+            view = view.with_device_name(printer.clone());
+        }
+        view
+    }
+
+    fn job_state(&self) -> JobState {
+        match self.state {
+            LifecycleState::Preparing | LifecycleState::Submitting | LifecycleState::RetryScheduled { .. } => JobState::Pending,
+            LifecycleState::Accepted => JobState::Unknown,
+            LifecycleState::Watching(printer) => printer,
+            LifecycleState::NeedsAttention => JobState::NeedsAttention,
+            LifecycleState::Terminal(Outcome::Completed | Outcome::CompletedWithWarnings) => JobState::Completed,
+            LifecycleState::Terminal(Outcome::Cancelled) => JobState::Cancelled,
+            LifecycleState::Terminal(Outcome::Aborted) => JobState::Aborted,
+            LifecycleState::Terminal(Outcome::Failed) => {
+                if self.attempts.last().and_then(|attempt| attempt.remote_end) == Some(JobState::CompletedWithErrors) {
+                    JobState::CompletedWithErrors
+                } else {
+                    JobState::Aborted
+                }
+            }
+        }
+    }
+
+    fn documents(&self) -> JobDocuments {
+        let mut documents = JobDocuments::new();
+        if let Some(info) = self.document {
+            let mut document = DocumentRef::new(self.title.clone()).with_format(info.format.name()).with_bytes(info.len as u64);
+            if let Some(pages) = self.expected_pages.filter(|pages| *pages > 0) {
+                document = document.with_pages(pages);
+            }
+            documents.push(document);
+        }
+        documents
     }
 }
 
@@ -517,10 +599,12 @@ pub struct PrintJob {
     source: Box<dyn DocumentSource>,
     consent: Option<UserConfirmed>,
     cancel: CancelToken,
-    tag: JobTag,
+    tag: Tag,
     tag_applied: bool,
     request: RequestRecord,
     created: Duration,
+    created_wall: SystemTime,
+    finished_at: Option<Duration>,
     first_wall: Option<SystemTime>,
     state: LifecycleState,
     attempts: Arc<Vec<Attempt>>,
@@ -562,18 +646,20 @@ impl PrintJob {
     pub fn new(job: Job, source: impl DocumentSource + 'static) -> Self {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let options = JobOptions::default();
-        let expected = ExpectedTotals::for_request(&job, &options);
+        let expected = ExpectedTotals::for_job(&job, &options);
         Self {
             id: LocalJobId(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
             config: PrintJobConfig::default(),
             jitter: Jitter::from_clock(clock.as_ref()),
             created: clock.now(),
+            created_wall: SystemTime::now(),
+            finished_at: None,
             clock,
             wall: Arc::new(SystemTime::now),
             source: Box::new(source),
             consent: None,
             cancel: CancelToken::new(),
-            tag: JobTag::random(),
+            tag: Tag::random(),
             tag_applied: false,
             request: RequestRecord { job, options, document: None, tag: None, effective: None },
             first_wall: None,
@@ -601,7 +687,7 @@ impl PrintJob {
     /// Per-job hints (media, orientation, expected page count); see [`JobOptions`].
     #[must_use]
     pub fn with_options(mut self, options: JobOptions) -> Self {
-        self.expected = ExpectedTotals::for_request(&self.request.job, &options);
+        self.expected = ExpectedTotals::for_job(&self.request.job, &options);
         self.request.options = options;
         self
     }
@@ -627,6 +713,7 @@ impl PrintJob {
     #[must_use]
     pub fn with_wall_clock(mut self, wall: impl Fn() -> SystemTime + Send + Sync + 'static) -> Self {
         self.wall = Arc::new(wall);
+        self.created_wall = (self.wall)();
         self
     }
 
@@ -652,7 +739,7 @@ impl PrintJob {
 
     /// Use this tag instead of a random one (tests, or an app that derives it from its own id).
     #[must_use]
-    pub fn with_tag(mut self, tag: JobTag) -> Self {
+    pub fn with_tag(mut self, tag: Tag) -> Self {
         self.tag = tag;
         self
     }
@@ -669,7 +756,7 @@ impl PrintJob {
     }
 
     /// The idempotency tag of this print: generated at creation, the same for every attempt.
-    pub fn tag(&self) -> &JobTag {
+    pub fn tag(&self) -> &Tag {
         &self.tag
     }
 
@@ -735,6 +822,7 @@ impl PrintJob {
             return false;
         }
         self.state = state;
+        self.finished_at = if state.is_terminal() { Some(self.finished_at.unwrap_or_else(|| self.now())) } else { None };
         self.record(TrailEvent::State(state));
         true
     }
@@ -820,7 +908,7 @@ impl PrintJob {
                 if wants && !self.tag_applied {
                     self.note(format!("the {} backend cannot carry a tag; matching will use the title", info.name));
                 }
-                self.request.tag = self.tag_applied.then(|| self.tag.clone());
+                self.request.tag = self.tag_applied.then_some(self.tag);
                 self.info = Some(info);
                 let changed = self.set_state(LifecycleState::Submitting);
                 self.step(changed)
@@ -852,7 +940,7 @@ impl PrintJob {
             request = request.with_consent(consent);
         }
         if self.tag_applied {
-            request = request.with_tag(self.tag.clone());
+            request = request.with_tag(self.tag);
         }
         let result = registry.submit_job(request);
         Sent { result, progress: latest, document: Some(document) }
@@ -936,7 +1024,11 @@ impl PrintJob {
             LifecycleState::NeedsAttention
         } else {
             self.auto_failures = self.auto_failures.saturating_add(1);
-            let delay = self.config.retry.and_then(|policy| policy.next_delay(&error, self.auto_failures, self.jitter.unit()));
+            let delay = self.config.retry.and_then(|policy| match advise_error(&error, self.auto_failures, &policy, &mut self.jitter) {
+                RetryAdvice::RetryNow => Some(Duration::ZERO),
+                RetryAdvice::RetryAfter(wait) => Some(wait),
+                _ => None,
+            });
             match delay {
                 Some(wait) => LifecycleState::RetryScheduled { attempt: number.saturating_add(1), next_at: now.saturating_add(wait) },
                 None => LifecycleState::Terminal(Outcome::Failed),
@@ -1016,10 +1108,16 @@ impl PrintJob {
         self.progress.pages_total = status.pages_total;
         self.reasons = status.reasons.clone();
         let state = status.state;
+        let printer_warnings = status.warnings.clone();
         self.last_printer = Some(status);
         let outcome = match state {
-            JobState::Completed => Some(Outcome::Completed),
-            JobState::CompletedWithWarnings => Some(Outcome::CompletedWithWarnings),
+            JobState::Completed if printer_warnings.is_empty() => Some(Outcome::Completed),
+            JobState::Completed => {
+                for warning in printer_warnings {
+                    self.warn(warning);
+                }
+                Some(Outcome::CompletedWithWarnings)
+            }
             JobState::CompletedWithErrors => {
                 self.ended_with_errors = true;
                 Some(Outcome::Failed)
@@ -1156,11 +1254,11 @@ impl PrintJob {
 
     /// The fingerprint a reconcile looks for.
     pub fn fingerprint(&self) -> Fingerprint {
-        Fingerprint {
-            title: self.request.job.title.clone(),
-            user: None,
-            tag: self.request.tag.clone(),
-            since: self.first_wall.and_then(|wall| wall.checked_sub(self.config.reconcile_slack)),
+        let submitted = self.first_wall.or_else(|| Some((self.wall)())).and_then(Timestamp::from_system_time).unwrap_or_default();
+        let fingerprint = Fingerprint::new(self.request.job.title.clone(), submitted).with_window(self.config.reconcile_slack);
+        match self.request.tag {
+            Some(tag) => fingerprint.with_tag(tag),
+            None => fingerprint,
         }
     }
 
@@ -1168,7 +1266,7 @@ impl PrintJob {
     /// ([`Registry::find_job`]). Nothing is sent that changes a job. The answer is kept (see
     /// [`Snapshot::reconciled`]); `Found` and `Ambiguous` are then adopted with [`Self::accept`], or
     /// the print is sent again with [`Self::retry`]. `Err(Unsupported)` when the backend cannot be
-    /// asked: [`RetryAdvice::CheckPrinterFirst`] stays.
+    /// asked: [`RetryAdvice::CheckDeviceFirst`] stays.
     pub fn reconcile(&mut self, registry: &Registry) -> Result<Reconciled, PrintError> {
         if matches!(self.state, LifecycleState::Preparing | LifecycleState::Submitting) {
             return Err(PrintError::new(ErrorKind::InvalidRequest, "nothing has been sent yet, so there is nothing to reconcile"));
@@ -1267,7 +1365,7 @@ impl PrintJob {
             LifecycleState::Preparing | LifecycleState::Submitting | LifecycleState::Watching(_) => RetryAdvice::DoNotRetry,
             LifecycleState::Accepted => {
                 if self.last_error.is_some() {
-                    RetryAdvice::CheckPrinterFirst
+                    RetryAdvice::CheckDeviceFirst
                 } else {
                     RetryAdvice::DoNotRetry
                 }
@@ -1276,20 +1374,45 @@ impl PrintJob {
             LifecycleState::NeedsAttention => match &self.reconciled {
                 Some(Reconciled::Found(_)) => RetryAdvice::DoNotRetry,
                 Some(Reconciled::NotFound) if self.info.is_some_and(|info| info.query_caps.history) => RetryAdvice::RetryNow,
-                _ => RetryAdvice::CheckPrinterFirst,
+                _ => RetryAdvice::CheckDeviceFirst,
             },
             LifecycleState::Terminal(Outcome::Completed | Outcome::CompletedWithWarnings | Outcome::Cancelled) => RetryAdvice::DoNotRetry,
-            LifecycleState::Terminal(Outcome::Aborted) => RetryAdvice::CheckPrinterFirst,
+            LifecycleState::Terminal(Outcome::Aborted) => RetryAdvice::CheckDeviceFirst,
             LifecycleState::Terminal(Outcome::Failed) => match &self.last_error {
-                _ if self.ended_with_errors => RetryAdvice::CheckPrinterFirst,
+                _ if self.ended_with_errors => RetryAdvice::CheckDeviceFirst,
                 Some(error) if error.is_retryable() && error.safety.allows_automatic_retry() => match error.retry_after {
                     Some(wait) => RetryAdvice::RetryAfter(wait),
                     None => RetryAdvice::RetryNow,
                 },
                 Some(_) => RetryAdvice::DoNotRetry,
-                None => RetryAdvice::CheckPrinterFirst,
+                None => RetryAdvice::CheckDeviceFirst,
             },
         }
+    }
+
+    /// The wall-clock times of the print: created, first sent, ended. The job's clock is monotonic,
+    /// so the end is the creation time plus the clock's offset; the start is the wall time of the
+    /// first send.
+    fn times(&self) -> JobTimes {
+        let mut times = JobTimes::new();
+        if let Some(created) = Timestamp::from_system_time(self.created_wall) {
+            times = times.with_created(created);
+        }
+        if let Some(started) = self.first_wall.and_then(Timestamp::from_system_time) {
+            times = times.with_started(started);
+        }
+        let finished = self.finished_at.and_then(|end| Timestamp::from_system_time(self.created_wall + end.saturating_sub(self.created)));
+        if let Some(finished) = finished {
+            times = times.with_finished(finished);
+        }
+        times
+    }
+
+    /// The print as a [`craft_job::JobView`], the record a UI shows the same way for a print and a
+    /// scan: no I/O, nothing blocks. Shorthand for `self.snapshot().view()`; see [`Snapshot::view`]
+    /// for how each field is filled.
+    pub fn view(&self) -> JobView {
+        self.snapshot().view()
     }
 
     /// An immutable view for a UI: no I/O, nothing blocks, the attempt timeline and the trail are
@@ -1314,13 +1437,15 @@ impl PrintJob {
             last_error: self.last_error.clone(),
             attempt: self.attempt_counter,
             remote: self.remote.clone(),
-            tag: self.tag.clone(),
+            tag: self.tag,
             tag_applied: self.tag_applied,
             document: self.request.document,
             advice: self.retry_advice(),
             reconciled: self.reconciled.clone(),
             native: has_native.then_some(native),
             elapsed: self.now().saturating_sub(self.created),
+            times: self.times(),
+            expected_pages: self.request.options.expected_pages,
             attempts: Arc::clone(&self.attempts),
             trail: Arc::clone(&self.trail),
             trail_dropped: self.trail_dropped,

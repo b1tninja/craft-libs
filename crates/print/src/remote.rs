@@ -9,10 +9,11 @@
 //! those capabilities before relying on a field. See `docs/job-tracking.md` for the mapping of each
 //! source.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::job::{JobId, JobState};
-use crate::tag::{JobTag, TagSupport};
+use craft_job::{Fingerprint, JobId, JobState, Tag, TagSupport, Timestamp};
+
+use crate::tag::{TagExt as _, TagSupportExt as _};
 
 /// One job in a printer's or queue's listing, in neutral terms.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,7 +33,7 @@ pub struct RemoteJob {
     /// The device's reasons, as reported.
     pub reasons: Vec<String>,
     /// The tag the job carries, if it carries one (any tag, ours or another print's).
-    pub tag: Option<JobTag>,
+    pub tag: Option<Tag>,
     /// The job carries the tag of the [`JobFilter`] it was listed with. `false` for every other job:
     /// foreign jobs are listed too and are never ours.
     pub ours: bool,
@@ -45,7 +46,7 @@ impl RemoteJob {
     /// carries it elsewhere sets [`Self::tag`] itself.
     pub fn new(id: JobId, title: impl Into<String>, state: JobState) -> Self {
         let title = title.into();
-        let tag = JobTag::find_in(&title);
+        let tag = Tag::find_in(&title);
         Self { id, title, user: None, created: None, state, reasons: Vec::new(), tag, ours: false, sheets_done: None, pages_done: None }
     }
 
@@ -62,7 +63,7 @@ impl RemoteJob {
     }
 
     #[must_use]
-    pub fn with_tag(mut self, tag: JobTag) -> Self {
+    pub fn with_tag(mut self, tag: Tag) -> Self {
         self.tag = Some(tag);
         self
     }
@@ -75,7 +76,7 @@ impl RemoteJob {
 
     /// The title without a tag suffix: what a person typed.
     pub fn display_title(&self) -> &str {
-        JobTag::strip(&self.title)
+        Tag::strip(&self.title)
     }
 }
 
@@ -94,7 +95,7 @@ pub struct JobFilter {
     /// Only jobs created at or after this time (jobs with no creation time pass).
     pub since: Option<SystemTime>,
     /// Mark the jobs carrying this tag as [`RemoteJob::ours`].
-    pub tag: Option<JobTag>,
+    pub tag: Option<Tag>,
     /// Only jobs in one of these states.
     pub states: Option<Vec<JobState>>,
 }
@@ -123,7 +124,7 @@ impl JobFilter {
     }
 
     #[must_use]
-    pub fn marking(mut self, tag: JobTag) -> Self {
+    pub fn marking(mut self, tag: Tag) -> Self {
         self.tag = Some(tag);
         self
     }
@@ -146,7 +147,7 @@ impl JobFilter {
 /// Whether a listed title is the title that was sent: equal without tag suffixes, or a printer's
 /// cut-short version of it.
 pub(crate) fn title_matches(listed: &str, wanted: &str) -> bool {
-    let (listed, wanted) = (JobTag::strip(listed), JobTag::strip(wanted));
+    let (listed, wanted) = (Tag::strip(listed), Tag::strip(wanted));
     listed == wanted || (!listed.is_empty() && wanted.starts_with(listed))
 }
 
@@ -162,31 +163,34 @@ pub fn filter_jobs(jobs: Vec<RemoteJob>, filter: &JobFilter) -> Vec<RemoteJob> {
         .collect()
 }
 
-/// What a reconcile looks for: the print an earlier attempt may have created.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Fingerprint {
-    /// The title as the app gave it (without a tag suffix).
-    pub title: String,
-    /// The user the jobs are sent as, when the caller knows it; a backend fills in its own.
-    pub user: Option<String>,
-    /// The tag the attempts carried, when they carried one.
-    pub tag: Option<JobTag>,
-    /// The earliest creation time to accept: the first attempt's start, less an allowance for clock
-    /// skew between this machine and the printer.
-    pub since: Option<SystemTime>,
+/// A [`Timestamp`] as the wall-clock time a [`RemoteJob::created`] uses.
+fn system_time(at: Timestamp) -> SystemTime {
+    UNIX_EPOCH + Duration::from_millis(at.millis())
 }
 
-impl Fingerprint {
-    pub fn new(title: impl Into<String>) -> Self {
-        Self { title: title.into(), user: None, tag: None, since: None }
-    }
+/// Printing's reading of a [`Fingerprint`] (`craft-job`'s record of what was submitted): the
+/// listing to ask for. The fingerprint's `title`, `user`, `tag`, `submitted` and `window` are
+/// `craft-job`'s fields; `title` is the one the app gave, without a tag suffix.
+pub trait FingerprintExt {
+    /// The earliest creation time to accept: the submission time less the `window` (an allowance for
+    /// clock skew between this machine and the printer).
+    fn since(&self) -> SystemTime;
 
     /// The listing to ask for. When the tag can be matched the listing is unrestricted and the tag
     /// decides; otherwise title, user and time narrow it.
-    pub fn filter(&self, tag_matchable: bool) -> JobFilter {
+    fn filter(&self, tag_matchable: bool) -> JobFilter;
+}
+
+impl FingerprintExt for Fingerprint {
+    fn since(&self) -> SystemTime {
+        let window = u64::try_from(self.window.as_millis()).unwrap_or(u64::MAX);
+        system_time(Timestamp::from_millis(self.submitted.millis().saturating_sub(window)))
+    }
+
+    fn filter(&self, tag_matchable: bool) -> JobFilter {
         match (&self.tag, tag_matchable) {
-            (Some(tag), true) => JobFilter::new().marking(tag.clone()),
-            _ => JobFilter { user: self.user.clone(), title: Some(self.title.clone()), since: self.since, tag: None, states: None },
+            (Some(tag), true) => JobFilter::new().marking(*tag),
+            _ => JobFilter { user: self.user.clone(), title: Some(self.title.clone()), since: Some(self.since()), tag: None, states: None },
         }
     }
 }
@@ -220,7 +224,7 @@ impl Reconciled {
 /// tag are the answer (and are marked `ours`); otherwise jobs match by title, user and time and are
 /// never `ours`.
 pub fn reconcile_jobs(jobs: Vec<RemoteJob>, fingerprint: &Fingerprint, support: TagSupport) -> Reconciled {
-    let by_tag = fingerprint.tag.is_some() && support.matchable;
+    let by_tag = fingerprint.tag.is_some() && support.matchable();
     let mut found: Vec<RemoteJob> = if by_tag {
         jobs.into_iter()
             .filter(|job| job.tag == fingerprint.tag)
@@ -276,14 +280,18 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::tag::TagPlacement;
+    use craft_job::TagPlacement;
 
     fn job(n: u32, title: &str) -> RemoteJob {
         RemoteJob::new(JobId::new("t", format!("p#{n}")), title, JobState::Pending)
     }
 
-    fn tag(text: &str) -> JobTag {
-        JobTag::parse(text).unwrap_or_else(JobTag::random)
+    fn tag(text: &str) -> Tag {
+        Tag::parse(text).unwrap_or_else(|_| Tag::random())
+    }
+
+    fn fingerprint(title: &str) -> Fingerprint {
+        Fingerprint::new(title, Timestamp::default())
     }
 
     #[test]
@@ -327,8 +335,8 @@ mod tests {
 
     #[test]
     fn reconcile_by_tag_finds_ours_among_foreign_jobs() {
-        let fp = Fingerprint { tag: Some(tag("abc123de")), ..Fingerprint::new("Report") };
-        let support = TagSupport::new(TagPlacement::JobName, true);
+        let fp = fingerprint("Report").with_tag(tag("abc123de"));
+        let support = TagSupport::Carried(TagPlacement::JobNameSuffix);
         let listing = vec![job(1, "Report"), job(2, "Report [ref abc123de]"), job(3, "Report [ref ffffffff]")];
         let result = reconcile_jobs(listing, &fp, support);
         assert!(matches!(&result, Reconciled::Found(found) if found.ours && found.id.native() == "p#2"), "{result:?}");
@@ -336,8 +344,8 @@ mod tests {
 
     #[test]
     fn reconcile_without_a_matchable_tag_falls_back_to_the_title() {
-        let fp = Fingerprint { tag: Some(tag("abc123de")), ..Fingerprint::new("Report") };
-        let none = TagSupport::NONE;
+        let fp = fingerprint("Report").with_tag(tag("abc123de"));
+        let none = TagSupport::None;
         assert_eq!(reconcile_jobs(vec![job(1, "Other")], &fp, none), Reconciled::NotFound);
         let two = reconcile_jobs(vec![job(1, "Report"), job(2, "Report")], &fp, none);
         assert!(matches!(&two, Reconciled::Ambiguous(jobs) if jobs.len() == 2 && jobs.iter().all(|j| !j.ours)));
@@ -346,10 +354,19 @@ mod tests {
 
     #[test]
     fn the_listing_asked_for_depends_on_whether_the_tag_can_be_matched() {
-        let fp = Fingerprint { user: Some("u".into()), tag: Some(tag("abc123de")), ..Fingerprint::new("Report") };
+        let fp = fingerprint("Report").with_user("u").with_tag(tag("abc123de"));
         let by_tag = fp.filter(true);
         assert_eq!((by_tag.title.is_none(), by_tag.user.is_none(), by_tag.tag.is_some()), (true, true, true));
         let by_title = fp.filter(false);
         assert_eq!((by_title.title.as_deref(), by_title.user.as_deref(), by_title.tag.is_none()), (Some("Report"), Some("u"), true));
+        assert_eq!(by_title.since, Some(UNIX_EPOCH), "a submission at the epoch less the window is the epoch");
+    }
+
+    #[test]
+    fn the_time_bound_is_the_submission_less_the_window() {
+        let fp = Fingerprint::new("Report", Timestamp::from_secs(1000)).with_window(Duration::from_secs(120));
+        assert_eq!(fp.since(), UNIX_EPOCH + Duration::from_secs(880));
+        let early = Fingerprint::new("Report", Timestamp::from_secs(10)).with_window(Duration::from_secs(120));
+        assert_eq!(early.since(), UNIX_EPOCH, "saturates at the epoch");
     }
 }

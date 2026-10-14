@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime};
 use craft_print::testing::{FakeBackend, SubmitStep};
 use craft_print::{
     AttemptOutcome, BytesSource, DocumentFormat, ErrorKind, Fingerprint, FnSource, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobState,
-    JobStatus, JobTag, LifecycleState, ManualClock, Outcome, Phase, PrintError, PrintJob, PrintJobConfig, Reconciled, Registry, RemoteJob,
-    RetryAdvice, RetryPolicy, RetrySafety, SimpleState, TagPlacement, TagPolicy, TagSupport, TrailEvent, UserConfirmed, WatchSupport,
+    JobStatus, LifecycleState, ManualClock, Outcome, Phase, PrintError, PrintJob, PrintJobConfig, Reconciled, Registry, RemoteJob, RetryAdvice,
+    RetryPolicy, RetrySafety, SimpleState, Tag, TagPlacement, TagPolicy, TagSupport, Timestamp, TrailEvent, UserConfirmed, WatchSupport,
 };
 
 const PDF: &[u8] = b"%PDF-1.7";
@@ -277,7 +277,7 @@ fn an_unknown_outcome_is_never_retried_automatically() {
     }
     assert_eq!(fake.submissions().len(), 1, "one send, however long we wait");
     let snapshot = job.snapshot();
-    assert_eq!((snapshot.simple, snapshot.settled, snapshot.advice), (SimpleState::NeedsAttention, true, RetryAdvice::CheckPrinterFirst));
+    assert_eq!((snapshot.simple, snapshot.settled, snapshot.advice), (SimpleState::NeedsAttention, true, RetryAdvice::CheckDeviceFirst));
     assert_eq!(snapshot.last_error.as_ref().map(|e| e.safety), Some(RetrySafety::OutcomeUnknown));
     assert_eq!(snapshot.attempts()[0].phase, Some(Phase::Reply));
 }
@@ -300,7 +300,7 @@ fn a_printer_side_abort_is_a_manual_retry_with_a_new_remote_job_and_the_history_
     let mut job = print_job(&rig, "net:p1");
     drive(&mut job, &rig);
     assert_eq!(job.state(), LifecycleState::Terminal(Outcome::Aborted));
-    assert_eq!(job.snapshot().advice, RetryAdvice::CheckPrinterFirst, "look at the printer before sending again");
+    assert_eq!(job.snapshot().advice, RetryAdvice::CheckDeviceFirst, "look at the printer before sending again");
     for _ in 0..3 {
         rig.clock.advance(Duration::from_secs(600));
         job.advance(&rig.registry);
@@ -343,7 +343,7 @@ fn completed_with_errors_fails_the_print_and_a_forgotten_job_most_likely_printed
     let rig = rig(&fake);
     let mut job = print_job(&rig, "net:p1");
     drive(&mut job, &rig);
-    assert_eq!((job.state(), job.snapshot().advice), (LifecycleState::Terminal(Outcome::Failed), RetryAdvice::CheckPrinterFirst));
+    assert_eq!((job.state(), job.snapshot().advice), (LifecycleState::Terminal(Outcome::Failed), RetryAdvice::CheckDeviceFirst));
 
     let forgetting = local(vec![Ok(status(JobState::Processing)), Err(PrintError::new(ErrorKind::NotFound, "the printer forgot the job"))]);
     let rig = self::rig(&forgetting);
@@ -370,12 +370,12 @@ fn a_printer_side_cancel_ends_the_print_cancelled_without_a_retry() {
 fn the_tag_is_generated_once_and_appended_exactly_once_to_every_attempts_job_name() {
     let fake = FakeBackend::ipp_like("net")
         .with_printer("p1", true)
-        .with_tag_support(TagSupport::new(TagPlacement::JobName, true))
+        .with_tag_support(TagSupport::Carried(TagPlacement::JobNameSuffix))
         .with_status_script(vec![Ok(status(JobState::Completed))])
         .with_submit_script(vec![SubmitStep::Fail(busy()), SubmitStep::Fail(busy())]);
     let rig = rig(&fake);
     let mut job = print_job(&rig, "net:p1");
-    let tag = job.tag().clone();
+    let tag = *job.tag();
     assert_eq!(tag.as_str().len(), 8);
     drive(&mut job, &rig);
 
@@ -387,7 +387,7 @@ fn the_tag_is_generated_once_and_appended_exactly_once_to_every_attempts_job_nam
         assert_eq!(submission.tag.as_ref(), Some(&tag));
     }
     let snapshot = job.snapshot();
-    assert_eq!((snapshot.tag.clone(), snapshot.tag_applied), (tag.clone(), true));
+    assert_eq!((snapshot.tag, snapshot.tag_applied), (tag, true));
     assert_eq!(snapshot.title, "Quarterly report", "the app's title is kept as given");
     assert_eq!(fake.remote_jobs().last().map(|j| j.title.clone()), Some(format!("Quarterly report [ref {tag}]")));
 
@@ -399,18 +399,18 @@ fn the_tag_is_generated_once_and_appended_exactly_once_to_every_attempts_job_nam
 fn a_native_placement_leaves_the_title_alone_and_a_fixed_tag_can_be_supplied() {
     let fake = ipp(vec![Ok(status(JobState::Completed))]);
     let rig = rig(&fake);
-    let fixed = JobTag::parse("abc123de").unwrap();
-    let mut job = print_job(&rig, "net:p1").with_tag(fixed.clone());
+    let fixed = Tag::parse("abc123de").unwrap();
+    let mut job = print_job(&rig, "net:p1").with_tag(fixed);
     drive(&mut job, &rig);
     let submission = &fake.submissions()[0];
     assert_eq!(submission.job.title, "Quarterly report");
-    assert_eq!(submission.tag, Some(fixed.clone()));
+    assert_eq!(submission.tag, Some(fixed));
     assert_eq!(fake.remote_jobs()[0].tag, Some(fixed));
 }
 
 #[test]
 fn the_tag_defaults_on_for_network_backends_and_off_for_local_ones() {
-    let support = TagSupport::new(TagPlacement::JobName, true);
+    let support = TagSupport::Carried(TagPlacement::JobNameSuffix);
     let network = FakeBackend::ipp_like("net").with_printer("p1", true).with_tag_support(support);
     let rig_net = rig(&network);
     drive(&mut print_job(&rig_net, "net:p1"), &rig_net);
@@ -420,7 +420,7 @@ fn the_tag_defaults_on_for_network_backends_and_off_for_local_ones() {
     let rig_lp = rig(&spooler);
     drive(&mut print_job(&rig_lp, "lp:q"), &rig_lp);
     let sent = &spooler.submissions()[0];
-    assert_eq!((sent.tag.clone(), sent.job.title.as_str()), (None, "Quarterly report"), "local: off, the title is untouched");
+    assert_eq!((sent.tag, sent.job.title.as_str()), (None, "Quarterly report"), "local: off, the title is untouched");
 
     let rig_lp2 = rig(&spooler);
     let mut forced = print_job(&rig_lp2, "lp:q").with_tag_policy(TagPolicy::Always);
@@ -431,7 +431,7 @@ fn the_tag_defaults_on_for_network_backends_and_off_for_local_ones() {
     let rig_never = rig(&never);
     let mut job = print_job(&rig_never, "net:p1").with_tag_policy(TagPolicy::Never);
     drive(&mut job, &rig_never);
-    assert_eq!((never.submissions()[0].tag.clone(), job.snapshot().tag_applied), (None, false));
+    assert_eq!((never.submissions()[0].tag, job.snapshot().tag_applied), (None, false));
 }
 
 #[test]
@@ -491,7 +491,7 @@ fn without_tag_support_reconcile_matches_by_title_user_and_time_and_can_be_ambig
     let ids: Vec<_> = jobs.iter().map(|j| j.id.native().to_owned()).collect();
     assert_eq!(ids, ["p1#1", "p1#801"], "newest first; the job from long before the print is outside the window; another title never matches");
     assert!(jobs.iter().all(|j| !j.ours), "a title match is never claimed as ours");
-    assert_eq!(job.snapshot().advice, RetryAdvice::CheckPrinterFirst);
+    assert_eq!(job.snapshot().advice, RetryAdvice::CheckDeviceFirst);
 }
 
 #[test]
@@ -517,7 +517,7 @@ fn reconcile_reports_not_found_and_advises_a_retry_only_where_finished_jobs_are_
     let mut job = print_job(&rig_b, "net:p1");
     drive(&mut job, &rig_b);
     assert_eq!(job.reconcile(&rig_b.registry).unwrap(), Reconciled::NotFound);
-    assert_eq!(job.snapshot().advice, RetryAdvice::CheckPrinterFirst, "it may have printed and been forgotten");
+    assert_eq!(job.snapshot().advice, RetryAdvice::CheckDeviceFirst, "it may have printed and been forgotten");
 }
 
 #[test]
@@ -528,7 +528,7 @@ fn a_backend_that_cannot_list_jobs_leaves_only_check_the_printer_first() {
     drive(&mut job, &rig);
     assert_eq!(job.state(), LifecycleState::NeedsAttention);
     assert_eq!(job.reconcile(&rig.registry).unwrap_err().kind(), ErrorKind::Unsupported);
-    assert_eq!(job.snapshot().advice, RetryAdvice::CheckPrinterFirst);
+    assert_eq!(job.snapshot().advice, RetryAdvice::CheckDeviceFirst);
     assert_eq!(fake.submissions().len(), 1);
     assert_eq!(rig.registry.list_jobs("cups:q", &JobFilter::new()).unwrap_err().kind(), ErrorKind::Unsupported);
     assert_eq!(rig.registry.backend_info(Some("cups:q")).unwrap().query_caps, JobQueryCaps::NONE);
@@ -552,7 +552,7 @@ fn listings_include_foreign_jobs_marked_not_ours_and_the_registry_stamps_the_bac
     let mut job = print_job(&rig, "net:p1");
     drive(&mut job, &rig);
 
-    let listed = rig.registry.list_jobs("net:p1", &JobFilter::new().marking(job.tag().clone())).unwrap();
+    let listed = rig.registry.list_jobs("net:p1", &JobFilter::new().marking(*job.tag())).unwrap();
     assert_eq!(listed.len(), 2);
     let ours: Vec<_> = listed.iter().map(|j| (j.id.to_string(), j.ours)).collect();
     assert_eq!(ours, [("net:p1#1".to_owned(), true), ("net:p1#50".to_owned(), false)], "newest first; the foreign job is listed and never ours");
@@ -563,10 +563,10 @@ fn listings_include_foreign_jobs_marked_not_ours_and_the_registry_stamps_the_bac
     assert!(only_states.is_empty());
     let by_user = rig.registry.list_jobs("net:p1", &JobFilter::new().for_user("other")).unwrap();
     assert_eq!(by_user.iter().map(|j| j.id.native()).collect::<Vec<_>>(), ["p1#50"], "a user filter keeps only that user's jobs");
-    let found = rig.registry.find_job("net:p1", &Fingerprint { tag: Some(job.tag().clone()), ..Fingerprint::new("Quarterly report") }).unwrap();
+    let found = rig.registry.find_job("net:p1", &Fingerprint::new("Quarterly report", Timestamp::default()).with_tag(*job.tag())).unwrap();
     assert!(matches!(&found, Reconciled::Found(j) if j.ours && j.id.backend() == "net"));
     let caps = rig.registry.backend_info(Some("net:p1")).unwrap();
-    assert_eq!(caps.tag_support, TagSupport::new(TagPlacement::Native, true));
+    assert_eq!(caps.tag_support, TagSupport::Carried(TagPlacement::NativeAttribute));
 }
 
 // ---- cancel in every state ----

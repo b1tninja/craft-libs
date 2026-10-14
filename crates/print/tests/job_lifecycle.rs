@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use craft_print::testing::FakeBackend;
 use craft_print::{
-    CancelToken, Document, ErrorKind, Job, JobId, JobOptions, JobState, JobStatus, JobWatch, ManualClock, ParseJobIdErrorKind, Phase, PrintError,
+    CancelToken, Document, ErrorKind, Job, JobId, JobOptions, JobState, JobStatus, JobWatch, ManualClock, ParseIdErrorKind, Phase, PrintError,
     Progress, Registry, RetrySafety, SubmitRequest, UserConfirmed, WaitPolicy, WatchOutcome, WatchStep, WatchSupport, wait_for_job,
 };
 
@@ -97,7 +97,7 @@ fn a_submitted_job_id_round_trips_through_text_and_is_accepted_back() {
     assert_eq!(kept, job);
     assert_eq!(registry.job_status(&kept).unwrap().state, JobState::Processing);
     assert!(registry.job_watch(&kept, WaitPolicy::default()).is_ok());
-    assert_eq!("p1#7".parse::<JobId>().unwrap_err().kind(), ParseJobIdErrorKind::MissingSeparator);
+    assert_eq!("p1#7".parse::<JobId>().unwrap_err().kind(), ParseIdErrorKind::MissingSeparator);
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn the_blocking_convenience_is_built_on_the_polls_and_gives_up_at_max_wait() {
     assert!(printer.status_calls() >= 2);
     assert_eq!(wait_for_job(&registry, &JobId::new("nope", "1"), WaitPolicy::default()).unwrap_err().kind(), ErrorKind::UnknownBackend);
     // Finishing is also seen by the convenience.
-    let done = reporting(vec![Ok(status(JobState::Processing)), Ok(status(JobState::CompletedWithWarnings))]);
+    let done = reporting(vec![Ok(status(JobState::Processing)), Ok(JobStatus { warnings: vec!["warning".into()], ..status(JobState::Completed) })]);
     let registry = self::registry(&done);
     let outcome = wait_for_job(&registry, &JobId::new("net", "p1#7"), WaitPolicy::every(Duration::from_millis(10))).unwrap();
     assert!(outcome.is_success());

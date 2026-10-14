@@ -13,10 +13,12 @@
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
-use crate::backend::{Backend, BackendClass, ErrorKind, PrintError, PrinterDetails, PrinterRef, Progress, Receipt, SubmitRequest};
-use crate::job::{ExpectedTotals, JobId, JobStatus, Submitted, WatchSupport};
-use crate::remote::{Fingerprint, JobFilter, JobQueryCaps, Reconciled, RemoteJob};
-use crate::tag::TagSupport;
+use craft_job::{BackendName, ExpectedTotals, Fingerprint, JobId, Progress, TagSupport, namespaced_id, split_id};
+
+use crate::backend::{Backend, BackendClass, ErrorKind, PrintError, PrinterDetails, PrinterRef, Receipt, SubmitRequest};
+use crate::job::{ExpectedTotalsExt as _, JobStatus, Submitted, WatchSupport};
+use crate::remote::{JobFilter, JobQueryCaps, Reconciled, RemoteJob};
+use crate::tag::TagSupportExt as _;
 use crate::watch::{JobWatch, WaitPolicy};
 
 /// Why [`Registry::register`] refused a backend.
@@ -73,20 +75,6 @@ pub struct BackendInfo {
     pub query_caps: JobQueryCaps,
 }
 
-/// `"<backend>:<native id>"`.
-pub fn namespaced_id(backend: &str, native_id: &str) -> String {
-    format!("{backend}:{native_id}")
-}
-
-/// Split a namespaced id at its first colon.
-pub fn split_id(id: &str) -> Option<(&str, &str)> {
-    id.split_once(':')
-}
-
-fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-}
-
 /// The print backends of a process. The free functions of this crate's [`registry`] use one global
 /// instance; tests and apps that want isolation make their own with [`Registry::new`].
 #[derive(Default)]
@@ -109,7 +97,7 @@ impl Registry {
     /// [`RegisterError::DuplicateName`] (the new backend is dropped), never a panic.
     pub fn register(&self, backend: Box<dyn Backend>) -> Result<(), RegisterError> {
         let name = backend.name();
-        if !valid_name(name) {
+        if BackendName::new(name).is_err() {
             return Err(RegisterError::InvalidName { name });
         }
         let mut backends = self.backends.write().unwrap_or_else(PoisonError::into_inner);
@@ -226,7 +214,7 @@ impl Registry {
         request.job.printer = native;
         // A tag only travels where the backend can carry it.
         let tag = request.tag.take().filter(|_| backend.tag_support().carries());
-        let expected = ExpectedTotals::for_request(&request.job, &request.options);
+        let expected = ExpectedTotals::for_job(&request.job, &request.options);
         let SubmitRequest { document, job, options, consent, cancel, progress, .. } = request;
         // A backend that reports sheets but no total gets the caller's page count as the total.
         let has_callback = progress.is_some();
@@ -236,15 +224,8 @@ impl Registry {
                 report(event.or_expected(expected.sheets));
             }
         };
-        let forwarded = SubmitRequest {
-            document,
-            job,
-            options,
-            consent,
-            cancel,
-            progress: if has_callback { Some(&mut with_total) } else { None },
-            tag: tag.clone(),
-        };
+        let forwarded =
+            SubmitRequest { document, job, options, consent, cancel, progress: if has_callback { Some(&mut with_total) } else { None }, tag };
         let mut submitted = backend.submit(forwarded)?;
         let name = backend.name();
         submitted.backend = name;

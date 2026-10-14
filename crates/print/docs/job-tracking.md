@@ -49,7 +49,7 @@ loop {
 | `RetryScheduled { attempt, next_at }` | a safe, transient failure; the next attempt is due at `next_at` (on the job's clock) | `advance` once due, `retry`, `cancel` |
 | `NeedsAttention` | the outcome of a send is unknown (the request may have arrived). Nothing is resent. | `reconcile`, then `accept` or `retry`, or `cancel` |
 | `Terminal(Completed)` | printed | none |
-| `Terminal(CompletedWithWarnings)` | printed, with a printer warning, or the printer forgot the job so it most likely printed | none |
+| `Terminal(CompletedWithWarnings)` | printed, with a printer warning (`JobStatus::warnings` on a `Completed` reading), or the printer forgot the job so it most likely printed | none |
 | `Terminal(Failed)` | refused, retries used up, a non-transient error, or completed with errors | manual `retry` |
 | `Terminal(Cancelled)` | we cancelled it, or someone cancelled it at the printer | manual `retry` |
 | `Terminal(Aborted)` | the printer gave up on it | manual `retry` |
@@ -75,8 +75,9 @@ PrinterNeedsAttention, Retrying, NeedsAttention, Sent, Done, DoneWithWarnings, F
   of how it was sent (`Submitted::effective`; for WS-Print the ticket shape). **Never the document
   bytes.** The bytes come from the `DocumentSource` the app supplies, read again for each attempt; a
   source that fails is an attempt that failed in `Phase::Prepare` with nothing sent.
-* **A reconcile fingerprint** (`Fingerprint`): title, tag, the user the backend sends as, and the
-  earliest creation time to accept (the first attempt's start minus a clock-skew allowance).
+* **A reconcile fingerprint** (`craft_job::Fingerprint`): title, tag, the user the backend sends as,
+  the first attempt's send time (`submitted`) and a clock-skew `window` (`PrintJobConfig::reconcile_slack`);
+  the earliest creation time to accept is `submitted - window` (`FingerprintExt::since`).
 * **A bounded status trail** (`TrailEntry`): lifecycle changes, printer readings and notes, each with a
   timestamp on the job's clock. A printer reading identical to the previous one (`JobStatus::same_as`)
   is not recorded again, so a job that sits in `Processing` for ten minutes is one line.
@@ -102,8 +103,28 @@ document bytes and no protocol text.
 |---|---|
 | `RetryNow` | the failure is known not to have printed (safe error, or a reconcile that found nothing on a backend that lists finished jobs) |
 | `RetryAfter(duration)` | a retry is scheduled, or the device asked for a wait |
-| `CheckPrinterFirst` | the outcome is unknown, the printer gave up (look at the paper path), or the backend cannot be asked (a resubmit might duplicate) |
+| `CheckDeviceFirst` | the outcome is unknown, the printer gave up (look at the paper path), or the backend cannot be asked (a resubmit might duplicate) |
 | `DoNotRetry` | printed; the job is in flight; cancelled on purpose; or the error is not transient |
+
+### `view()`: the print as a `craft_job::JobView`
+
+`PrintJob::view()` (and `Snapshot::view()`) fills the record that a scan job fills too, so one UI
+component can list prints and scans. No I/O; it is the snapshot reshaped.
+
+| `JobView` field | Print |
+|---|---|
+| `id` | the current remote job's `JobId` once a document was accepted; before that, and after a manual `retry()` cleared the remote job, a local id `local:print-<n>` |
+| `kind` | `JobKind::Print` |
+| `title` | the title the app gave, **without** the tag suffix (the tag is its own field) |
+| `state` | `Preparing`, `Submitting`, `RetryScheduled` -> `Pending`; `Accepted` (nothing followed) -> `Unknown`; `Watching(s)` -> `s`; `NeedsAttention` (outcome of a send unknown) -> `NeedsAttention`; `Terminal(Completed or CompletedWithWarnings)` -> `Completed`; `Cancelled` -> `Cancelled`; `Aborted` -> `Aborted`; `Failed` -> `CompletedWithErrors` when the printer completed the job with errors, otherwise `Aborted` |
+| `reasons` | the printer's reasons, then the print's warnings (so "completed with warnings" shows here) |
+| `progress` | `Progress { done: sheets done, total: sheets total }`; pages when no sheets are reported; `None` before any reading. Expected totals from the options fill a missing total |
+| `times` | `created` (wall clock at creation), `started` (wall clock of the first send), `finished` (creation plus the job clock's offset at the ending; cleared by a manual `retry()`) |
+| `documents` | the document sent: the title as its name, `pdf` and so on, its length, the expected page count when the options gave one |
+| `attempts` | the number of the latest attempt |
+| `last_error` | `ErrorSummary { message, kind_label: ErrorKind::name(), retry_advice: the snapshot's advice, native }` |
+| `tag` | the tag, only when the requests carried it |
+| `device_name` | the namespaced printer id (the registry knows no friendlier name without I/O) |
 
 Actions: `cancel(&Registry)`, `retry()`, `reconcile(&Registry)`, `accept(&Registry, &JobId)` (adopt a
 job reconcile found), `refresh(&Registry)` (read the status now, resuming a stopped watch) and
@@ -122,10 +143,10 @@ backend checks it at its own checkpoints).
    * `Found(job)`: the earlier attempt did create it. `accept` adopts it and the job carries on as
      `Watching`; `retry` would duplicate it.
    * `NotFound`: advice is `RetryNow` when the backend lists finished jobs too (so a quick job that
-     already printed would still show), otherwise `CheckPrinterFirst`.
+     already printed would still show), otherwise `CheckDeviceFirst`.
    * `Ambiguous(jobs)`: several candidates (the same title was printed before, or two attempts both
      got through). The person looks at the states and `accept`s one or retries.
-   * `Err(Unsupported)`: the backend cannot be asked; advice is `CheckPrinterFirst`.
+   * `Err(Unsupported)`: the backend cannot be asked; advice is `CheckDeviceFirst`.
 3. **A printer-side `Aborted` or `Cancelled` is never retried automatically.** It is a decision (or a
    fault) at the device; `retry()` is manual, makes a new attempt, gets a new remote `JobId`, and the
    history is kept.
@@ -144,18 +165,21 @@ protocol allows:
 
 ```text
 SubmitRequest::with_tag(tag)        // the request carries it
-Backend::tag_support() -> TagSupport { placement: TagPlacement, matchable: bool }
-TagPlacement::JobName      // a suffix on the job name: "Quarterly report [ref abc123de]"
-TagPlacement::DocumentName // the same suffix on the document name
-TagPlacement::Native       // a job attribute of the protocol (a dedicated, searchable field)
-TagPlacement::None         // the backend cannot carry it
+Backend::tag_support() -> TagSupport      // craft_job: None | Carried(TagPlacement) | Partial(TagPlacement)
+TagPlacement::JobNameSuffix   // a suffix on the job name: "Quarterly report [ref abc123de]"
+TagPlacement::DocumentName    // the same suffix on the document name
+TagPlacement::NativeAttribute // a job attribute of the protocol (a dedicated, searchable field)
+TagPlacement::None            // the backend cannot carry it
 ```
 
 * The backend applies the tag, because it knows its own limits (a name length cap): the title is cut
-  so that the suffix survives (`JobTag::apply_to`), and it is **appended exactly once** however many
+  so that the suffix survives (`TagExt::apply_to`), and it is **appended exactly once** however many
   attempts there are. The registry drops a tag a backend cannot carry, and `Submitted::tag` says what
   was carried.
-* `matchable` says whether `list_jobs` returns the tag back, so that reconcile can match on it.
+* `TagSupport::Carried` says the tag is carried and `list_jobs` returns it back, so that reconcile can
+  match on it (`TagSupportExt::matchable`). `Partial` carries the tag but a device may rewrite it; a
+  reconcile then falls back to title, user and time. `None` carries nothing. The tag text is
+  `craft_job::Tag` (`Tag::parse_from_title` finds the last well-formed marker in a title, wherever it is).
 * **Defaults.** On for `BackendClass::Network` backends, off for `BackendClass::Local`
   (`TagPolicy::Auto`; `Always` and `Never` override it per job).
   * Network: connection loss is exactly where the ambiguity arises, and the user's job name is a
@@ -188,9 +212,9 @@ capabilities one at a time and a caller can tell exactly which it has.
 
 ```text
 RemoteJob   { id: JobId, title, user: Option<_>, created: Option<SystemTime>, state: JobState,
-              reasons, tag: Option<JobTag>, ours: bool, sheets_done, pages_done }
+              reasons, tag: Option<Tag>, ours: bool, sheets_done, pages_done }
 JobFilter   { user, title, since, tag, states }      // user/title/since/states restrict; tag marks `ours`
-Fingerprint { title, user, tag, since }              // what reconcile looks for
+Fingerprint { title, user, submitted, window, tag }   // craft_job: what reconcile looks for
 Reconciled  { NotFound, Found(RemoteJob), Ambiguous(Vec<RemoteJob>) }
 JobQueryCaps{ list, created_time, user, tag, history }
 
@@ -221,7 +245,7 @@ adapters do in this change.
 | Listing | `lpstat -W all -o` (text, ids and user, no titles) or IPP `Get-Jobs` with `which-jobs` and `requested-attributes`. |
 | User | `job-originating-user-name`. |
 | Created time | `time-at-creation` (seconds since the scheduler started) and `date-time-at-creation` when present. |
-| States | `pending`, `pending-held`, `processing`, `processing-stopped`, `canceled`, `aborted`, `completed` map to `Pending`, `Held`, `Processing`, `Stopped`, `Cancelled`, `Aborted`, `Completed` (reasons such as `job-completed-with-warnings` refine `Completed`). |
+| States | `pending`, `pending-held`, `processing`, `processing-stopped`, `canceled`, `aborted`, `completed` map to `Pending`, `Held`, `Processing`, `NeedsAttention`, `Cancelled`, `Aborted`, `Completed` (reasons such as `job-completed-with-warnings` become `JobStatus::warnings` on `Completed`). |
 | Cancel | `cancel <id>` / IPP `Cancel-Job`. |
 | Forgetting | finished jobs are kept as history by default (`PreserveJobHistory`, `MaxJobs`), so `which-jobs=completed` still finds them for a while; `history: true`. |
 | Today | `SystemSpooler` (name `cups`): `tag_support` none, `job_query_caps` none, `list_jobs` returns `Unsupported`. Reason: the adapter shells out to `lp`/`lpstat`, which do not show titles, and listing by IPP needs a client this crate does not have; neither can be exercised on the Windows development machines or in CI here, so it is not shipped untested. The neutral types are what a future adapter fills in. |
@@ -230,7 +254,7 @@ adapters do in this change.
 
 | Aspect | |
 |---|---|
-| Tag | `job-name` suffix (visible on the device display); a dedicated field is better where the server accepts one: a job attribute (`TagPlacement::Native`) that `Get-Jobs` returns. `job-uuid` is assigned by the printer and cannot carry ours, but it is the stable handle to use after the first reply. |
+| Tag | `job-name` suffix (visible on the device display); a dedicated field is better where the server accepts one: a job attribute (`TagPlacement::NativeAttribute`) that `Get-Jobs` returns. `job-uuid` is assigned by the printer and cannot carry ours, but it is the stable handle to use after the first reply. |
 | Listing | `Get-Jobs` with `which-jobs` (`not-completed`, `completed`, `all`), `limit`, `my-jobs`, `requesting-user-name`. |
 | Attributes | `job-id`, `job-uuid`, `job-name`, `job-originating-user-name`, `job-state`, `job-state-reasons`, `time-at-creation` or `date-time-at-creation`, `job-media-sheets-completed`, `job-impressions-completed`. |
 | States | as for CUPS (RFC 8011 `job-state`). |
@@ -246,7 +270,7 @@ adapters do in this change.
 | Job id | returned when the document is started; the current adapter does not keep it (`Submitted::job` is `None`). |
 | Listing | `EnumJobs` / `GetJob` (`JOB_INFO_1`/`2`). |
 | Fields | `pDocument` (title), `pUserName`, `Submitted` (`SYSTEMTIME`, local time), `Status` bit flags, `TotalPages`, `PagesPrinted`. |
-| States | `JOB_STATUS_PAUSED` -> `Held`; `SPOOLING`/`PRINTING`/`PRINTED` -> `Processing`; `ERROR`/`OFFLINE`/`PAPEROUT`/`USER_INTERVENTION`/`BLOCKED_DEVQ` -> `Stopped` with a reason; `DELETING`/`DELETED` -> `Cancelled`; `COMPLETE` -> `Completed`; no flags and queued -> `Pending`. |
+| States | `JOB_STATUS_PAUSED` -> `Held`; `SPOOLING`/`PRINTING`/`PRINTED` -> `Processing`; `ERROR`/`OFFLINE`/`PAPEROUT`/`USER_INTERVENTION`/`BLOCKED_DEVQ` -> `NeedsAttention` with a reason; `DELETING`/`DELETED` -> `Cancelled`; `COMPLETE` -> `Completed`; no flags and queued -> `Pending`. |
 | Cancel | `SetJob(JOB_CONTROL_DELETE)`. |
 | Forgetting | **finished jobs vanish** from the queue unless the printer keeps them (`JOB_STATUS_RETAIN`): `history: false`. "Not listed" after submission therefore most likely means printed. |
 | Today | `SystemSpooler` (name `spooler`): no job handle, `tag_support` none, `list_jobs` `Unsupported`. Reason: the printing code is a separate, large Windows path (XPS, Direct2D) that does not keep the spooler job id; listing needs it re-plumbed and a real queue to test against. Not testable here, so not shipped. |
@@ -255,7 +279,7 @@ adapters do in this change.
 
 | Aspect | |
 |---|---|
-| Tag | `JobName` in the print ticket, suffix form (`TagPlacement::JobName`, `matchable: true`). The job name is cut to the protocol's 255 characters with the suffix kept. |
+| Tag | `JobName` in the print ticket, suffix form (`TagSupport::Carried(TagPlacement::JobNameSuffix)`). The job name is cut to the protocol's 255 characters with the suffix kept. |
 | Job id | `CreatePrintJob` reply (`JobId`); the neutral id is `wsd:<printer url>#<id>`. |
 | Listing | `GetActiveJobs` and `GetJobHistory` (`JobSummary`: id, state, name, user, counters); `GetJobElements` for one job when a summary lacks the name or user. |
 | User | `JobOriginatingUserName` (the backend sends a fixed name, never the account). |

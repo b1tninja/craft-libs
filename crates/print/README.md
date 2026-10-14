@@ -84,15 +84,16 @@ match watch.tick(registry) {
 ```
 
 * `Submitted` carries a typed `JobId` (`backend()` and `native()`; text form `"wsd:<printer>#7"` via
-  `Display`/`FromStr`, `JobId::new(backend, native)` to build one, a typed `ParseJobIdError` for bad
+  `Display`/`FromStr`, `JobId::new(backend, native)` to build one, a typed `ParseIdError` for bad
   text, never a panic), `accepted_at`, warnings, a message, and what the backend can do afterwards
   (`watch: WatchSupport`, `poll_interval`). The job is `None` for a spooler that gives no handle.
 * `WatchSupport::None` means the backend cannot report (a fire-and-forget spooler): the status is
   `JobState::Unknown`, "accepted, outcome unknown", which is not terminal and not a failure. Do not
   poll it. `Poll` means ask every `poll_interval`; `Events` is reserved (nothing listens yet).
-* `JobStatus` has a `JobState` (Pending, Held, Processing, Stopped, Completed, CompletedWithWarnings,
-  CompletedWithErrors, Cancelled, Aborted, Unknown), reasons, optional sheet and page counters and
-  `terminal()`. A job the device has forgotten is `ErrorKind::NotFound`; a watch reports it as
+* `JobStatus` has a `JobState` (Pending, Held, Processing, NeedsAttention, Completed,
+  CompletedWithErrors, Cancelled, Aborted, Unknown), reasons, `warnings` (a completed job the printer
+  qualified: "completed with warnings" is `Completed` plus this list), optional sheet and page counters
+  and `terminal()`. A job the device has forgotten is `ErrorKind::NotFound`; a watch reports it as
   `WatchOutcome::Forgotten` (most likely finished).
 * `Registry::job_status(&JobId)` and `cancel_job(&JobId)` are single bounded requests routed by the
   id's backend. Keep the `JobId` (or its string and `.parse()` it later); do not build ids by hand.
@@ -105,8 +106,9 @@ match watch.tick(registry) {
 * **Retry.** `PrintError::is_retryable()` says the condition is transient; `retry_safety()` says
   whether sending again is safe: `Safe` (nothing was accepted), `Idempotent` (a query or cancel) or
   `OutcomeUnknown` (the request may have arrived: reconcile before resubmitting). `phase()` and
-  `retry_after()` complete it, and `RetryPolicy` (`next_delay`, `delay`, the `retry` helper) is a
-  bounded exponential backoff with jitter that never repeats an `OutcomeUnknown` error. The neutral
+  `retry_after()` complete it, and `RetryPolicy` (`delay`, `advise_error`, the `retry` helper) is a
+  bounded exponential backoff with jitter; `advise` answers `CheckDeviceFirst` for an `OutcomeUnknown`
+  error and nothing here repeats it. The neutral
   defaults per `ErrorKind` are tabulated in [docs/job-lifecycle.md](docs/job-lifecycle.md), which also
   has the survey of how CUPS/IPP, WS-Print and the Windows spooler separate accepting from printing.
 * `Registry::submit` and `submit_to_backend` still return a `Receipt`; it now means "accepted".
@@ -133,7 +135,8 @@ let view = print.snapshot();                 // cheap and immutable: for the UI,
 
 * **Lifecycle** (separate from the printer's `JobState`): `Preparing`, `Submitting`, `Accepted`,
   `Watching(JobState)`, `RetryScheduled { attempt, next_at }`, `NeedsAttention` (the outcome of a send is
-  unknown) and `Terminal(Completed | CompletedWithWarnings | Failed | Cancelled | Aborted)`.
+  unknown) and `Terminal(Completed | CompletedWithWarnings | Failed | Cancelled | Aborted)` (the lifecycle
+  keeps `CompletedWithWarnings`; the printer's `JobState` does not).
 * **Retry.** Safe, transient failures are retried automatically under a `RetryPolicy` (on by default, at
   most 3 attempts, the device's `retry_after` honoured; `with_retry(None)` turns it off). An
   `OutcomeUnknown` failure is **never** retried automatically: the print waits in `NeedsAttention`, and
@@ -141,7 +144,13 @@ let view = print.snapshot();                 // cheap and immutable: for the UI,
   `NotFound`); then `accept(job)` adopts it or `retry()` sends again. A printer-side abort or cancel is a
   manual `retry()` as well: a new attempt, a new remote `JobId`, the history kept.
 * **`retry_advice()`** is the one question a UI has: `RetryNow`, `RetryAfter(duration)`,
-  `CheckPrinterFirst` or `DoNotRetry`. `cancel()` works in every state.
+  `CheckDeviceFirst` or `DoNotRetry`. `cancel()` works in every state.
+* **`view()`** is the print as a `craft_job::JobView` (`PrintJob::view()`, `Snapshot::view()`), the same
+  record a scan job fills: id (the printer's job id once accepted, a `local:print-<n>` id before),
+  `JobKind::Print`, title, a `craft_job::JobState`, reasons (printer reasons, then the print's warnings),
+  progress, wall-clock times, the document sent, the attempt count, the last error with its retry advice
+  and native code, the tag and the printer id. No I/O. The field-by-field mapping is in
+  [docs/job-tracking.md](docs/job-tracking.md) section 3.
 * **The idempotency tag.** Each `PrintJob` makes a short random tag (`abc123de`) once and puts it on every
   attempt where the backend can carry it (`SubmitRequest::with_tag`, `Backend::tag_support()`: a
   job-name suffix `"title [ref abc123de]"`, a document name, a native attribute, or nothing), so that
@@ -156,6 +165,25 @@ let view = print.snapshot();                 // cheap and immutable: for the UI,
   (`ours == false`). The WS-Print backend implements them; the built-in CUPS and Windows-spooler adapters
   answer `Unsupported` for `list_jobs` in this version. The mapping of CUPS, IPP, the Windows spooler and
   WS-Print onto these types, and the reasoning, are in [docs/job-tracking.md](docs/job-tracking.md).
+
+### Shared vocabulary: `craft-job`
+
+The names that printing and scanning have in common live in the small `craft-job` crate and are
+re-exported here, so `craft_print::JobId`, `NativeCode`, `RetrySafety`, `RetryPolicy`, `RetryAdvice`,
+`Jitter`, `JobState`, `Progress`, `ExpectedTotals`, `Tag`, `TagSupport`, `TagPlacement`, `Fingerprint`
+and `JobView` keep resolving. What stays here: `PrintJob` and its lifecycle, `Attempt` and the trail,
+the reconcile engine, `RemoteJob`/`JobFilter`/`JobQueryCaps`, `ErrorKind`/`PrintError`, `Clock`. The
+domain additions to the shared types are extension traits, re-exported from the crate root and
+imported where used: `TagExt` (`Tag::random()`, `apply_to`, `strip`, `find_in`), `TagSupportExt`
+(`carries`, `matchable`), `FingerprintExt` (`since`, `filter`), `ExpectedTotalsExt` (`for_job`,
+`apply`) and `JitterExt` (`from_clock`).
+
+Renamed relative to the earlier drafts of this crate: `JobTag` is `Tag` (and is `Copy`),
+`ParseJobIdError` is `ParseIdError`, `RetryAdvice::CheckPrinterFirst` is `CheckDeviceFirst`,
+`JobState::Stopped` is `NeedsAttention`, `JobState::CompletedWithWarnings` is gone (see above),
+`TagPlacement::{JobName, Native}` are `{JobNameSuffix, NativeAttribute}`, `TagSupport` is an enum
+(`None`, `Carried(placement)`, `Partial(placement)`) instead of a struct with `matchable`, and
+`RetryPolicy::next_delay` is replaced by `advise` / `advise_error`.
 
 ### Per-job options and totals
 
@@ -293,7 +321,8 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   listener and a lease; that is a documented future option and nothing listens) and
   `recommended_poll_interval()` is two seconds (`with_poll_interval`). `job_status` is one
   `GetJobElements`: the nine WS-Print job states map to `Pending`, `Held`, `Processing` (also
-  `Started` and `Terminating`), `Stopped`, `Completed`, `CompletedWithWarnings`,
+  `Started` and `Terminating`), `NeedsAttention` (a stopped job), `Completed` (with
+  `JobStatus::warnings` when the reasons say `JobCompletedWithWarnings`),
   `CompletedWithErrors` (from the state reasons), `Cancelled` and `Aborted` (`Other` is `Unknown`),
   with the state reasons and `sheets_done` (`MediaSheetsCompleted`; WS-Print does not give a total).
   A job the printer does not list is `ErrorKind::NotFound` whose message says printers forget finished

@@ -10,7 +10,8 @@
 //! * the request-size cap, the per-request timeout and an overall deadline, and a cancel token
 //!   checked before every exchange;
 //! * the reply: the root part of a multipart answer, the body cap, the rule that a non-success
-//!   HTTP status is an [`Error::Http`] unless the body is a SOAP envelope carrying a fault, and
+//!   HTTP status is an [`Error::Http`] (with the device's `Retry-After`) unless the body is a SOAP
+//!   envelope carrying a fault (which keeps the `Retry-After` too), and
 //!   the checked reading of the envelope ([`crate::envelope::read_reply`]) with faults mapped to
 //!   [`Error::Fault`].
 //!
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 use roxmltree::Node;
 
 use crate::cancel::CancelToken;
-use crate::envelope::{self, Expect, build_envelope_with_headers, new_uuid, read_ack, read_reply};
+use crate::envelope::{self, Expect, build_envelope_with_headers, new_uuid, read_ack_hinted, read_reply_hinted};
 use crate::error::{Error, Result};
 use crate::mtom;
 use crate::ns;
@@ -225,14 +226,14 @@ impl<T: Transport> SoapClient<T> {
         let ReplyShape::Element(body_ns, body_local) = &call.reply else {
             return Err(Error::Invalid("call: this call expects no reply payload; use call_ack".into()).into());
         };
-        let (id, bytes) = self.exchange(call)?;
-        read_reply(&bytes, Expect { action: &call.response_action, message_id: &id, body_ns, body_local }, read)
+        let (id, bytes, retry_after) = self.exchange(call)?;
+        read_reply_hinted(&bytes, Expect { action: &call.response_action, message_id: &id, body_ns, body_local }, retry_after, read)
     }
 
     /// Send `call` and check only that the answer is not a fault and belongs to the request.
     pub fn call_ack<E: From<Error>>(&self, call: &Call<'_>) -> Result<(), E> {
-        let (id, bytes) = self.exchange(call)?;
-        read_ack(&bytes, &call.response_action, &id)
+        let (id, bytes, retry_after) = self.exchange(call)?;
+        read_ack_hinted(&bytes, &call.response_action, &id, retry_after)
     }
 
     /// Like [`Self::call`], for replies that may carry binary parts (scanned images): `read` also
@@ -252,16 +253,19 @@ impl<T: Transport> SoapClient<T> {
         if ok && mtom::is_multipart(&ct) && response.body.len() <= self.limits.max_response {
             let parts = mtom::parts(&ct, &response.body)?;
             let root = mtom::root_of(&ct, &parts)?;
-            return read_reply(root.data, Expect { action: &call.response_action, message_id: &id, body_ns, body_local }, |n| read(n, &parts));
+            let expect = Expect { action: &call.response_action, message_id: &id, body_ns, body_local };
+            return read_reply_hinted(root.data, expect, response.retry_after, |n| read(n, &parts));
         }
+        let retry_after = response.retry_after;
         let xml = self.reply_xml(response)?;
-        read_reply(&xml, Expect { action: &call.response_action, message_id: &id, body_ns, body_local }, |n| read(n, &[]))
+        read_reply_hinted(&xml, Expect { action: &call.response_action, message_id: &id, body_ns, body_local }, retry_after, |n| read(n, &[]))
     }
 
-    /// Post the call and return its message id with the reply's XML bytes.
-    fn exchange(&self, call: &Call<'_>) -> Result<(String, Vec<u8>)> {
+    /// Post the call and return its message id with the reply's XML bytes and `Retry-After`.
+    fn exchange(&self, call: &Call<'_>) -> Result<(String, Vec<u8>, Option<Duration>)> {
         let (id, response) = self.post(call)?;
-        Ok((id, self.reply_xml(response)?))
+        let retry_after = response.retry_after;
+        Ok((id, self.reply_xml(response)?, retry_after))
     }
 
     /// Post the call: its message id and the raw reply.
@@ -290,17 +294,19 @@ impl<T: Transport> SoapClient<T> {
     /// all keep the status); the fault is then read later by `read_reply`.
     fn reply_xml(&self, response: Response) -> Result<Vec<u8>> {
         let ok = (200..300).contains(&response.status);
+        let (status, retry_after) = (response.status, response.retry_after);
+        let http = || Error::http_retry_after(status, retry_after);
         if response.body.len() > self.limits.max_response {
-            return Err(if ok { Error::TooLarge(self.reply_label, self.limits.max_response) } else { Error::Http(response.status) });
+            return Err(if ok { Error::TooLarge(self.reply_label, self.limits.max_response) } else { http() });
         }
         let ct = response.content_type.clone().unwrap_or_default();
         let xml = if mtom::is_multipart(&ct) {
-            mtom::root_part(&ct, &response.body).map(<[u8]>::to_vec).map_err(|e| if ok { e } else { Error::Http(response.status) })?
+            mtom::root_part(&ct, &response.body).map(<[u8]>::to_vec).map_err(|e| if ok { e } else { http() })?
         } else {
             response.body
         };
         if !ok && !is_fault_envelope(&xml) {
-            return Err(Error::Http(response.status));
+            return Err(http());
         }
         Ok(xml)
     }
@@ -338,6 +344,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::error::TransportKind;
 
     const SVC: &str = "urn:example:service";
     const ACT: &str = "urn:example:service/DoIt";
@@ -360,6 +367,7 @@ mod tests {
                 let text = String::from_utf8_lossy(&req.body).into_owned();
                 let id = text.split("urn:uuid:").nth(1).and_then(|r| r.split('<').next()).unwrap_or("").to_owned();
                 Ok(Response {
+                    retry_after: None,
                     status: 200,
                     content_type: Some("application/soap+xml".into()),
                     body: reply_envelope(ACT_RESP, &id, &[("svc", SVC)], "<svc:DoItResponse><svc:Value>42</svc:Value></svc:DoItResponse>")
@@ -436,8 +444,8 @@ mod tests {
         let script = Script::echo();
         let client = SoapClient::new(&script, url());
         assert_eq!(client.call(&call(), |_| Err::<(), _>(Mine::Odd)), Err(Mine::Odd));
-        let down = Script::new(|_| Err(Error::Transport("down".into())));
-        assert_eq!(SoapClient::new(&down, url()).call(&call(), value), Err(Error::Transport("down".into())));
+        let down = Script::new(|_| Err(Error::transport(TransportKind::Refused, "down")));
+        assert_eq!(SoapClient::new(&down, url()).call(&call(), value), Err(Error::transport(TransportKind::Refused, "down")));
     }
 
     #[test]
@@ -448,6 +456,7 @@ mod tests {
                 let id = text.split("urn:uuid:").nth(1).and_then(|r| r.split('<').next()).unwrap_or("").to_owned();
                 let body = "<s:Fault><s:Code><s:Value>s:Receiver</s:Value><s:Subcode><s:Value xmlns:v=\"urn:example:service\">v:Busy</s:Value></s:Subcode></s:Code><s:Reason><s:Text>busy</s:Text></s:Reason></s:Fault>";
                 Ok(Response {
+                    retry_after: None,
                     status,
                     content_type: Some("application/soap+xml".into()),
                     body: reply_envelope(ns::FAULT_ACTION, &id, &[], body).into_bytes(),
@@ -462,15 +471,18 @@ mod tests {
             }
         }
         let html = |status: u16| {
-            Script::new(move |_| Ok(Response { status, content_type: Some("text/html".into()), body: b"<html>maintenance</html>".to_vec() }))
+            Script::new(move |_| {
+                Ok(Response { retry_after: None, status, content_type: Some("text/html".into()), body: b"<html>maintenance</html>".to_vec() })
+            })
         };
-        assert_eq!(SoapClient::new(&html(503), url()).call(&call(), value), Err(Error::Http(503)));
+        assert_eq!(SoapClient::new(&html(503), url()).call(&call(), value), Err(Error::http(503)));
         assert!(SoapClient::new(&html(503), url()).call(&call(), value).unwrap_err().is_retryable());
         // A 200 with the wrong reply action is a protocol error.
         let wrong = Script::new(|req| {
             let text = String::from_utf8_lossy(&req.body).into_owned();
             let id = text.split("urn:uuid:").nth(1).and_then(|r| r.split('<').next()).unwrap_or("").to_owned();
             Ok(Response {
+                retry_after: None,
                 status: 200,
                 content_type: None,
                 body: reply_envelope("urn:other", &id, &[("svc", SVC)], "<svc:DoItResponse/>").into_bytes(),
@@ -482,14 +494,16 @@ mod tests {
     #[test]
     fn oversized_replies_and_requests_are_refused() {
         let big = |status: u16| {
-            Script::new(move |_| Ok(Response { status, content_type: None, body: vec![b' '; NetworkLimits::default().max_response + 1] }))
+            Script::new(move |_| {
+                Ok(Response { retry_after: None, status, content_type: None, body: vec![b' '; NetworkLimits::default().max_response + 1] })
+            })
         };
         let c = SoapClient::new(big(200), url()).with_reply_label("the printer's reply");
         match c.call(&call(), value) {
             Err(e @ Error::TooLarge(..)) => assert!(e.to_string().contains("the printer's reply"), "{e}"),
             other => panic!("{other:?}"),
         }
-        assert_eq!(SoapClient::new(big(500), url()).call(&call(), value), Err(Error::Http(500)));
+        assert_eq!(SoapClient::new(big(500), url()).call(&call(), value), Err(Error::http(500)));
         let script = Script::echo();
         let tiny = NetworkLimits { max_request: 100, ..NetworkLimits::default() };
         assert!(matches!(SoapClient::new(&script, url()).with_limits(tiny).call(&call(), value), Err(Error::TooLarge("the request", 100))));
@@ -543,7 +557,7 @@ mod tests {
         let empty = Script::new(|req| {
             let text = String::from_utf8_lossy(&req.body).into_owned();
             let id = text.split("urn:uuid:").nth(1).and_then(|r| r.split('<').next()).unwrap_or("").to_owned();
-            Ok(Response { status: 200, content_type: None, body: reply_envelope(ACT_RESP, &id, &[], "").into_bytes() })
+            Ok(Response { retry_after: None, status: 200, content_type: None, body: reply_envelope(ACT_RESP, &id, &[], "").into_bytes() })
         });
         let client = SoapClient::new(&empty, url());
         assert!(client.call_ack::<Error>(&Call::new(ACT, ACT_RESP)).is_ok());
@@ -565,7 +579,7 @@ mod tests {
             let id = String::from_utf8_lossy(root).split("urn:uuid:").nth(1).and_then(|r| r.split('<').next()).unwrap_or("").to_owned();
             let inner = reply_envelope(ACT_RESP, &id, &[("svc", SVC)], "<svc:DoItResponse><svc:Value>7</svc:Value></svc:DoItResponse>");
             let pkg = mtom::package(&inner, "x@y", b"unused");
-            Ok(Response { status: 200, content_type: Some(pkg.content_type), body: pkg.body })
+            Ok(Response { retry_after: None, status: 200, content_type: Some(pkg.content_type), body: pkg.body })
         });
         let c = Call::new(ACT, ACT_RESP)
             .reply_element(SVC, "DoItResponse")
@@ -579,9 +593,11 @@ mod tests {
     #[test]
     fn broken_multipart_replies_keep_the_http_status_when_not_successful() {
         let bad = |status: u16| {
-            Script::new(move |_| Ok(Response { status, content_type: Some("multipart/related; boundary=b".into()), body: b"<html>".to_vec() }))
+            Script::new(move |_| {
+                Ok(Response { retry_after: None, status, content_type: Some("multipart/related; boundary=b".into()), body: b"<html>".to_vec() })
+            })
         };
-        assert_eq!(SoapClient::new(bad(502), url()).call(&call(), value), Err(Error::Http(502)));
+        assert_eq!(SoapClient::new(bad(502), url()).call(&call(), value), Err(Error::http(502)));
         assert!(matches!(SoapClient::new(bad(200), url()).call(&call(), value), Err(Error::Protocol(_) | Error::Xml(_))));
     }
 
@@ -597,7 +613,7 @@ mod tests {
                 &format!("<svc:DoItResponse><svc:Image>{}</svc:Image></svc:DoItResponse>", mtom::xop_include_ref("img@x")),
             );
             let pkg = mtom::package(&inner, "img@x", b"PIXELS");
-            Ok(Response { status: 200, content_type: Some(pkg.content_type), body: pkg.body })
+            Ok(Response { retry_after: None, status: 200, content_type: Some(pkg.content_type), body: pkg.body })
         });
         let read = |n: Node<'_, '_>, parts: &[mtom::Part<'_>]| -> Result<Vec<u8>> {
             let inc = xml::find(n, ns::XOP, "Include").ok_or_else(|| Error::Protocol("no include".into()))?;
@@ -612,7 +628,79 @@ mod tests {
             matches!(SoapClient::new(&plain, url()).call_with_parts(&call(), |n, parts| { assert!(parts.is_empty()); value(n) }), Ok(v) if v == "42")
         );
         // Faults still win.
-        let busy = Script::new(|_| Ok(Response { status: 503, content_type: Some("text/html".into()), body: b"x".to_vec() }));
-        assert_eq!(SoapClient::new(&busy, url()).call_with_parts(&call(), |_, _| Ok::<_, Error>(())), Err(Error::Http(503)));
+        let busy = Script::new(|_| Ok(Response { retry_after: None, status: 503, content_type: Some("text/html".into()), body: b"x".to_vec() }));
+        assert_eq!(SoapClient::new(&busy, url()).call_with_parts(&call(), |_, _| Ok::<_, Error>(())), Err(Error::http(503)));
+    }
+
+    const BUSY_FAULT: &str = "<s:Fault><s:Code><s:Value>s:Receiver</s:Value><s:Subcode><s:Value xmlns:v=\"urn:example:service\">v:Busy</s:Value><s:Subcode><s:Value xmlns:v=\"urn:example:service\">v:PaperOut</s:Value></s:Subcode></s:Subcode></s:Code><s:Reason><s:Text>busy</s:Text></s:Reason></s:Fault>";
+
+    fn id_of(req: &Request) -> String {
+        let text = String::from_utf8_lossy(&req.body).into_owned();
+        text.split("urn:uuid:").nth(1).and_then(|r| r.split('<').next()).unwrap_or("").to_owned()
+    }
+
+    #[test]
+    fn retry_after_reaches_http_errors_and_faults_on_every_call_path() {
+        let wait = Some(Duration::from_secs(7));
+        // A non-SOAP 503: the status error carries the wait.
+        let html = Script::new(move |_| Ok(Response::new(503, Some("text/html".into()), b"<html/>".to_vec()).with_retry_after(wait)));
+        let e = SoapClient::new(&html, url()).call(&call(), value).unwrap_err();
+        assert_eq!(e, Error::http_retry_after(503, wait));
+        assert_eq!((e.retry_after(), e.http_status(), e.is_retryable()), (wait, Some(503), true));
+        assert_eq!(e.retry_safety(false), crate::RetrySafety::Safe, "a 503 is a decline, not a half-done job");
+        let e = SoapClient::new(&html, url()).call_ack::<Error>(&call()).unwrap_err();
+        assert_eq!(e.retry_after(), wait);
+        let e = SoapClient::new(&html, url()).call_with_parts(&call(), |_, _| Ok::<_, Error>(())).unwrap_err();
+        assert_eq!(e.retry_after(), wait);
+        // An oversized error body keeps the status and the wait too.
+        let big = Script::new(move |_| Ok(Response::new(429, None, vec![b' '; NetworkLimits::default().max_response + 1]).with_retry_after(wait)));
+        assert_eq!(SoapClient::new(&big, url()).call(&call(), value), Err(Error::http_retry_after(429, wait)));
+        // A fault in a 503 keeps the wait on the typed fault.
+        let fault = Script::new(move |req| {
+            Ok(Response::new(503, Some("application/soap+xml".into()), reply_envelope(ns::FAULT_ACTION, &id_of(req), &[], BUSY_FAULT).into_bytes())
+                .with_retry_after(wait))
+        });
+        for path in 0..3 {
+            let c = SoapClient::new(&fault, url());
+            let e = match path {
+                0 => c.call(&call(), value).unwrap_err(),
+                1 => c.call_ack::<Error>(&call()).unwrap_err(),
+                _ => c.call_with_parts(&call(), |_, _| Ok::<_, Error>(())).unwrap_err(),
+            };
+            let f = e.fault().unwrap();
+            assert_eq!((f.retry_after, e.retry_after()), (wait, wait), "path {path}");
+            assert!(e.is_fault(SVC, "Busy") && f.has_code(SVC, "PaperOut") && !f.is(SVC, "PaperOut"), "path {path}");
+            assert_eq!(f.nested, vec![crate::SubCode::new(Some(SVC), "PaperOut")]);
+        }
+        // Without a Retry-After there is none, and a success never carries one into the result.
+        let plain = Script::new(|req| Ok(Response::new(500, None, reply_envelope(ns::FAULT_ACTION, &id_of(req), &[], BUSY_FAULT).into_bytes())));
+        assert_eq!(SoapClient::new(&plain, url()).call(&call(), value).unwrap_err().retry_after(), None);
+        let ok = Script::echo();
+        assert!(SoapClient::new(&ok, url()).call(&call(), value).is_ok());
+    }
+
+    #[test]
+    fn a_third_party_transport_reports_failures_with_the_public_constructors() {
+        // An in-process transport (no sockets) that fails like a real one at different stages.
+        for (kind, stage, submit, query) in [
+            (TransportKind::Refused, crate::Stage::Connect, crate::RetrySafety::Safe, crate::RetrySafety::Safe),
+            (TransportKind::ConnectTimeout, crate::Stage::Connect, crate::RetrySafety::Safe, crate::RetrySafety::Safe),
+            (TransportKind::ConnectionClosed, crate::Stage::Reply, crate::RetrySafety::OutcomeUnknown, crate::RetrySafety::Idempotent),
+            (TransportKind::Timeout, crate::Stage::Reply, crate::RetrySafety::OutcomeUnknown, crate::RetrySafety::Idempotent),
+        ] {
+            let t = Script::new(move |_| Err(Error::transport(kind, "in-process failure")));
+            let e = SoapClient::new(&t, url()).call(&call(), value).unwrap_err();
+            assert_eq!((e.transport_kind(), e.stage(), e.retry_safety(false), e.retry_safety(true)), (Some(kind), stage, submit, query), "{kind}");
+            assert_eq!(t.count(), 1, "the client itself never retries");
+        }
+        // Cancellation and the deadline are raised before anything is sent: always safe.
+        let script = Script::echo();
+        let token = CancelToken::new();
+        token.cancel();
+        let e = SoapClient::new(&script, url()).with_cancel(token).call(&call(), value).unwrap_err();
+        assert_eq!((e.stage(), e.retry_safety(false)), (crate::Stage::Prepare, crate::RetrySafety::Safe));
+        let e = SoapClient::new(&script, url()).with_deadline(Instant::now()).call(&call(), value).unwrap_err();
+        assert_eq!((e.stage(), e.retry_safety(false)), (crate::Stage::Prepare, crate::RetrySafety::Safe));
+        assert_eq!(script.count(), 0);
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use craft_wsd::http::HttpTransport;
 use craft_wsd::testing::{Server, raw_response};
-use craft_wsd::{DeviceUrl, Error, Request, Transport};
+use craft_wsd::{DeviceUrl, Error, Request, RetrySafety, Stage, Transport, TransportKind};
 
 fn url(server: &Server) -> DeviceUrl {
     DeviceUrl::parse(&server.url("/ws")).unwrap()
@@ -42,7 +42,8 @@ fn redirects_are_refused_not_followed() {
         format!("HTTP/1.1 302 Found\r\nLocation: {target_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
     });
     let e = HttpTransport::new().post(&url(&redirecting), request()).unwrap_err();
-    assert!(matches!(e, Error::Transport(ref m) if m.contains("redirect")), "{e:?}");
+    assert!(matches!(e, Error::Transport { kind: TransportKind::Redirect, ref message, .. } if message.contains("redirect")), "{e:?}");
+    assert!(!e.is_retryable());
     assert_eq!(*target.hits.lock().unwrap(), 0, "the redirect target was never contacted");
 }
 
@@ -61,7 +62,8 @@ fn a_silent_device_times_out() {
     });
     let started = std::time::Instant::now();
     let e = HttpTransport::new().post(&url(&silent), Request { timeout: Duration::from_millis(300), ..request() }).unwrap_err();
-    assert!(matches!(e, Error::Transport(_)), "{e:?}");
+    assert_eq!(e.transport_kind(), Some(TransportKind::Timeout), "{e:?}");
+    assert!(e.is_retryable() && e.retry_safety(false) == RetrySafety::OutcomeUnknown, "a silent device may have the job: {e:?}");
     assert!(started.elapsed() < Duration::from_millis(1400), "{:?}", started.elapsed());
 }
 
@@ -94,7 +96,8 @@ fn a_server_that_closes_without_replying_fails_fast() {
     let started = std::time::Instant::now();
     let e = HttpTransport::new().post(&url(&server), r).unwrap_err();
     assert!(started.elapsed() < Duration::from_secs(5), "took {:?}: {e:?}", started.elapsed());
-    assert_eq!(e, Error::ConnectionClosed);
+    assert_eq!(e.transport_kind(), Some(TransportKind::ConnectionClosed), "{e:?}");
+    assert!(e.is_retryable());
 }
 
 /// One connection, kept alive: the first request is answered, the second is read and the socket
@@ -126,7 +129,8 @@ fn a_reused_connection_closed_without_a_reply_fails_fast() {
     let started = std::time::Instant::now();
     let e = t.post(&u, r).unwrap_err();
     assert!(started.elapsed() < Duration::from_secs(5), "took {:?}: {e:?}", started.elapsed());
-    assert_eq!(e, Error::ConnectionClosed);
+    assert_eq!(e.transport_kind(), Some(TransportKind::ConnectionClosed), "{e:?}");
+    assert!(e.is_retryable());
     drop(handle);
 }
 
@@ -157,7 +161,7 @@ fn a_peer_that_closes_early_or_half_closes_fails_fast_as_connection_closed() {
         let _ = s.read(&mut b);
         drop(s);
     });
-    assert!(took < Duration::from_secs(4) && e == Error::ConnectionClosed, "{took:?} {e:?}");
+    assert!(took < Duration::from_secs(4) && e.transport_kind() == Some(TransportKind::ConnectionClosed), "{took:?} {e:?}");
     // Reads the request, shuts down its sending side and keeps the socket open: still an immediate failure.
     let (took, e) = behaviour(|mut s| {
         let mut b = [0u8; 4096];
@@ -165,5 +169,50 @@ fn a_peer_that_closes_early_or_half_closes_fails_fast_as_connection_closed() {
         let _ = s.shutdown(Shutdown::Write);
         std::thread::sleep(Duration::from_secs(10));
     });
-    assert!(took < Duration::from_secs(4) && e == Error::ConnectionClosed, "{took:?} {e:?}");
+    assert!(took < Duration::from_secs(4) && e.transport_kind() == Some(TransportKind::ConnectionClosed), "{took:?} {e:?}");
+}
+
+#[test]
+fn nothing_listening_is_refused_at_the_connect_stage() {
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let u = DeviceUrl::parse(&format!("http://127.0.0.1:{port}/ws")).unwrap();
+    let e = HttpTransport::new().post(&u, request()).unwrap_err();
+    assert_eq!((e.transport_kind(), e.stage()), (Some(TransportKind::Refused), Stage::Connect), "{e:?}");
+    assert!(e.is_retryable());
+    assert_eq!(e.retry_safety(false), RetrySafety::Safe, "nothing was sent, so even a submit may be repeated");
+}
+
+fn reply_with(status: u16, headers: &str) -> Vec<u8> {
+    format!("HTTP/1.1 {status} X\r\n{headers}Content-Type: text/plain\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx").into_bytes()
+}
+
+fn retry_after_of(headers: &'static str) -> Option<Duration> {
+    let server = Server::start(move |_| reply_with(503, headers));
+    HttpTransport::new().post(&url(&server), request()).unwrap().retry_after
+}
+
+#[test]
+fn retry_after_comes_back_parsed_and_capped_and_hostile_values_are_ignored() {
+    assert_eq!(retry_after_of("Retry-After: 12\r\n"), Some(Duration::from_secs(12)));
+    assert_eq!(retry_after_of("Retry-After: 99999999999999999999999999\r\n"), Some(craft_wsd::MAX_RETRY_AFTER));
+    assert_eq!(retry_after_of("Retry-After: Fri, 31 Dec 9999 23:59:59 GMT\r\n"), Some(craft_wsd::MAX_RETRY_AFTER));
+    assert_eq!(retry_after_of("Retry-After: Sun, 06 Nov 1994 08:49:37 GMT\r\n"), Some(Duration::ZERO), "a date in the past is no wait");
+    for hostile in [
+        "Retry-After: -5\r\n",
+        "Retry-After: 1.5\r\n",
+        "Retry-After: soon\r\n",
+        "Retry-After: 5, 10\r\n",
+        "Retry-After:\r\n",
+        "Retry-After: 4\r\nRetry-After: 9\r\n",
+    ] {
+        assert_eq!(retry_after_of(hostile), None, "{hostile:?}");
+    }
+    assert_eq!(retry_after_of(""), None);
+    assert_eq!(retry_after_of("Retry-After: 4\r\nRetry-After: 4\r\n"), Some(Duration::from_secs(4)));
+    // The value reaches the Response whatever the status; the reader decides what it means.
+    let ok = Server::start(|_| reply_with(200, "Retry-After: 3\r\n"));
+    assert_eq!(HttpTransport::new().post(&url(&ok), request()).unwrap().retry_after, Some(Duration::from_secs(3)));
 }

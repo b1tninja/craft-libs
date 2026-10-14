@@ -132,6 +132,87 @@ and no status, IPP-like with state up front, WSD-like with formats and a consent
 one that always fails): aggregation, routing, partial failure, duplicate registration, unknown
 prefix, consent and format refusals.
 
+## WS-Print backend (cargo feature `wsd`)
+
+`craft_print::wsd::WsdBackend` prints to network printers that speak the WS-Print service
+(Web Services for Devices). It is a `BackendClass::Network` backend registered as `wsd`; its
+printers are `wsd:<url>`.
+
+```rust,no_run
+use craft_print::wsd::WsdBackend;
+use craft_print::{Document, Job, SubmitRequest, UserConfirmed};
+
+let wsd = WsdBackend::new();
+wsd.add_named("http://10.0.0.20:5357/print", "Front office")?; // the app chose this printer
+craft_print::register(Box::new(wsd.clone()))?;               // clones share the printer list
+
+let details = craft_print::printer_details("wsd:http://10.0.0.20:5357/print")?; // one round trip
+let job = Job { printer: Some("wsd:http://10.0.0.20:5357/print".into()), ..Job::default() };
+let request = SubmitRequest::new(Document::pdf(&pdf_bytes), job).with_consent(UserConfirmed::interactive());
+let receipt = craft_print::submit_to_backend(request)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+| Feature | Default | Adds | Notes |
+| --- | --- | --- | --- |
+| `wsd` | on | `craft-wsd` (git, see below) and `roxmltree`; through `craft-wsd`: `thiserror` and `ureq` (plain HTTP, no TLS, no proxy, no redirects) | Not built for `wasm32`. `--no-default-features` is the CUPS/Windows crate with none of them. |
+
+* **Safety stance.** Nothing in this feature discovers or connects until the app adds a printer.
+  The backend lists only printers the app added (`add`, `add_named`, `with_printers`); it does no
+  network discovery and sends no multicast (finding printers is a separate decision). Making a
+  backend, adding a printer and listing open no connection; a connection is made by
+  `printer_details` (one `GetPrinterElements`) and by a job. Every job needs consent: the
+  registry refuses a request without a `UserConfirmed` (`ErrorKind::ConsentRequired`), and the
+  backend checks again if it is called directly. A request can only reach a printer that was added.
+  URLs are `http://` with a numeric loopback, link-local or private address; host names, public
+  addresses, redirects and proxies are refused (`craft-wsd`'s policy). Replies, lists and XML are
+  size-capped and every reply is checked (action, relation to the request, namespaces).
+* **Printer details** map from `GetPrinterElements`: accepted formats (PDF, PWG raster,
+  PostScript, octet-stream, in the printer's order; other formats are not named), two-sided,
+  colour, paper names, maximum copies, status (idle, processing, stopped, with the reasons the
+  printer gives) and the hints it applies (copies, duplex, colour as grey). Unlisted
+  dimensions are `None` or empty, not "unsupported".
+* **Jobs.** A document is bytes in a `DocumentFormat` the printer lists (case-insensitively; the
+  printer's spelling is sent), otherwise `ErrorKind::UnsupportedFormat` before a job exists. The
+  job is created, the document sent as an MTOM part (or inline base64, `with_transfer`) and the
+  job watched until it ends; `submit` blocks for that (at most `with_poll`'s `max_wait` after
+  the document is sent, five minutes by default; a job still running then is reported as
+  accepted and left running). Copies, two-sided and grey come from the `Job`; collation, scaling
+  and driver options have no WS-Print setting and are reported as warnings in the receipt. The
+  cancel token is polled between round trips; cancelling before the document is sent cancels the
+  created job and returns `ErrorKind::Cancelled`, cancelling afterwards sends `CancelJob` and the
+  printer's end state decides (a cancel that loses the race to completion is a success).
+  Progress is `(done, 4)` protocol phases (capabilities read, job created, document sent, job
+  ended), not sheets.
+* **Ticket shapes.** Some printers' firmware does not answer tickets containing `JobProcessing` or
+  `DocumentProcessing`. `with_ticket_shape(TicketShape::Description | JobNameOnly | Empty)` sends a
+  smaller ticket (`Full`, the default, writes everything set). A smaller ticket has no room for
+  copies, two-sided and the like: such a job is refused before anything is sent
+  (`ErrorKind::InvalidRequest`) unless `with_drop_ticket_settings(true)` drops them with a
+  warning each. `with_strict(true)` refuses settings the printer lists as unsupported and sends
+  every setting as `MustHonor`; otherwise unsupported settings are lowered or left out, with a warning.
+* **Errors** are neutral `PrintError`s. Faults carry `NativeCode { domain: "wsd-fault", code,
+  name }` (codes 1 to 16 in the order of the service description, 100 for
+  `ActionNotSupported`, 0 for a vendor code) and temporary refusals (not accepting jobs,
+  temporary error, document active) are `ErrorKind::Busy`; HTTP 5xx, a connection that failed or
+  was closed with no reply are `Unavailable`; HTTP 429 is `Busy`; malformed or unexpected replies
+  are `Failed`. `is_retryable()` is preserved.
+* **Lower layers** are public for apps that need them: `wsd::client::Client` (one method per
+  operation: `GetPrinterElements`, `CreatePrintJob`, `SendDocument`, `GetJobElements`,
+  `GetActiveJobs`, `GetJobHistory`, `CancelJob`), `wsd::job::print_document` with a
+  `DocumentEncoder` (`PassThrough`, `Chain`, `RasterEncoder` over a caller-supplied page renderer
+  that writes PWG raster) and `cancel_job_tolerant`. `wsd::adapter` is the only file that names
+  `craft-wsd`.
+* **Dependency.** `craft-wsd` is in `storytold/craft-libs` pull request 113 and is pinned to that
+  pull request's ref (`rev = "refs/pull/113/head"`) until it merges; then pin an immutable
+  revision.
+* **Tests.** `tests/wsd_registry.rs` (through the registry: listing, policy, consent, format
+  refusal, ticket shapes, cancellation, progress, outcomes, faults, and hostile replies from
+  loopback servers: huge, malformed, wrong namespace, HTML 5xx, redirects, silence, connection
+  closed), `tests/wsd_client.rs` (the client layer against an in-memory fake printer) and the unit
+  tests of each module. `tests/wsd_live.rs` runs only when `FAKEPRINT_URL` names a loopback
+  WS-Print service of a test server; it is skipped otherwise.
+
 - **macOS/Linux:** CUPS `lpstat`, `lpoptions` and `lp`. Jobs stream through stdin. Exact-size
   sheets use `fit-to-page=false`; shrink-to-fit uses IPP `print-scaling=auto-fit`.
 - **Windows:** in this process, with no PowerShell, script or other program started, so

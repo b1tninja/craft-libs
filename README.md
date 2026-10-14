@@ -29,6 +29,8 @@ craft-<name> = { git = "https://github.com/storytold/craft-libs", rev = "<commit
   checks, 3D LUTs and built-in profiles (sRGB, Display P3, synthetic coated CMYK and others).
 - [`craft-print`](crates/print/README.md): PDF submission to CUPS and Windows, printer discovery,
   duplex/copies/colour and driver preferences. PDF generation stays in each app.
+  A registry of print backends, with a WS-Print network backend (cargo feature `wsd`, on by default;
+  it lists only printers the app adds and needs consent per job).
 
 - [`craft-quit`](crates/quit/src/lib.rs): native macOS quit, egui close handling and an optional
   app menu. Unsaved-document decisions and save prompts stay in each app.

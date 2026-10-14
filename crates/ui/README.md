@@ -4,7 +4,7 @@
 embedded SVG catalogs; `buttons` paints accessible icon buttons; `tabs` handles tab fitting and
 interaction; `layout` provides toolbar fitting, split geometry and resize handles; `theme` shares widget-state styling.
 `docking` supplies transactional panel moves and an optional docking surface.
-`printing` supplies printer/job controls and asynchronous feedback used by WordCraft and GridCraft.
+`printing` supplies printer/job controls and asynchronous feedback used by WordCraft and GridCraft, and a `printing::network` destination for printers reached by address.
 The current delivery covers nine creative apps (DesignCraft, VectorCraft, PhotoCraft, FilmCraft, EffectCraft, CADCraft, PDFCraft, LightCraft and SoundCraft); prior basic and office adapters are separate. The [suite audit](../../docs/ui-components-audit.md#adoption-and-acceptance)
 records their scope and acceptance limits. Assets, complete themes, localization and command handling
 remain in each application. No icons, fonts or application engines are bundled.
@@ -332,6 +332,28 @@ to unknown, an empty list to unsupported and a non-empty list to supported; `fro
 `is_known`, `is_enabled`, `choices`, `list` and `default_value` read it. The type carries no wording
 and no egui types; the application supplies the reason and the note. It describes capability only:
 a device's status (out of paper, cover open) is a separate, dynamic matter and should only warn.
+
+## Network printer destination
+
+`printing::network` adds a destination for a printer reached by address, beside the spooler-queue
+controls above; nothing in `printing::{State, Settings, Labels}` changes. It has its own light types
+(`PrinterSummary`, `Caps`, `Request`, `Report`, `Failure`) and depends on no print client: the host
+maps its client's answers into them. `Draft` is the pure model, `State` adds the workers.
+
+The host supplies `Host { validate, query, sheets_ok, formats }` and app-localised `network::Labels`
+(wording of the per-job confirmation included), and `State::show(ui, id, &host, &labels)` returns a
+`Response { block, changed, query_started, cancel_requested }`. `query` is a `QueryPrinter` closure
+returning an `mpsc` receiver; the job is a `SendJob` closure returning a `JobHandle` (a result
+receiver plus a cancel closure). `poll` runs each frame inside `show` and may be called directly.
+
+Rules kept by the model: only options the printer lists are offered and sent; the confirmation is
+never on by default and is cleared when the address changes, the printer is queried again, a job
+starts and the dialog opens (`dialog_opened`); answers for an older query or another address are
+dropped; Print is blocked (`Block`) until the typed address was queried, the printer takes one of the
+host's `formats`, there is something to print and the box is ticked. The Print button, document
+generation, the attestation flow and all translations stay with the app: enable Print when
+`Response::block` is `None` and call `State::start_job`, which re-checks every block and spends the
+confirmation. No network work happens while drawing, and dropping a result receiver cancels nothing.
 
 ## Compatibility and checks
 

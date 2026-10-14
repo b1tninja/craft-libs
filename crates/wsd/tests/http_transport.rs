@@ -216,3 +216,56 @@ fn retry_after_comes_back_parsed_and_capped_and_hostile_values_are_ignored() {
     let ok = Server::start(|_| reply_with(200, "Retry-After: 3\r\n"));
     assert_eq!(HttpTransport::new().post(&url(&ok), request()).unwrap().retry_after, Some(Duration::from_secs(3)));
 }
+
+#[test]
+fn a_peer_that_does_not_speak_http_is_an_invalid_response() {
+    use std::io::{Read, Write};
+    for garbage in [&b"\x00\x01\x02 this is not http at all\r\n\r\n"[..], b"HTTP/9.9 banana\r\n\r\n", b"SSH-2.0-OpenSSH_9.0\r\n"] {
+        let (took, e) = behaviour(move |mut s| {
+            let mut b = [0u8; 4096];
+            let _ = s.read(&mut b);
+            let _ = s.write_all(garbage);
+            let _ = s.flush();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        assert!(took < Duration::from_secs(5), "{took:?} {e:?}");
+        assert_eq!((e.transport_kind(), e.stage()), (Some(TransportKind::InvalidResponse), Stage::Reply), "{e:?}");
+        assert!(!e.is_retryable());
+        assert_eq!(e.retry_safety(false), RetrySafety::OutcomeUnknown);
+        assert_eq!(e.retry_safety(true), RetrySafety::Idempotent);
+    }
+}
+
+#[test]
+fn an_oversized_header_block_is_an_invalid_response() {
+    use std::io::{Read, Write};
+    let (_, e) = behaviour(|mut s| {
+        let mut b = [0u8; 4096];
+        let _ = s.read(&mut b);
+        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nX-Junk: ");
+        let _ = s.write_all(&vec![b'a'; 200_000]);
+        let _ = s.write_all(b"\r\n\r\n");
+        std::thread::sleep(Duration::from_millis(300));
+    });
+    assert_eq!(e.transport_kind(), Some(TransportKind::InvalidResponse), "{e:?}");
+}
+
+/// The header promises more body than arrives and the socket is then reset: the device went away
+/// mid-reply, which is a close (or, if the stack reports it otherwise, an I/O error), never HTTP nonsense.
+#[test]
+fn a_reset_in_the_middle_of_the_body_is_a_close_or_an_io_error() {
+    use std::io::{Read, Write};
+    let (took, e) = behaviour(|mut s| {
+        let mut b = [0u8; 4096];
+        let _ = s.read(&mut b);
+        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/soap+xml\r\nContent-Length: 100000\r\n\r\n<partial");
+        let _ = s.flush();
+        std::thread::sleep(Duration::from_millis(100));
+        drop(s);
+    });
+    assert!(took < Duration::from_secs(5), "{took:?} {e:?}");
+    assert!(matches!(e.transport_kind(), Some(TransportKind::ConnectionClosed | TransportKind::Io)), "{e:?}");
+    assert_eq!(e.stage(), Stage::Reply);
+    assert!(e.is_retryable());
+    assert_eq!(e.retry_safety(false), RetrySafety::OutcomeUnknown);
+}

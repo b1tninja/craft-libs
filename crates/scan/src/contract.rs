@@ -14,8 +14,8 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::{
-    Color, Connection, HRESULT_DOMAIN, HandlingStatus, Intent, InterruptKind, NativeCode, PageSize, ProgressToken, ScanError, ScanSettings, Source,
-    pages_in_error,
+    Color, Connection, HRESULT_DOMAIN, HandlingStatus, Intent, InterruptKind, LengthSource, NativeCode, PageLength, PageSize, ProgressToken,
+    ScanError, ScanSettings, Source, pages_in_error,
 };
 
 /// A wire string that names no value of the enum.
@@ -133,6 +133,9 @@ impl PageSize {
     }
 }
 wire_text!(PageSize, "page size");
+
+wire_text!(PageLength, "page length");
+wire_text!(LengthSource, "length source");
 
 impl Connection {
     /// Every connection class.
@@ -574,11 +577,11 @@ fn list_json(values: impl Iterator<Item = &'static str>) -> String {
 
 /// Every list a binding exposes, as one JSON object. Keys: `kinds`, `phases`, `sources`, `colors`,
 /// `intents`, `page_sizes`, `formats`, `compressions`, `connections`, `list_details`,
-/// `handling_flags` and `conditions`. A backend's own code table (the HRESULT names of a Windows
+/// `handling_flags`, `conditions`, `page_lengths` and `length_sources`. A backend's own code table (the HRESULT names of a Windows
 /// backend) is not part of the core contract; an app that exposes one adds it beside this dump.
 pub fn contract_json() -> String {
     format!(
-        "{{\"kinds\":{},\"phases\":{},\"sources\":{},\"colors\":{},\"intents\":{},\"page_sizes\":{},\"formats\":{},\"compressions\":{},\"connections\":{},\"list_details\":{},\"handling_flags\":{},\"conditions\":{}}}",
+        "{{\"kinds\":{},\"phases\":{},\"sources\":{},\"colors\":{},\"intents\":{},\"page_sizes\":{},\"formats\":{},\"compressions\":{},\"connections\":{},\"list_details\":{},\"handling_flags\":{},\"conditions\":{},\"page_lengths\":{},\"length_sources\":{}}}",
         list_json(InterruptKind::ALL.iter().map(|v| v.as_str())),
         list_json(Phase::ALL.iter().map(|v| v.as_str())),
         list_json(Source::ALL.iter().map(|v| v.as_str())),
@@ -591,6 +594,8 @@ pub fn contract_json() -> String {
         list_json(ListDetails::ALL.iter().map(|v| v.as_str())),
         list_json(HandlingStatus::FLAG_NAMES.iter().copied()),
         list_json(HandlingStatus::CONDITION_NAMES.iter().copied()),
+        list_json(PageLength::ALL.iter().map(|v| v.as_str())),
+        list_json(LengthSource::ALL.iter().map(|v| v.as_str())),
     )
 }
 
@@ -623,6 +628,8 @@ mod tests {
         round_trips(Compression::ALL, Compression::as_str);
         round_trips(ListDetails::ALL, ListDetails::as_str);
         round_trips(Phase::ALL, Phase::as_str);
+        round_trips(PageLength::ALL, PageLength::as_str);
+        round_trips(LengthSource::ALL, LengthSource::as_str);
     }
 
     #[test]

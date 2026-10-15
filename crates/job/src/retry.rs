@@ -16,6 +16,8 @@ use std::time::Duration;
 /// What repeating a failed request would do. (craft-wsd keeps its own, identical enum.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum RetrySafety {
     /// Nothing was sent or accepted (refused before connect, policy, a connect failure, a device
     /// that said it is busy). Repeating cannot do the work twice.
@@ -155,11 +157,13 @@ impl RetryFacts {
 /// What to do after a failed attempt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum RetryAdvice {
     /// Try again immediately.
     RetryNow,
     /// Try again after this wait.
-    RetryAfter(Duration),
+    RetryAfter(#[cfg_attr(feature = "serde", serde(with = "crate::wire::duration_ms"))] Duration),
     /// The request may have been delivered: query the device (or ask a person) before any resend.
     CheckDeviceFirst,
     /// Give up: the condition is not transient, or the attempts are used up.

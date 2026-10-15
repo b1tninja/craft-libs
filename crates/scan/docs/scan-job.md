@@ -223,6 +223,17 @@ feeder gave no pages") while that attempt is the latest. This is not the job's o
   dropped after the scanner started, so it never retries it by itself. The price is one question to the person after
   a plain "scanner unreachable". Only `Busy` is retried automatically.
 
+## 10a. Page length in the job
+
+`ScanSettings::page_length` (`driver` by default, `auto`, `infer`) is part of the request, so every attempt's
+`AttemptPlan::settings` carries it unchanged and a continuation asks for the same length rule. Each kept page's
+`PageInfo::length` records how that page got its length (`source` `driver`, `device`, `size` or `inferred`), the
+length in thousandths of an inch, and `approximate` (true only for `inferred`). The journal writes it under each page
+(`"length":{"source":"inferred","length_mils":10730,"approximate":true}`); a journal from before the field reads as
+`driver`. The job never decides a length itself; the backend does, see the README section "Page length". Honest
+limits: inference was measured on one scanner, is opt-in, and is refused (the page stays as delivered, `driver`)
+when the image gives no clear boundary.
+
 ## 11. Continuing in a later process, and exit codes
 
 A CLI run is short-lived, so it cannot keep a `ScanJob` between `scan` and `scan --continue DIR`. The job is not

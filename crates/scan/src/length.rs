@@ -190,10 +190,10 @@ impl PageSize {
     /// [`PageSize::Custom`], which name no dimensions.
     pub fn extent_mils(self) -> Option<(u32, u32)> {
         match self {
-            Self::A4 => Some((8268, 11693)),
+            Self::A4 => Some((8267, 11692)),
             Self::Letter => Some((8500, 11000)),
             Self::Legal => Some((8500, 14000)),
-            Self::BusinessCard => Some((3500, 2000)),
+            Self::BusinessCard => Some((3543, 2165)),
             Self::Auto | Self::Custom => None,
         }
     }

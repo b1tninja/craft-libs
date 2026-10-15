@@ -343,7 +343,7 @@ mod tests {
     use crate::bw::{PageRule, page_for};
 
     fn rule(dpi: u32, bw: bool) -> PageRule {
-        PageRule { dpi, bw_threshold: bw.then_some(128) }
+        PageRule { dpi, bw_threshold: bw.then_some(128), length: Default::default() }
     }
 
     #[test]

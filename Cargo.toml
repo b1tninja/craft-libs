@@ -29,7 +29,6 @@ craft-wsd = { path = "crates/wsd" }
 egui = { version = "0.36", default-features = false }
 rayon = "1"
 roxmltree = "0.20"
-thiserror = "2"
 # Default features off: no TLS, no cookies, no gzip; plain http to numeric local addresses only.
 ureq = { version = "3.4", default-features = false }
 

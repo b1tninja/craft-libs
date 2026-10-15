@@ -147,3 +147,74 @@ Neutral defaults when a backend does not say (`ErrorKind::default_retry_safety`)
 
 A backend overrides the default with `with_safety` where it knows better (a query's timeout is
 `Idempotent`; a connection that closed after the request was written is `OutcomeUnknown`).
+
+## 4. WS-Print: what each failure means
+
+The WS-Print backend classifies a failure by what failed (`WsdError`) and by which operation was in
+flight (`Op`): a query (`GetPrinterElements`, `GetActiveJobs`, `GetJobHistory`), a status read
+(`GetJobElements` while following a job) and a cancel may be repeated; a create and a send may not.
+The principle: **a failure that proves the printer did not act is `Safe`; a failure after the request
+may have arrived is `OutcomeUnknown` for a create or a send and `Idempotent` for the rest.** The table
+is pinned by `the_retry_table_for_every_kind` in `src/wsd/error.rs`.
+
+| Failure | `ErrorKind` | Retryable | Phase | Safety (create or send) | Safety (query, status, cancel) | `retry_after` |
+|---|---|---|---|---|---|---|
+| Address or setting refused (policy, invalid, unsupported) | `InvalidRequest` | no | Prepare | Safe | Safe | none |
+| No common document format | `UnsupportedFormat` | no | Prepare | Safe | Safe | none |
+| Document could not be produced | `Failed` | no | Prepare | Safe | Safe | none |
+| Caller cancelled | `Cancelled` | no | Prepare | Safe | Safe | none |
+| Our request over the size cap | `InvalidRequest` | no | Prepare | Safe | Safe | none |
+| Transport `refused` or `unreachable` (stage connect) | `Unavailable` | yes | Connect | Safe | Safe | none |
+| Transport `connect_timeout` (stage connect) | `Timeout` | yes | Connect | Safe | Safe | none |
+| Transport `connection_closed` (stage reply; request, if it was being written) | `Unavailable` | yes | Reply (Request) | OutcomeUnknown | Idempotent | none |
+| Transport `timeout` (stage reply) | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
+| The caller's deadline passed | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
+| Transport `invalid_response` (a peer that did not speak HTTP) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
+| Transport `io` (an I/O error that fits no other kind) | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | none |
+| Transport `redirect` (refused) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
+| HTTP 408 | `Timeout` | yes | Request | Safe | Safe | none |
+| HTTP 425 | `Busy` | yes | Request | Safe | Safe | 2 s, or the printer's |
+| HTTP 429 | `Busy` | yes | Request | Safe | Safe | 5 s, or the printer's |
+| HTTP 503 | `Unavailable` | yes | Request | Safe | Safe | 5 s, or the printer's |
+| HTTP 500, 502, 504 and other 5xx | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | the printer's, if sent |
+| HTTP 501, 505 | `Failed` | no | Reply | Safe | Safe | none |
+| HTTP 3xx | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
+| HTTP 4xx other than 408, 425, 429 | `Failed` | no | Reply | Safe | Safe | none |
+| Unreadable or unexpected reply, reply over the cap | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
+| Fault: not accepting jobs | `Busy` | yes | Reply | Safe | Safe | 15 s, or the printer's |
+| Fault: temporary error | `Busy` | yes | Reply | Safe | Safe | 5 s, or the printer's |
+| Fault: document active | `Busy` | yes | Reply | Safe | Safe | 2 s, or the printer's |
+| Fault: format or compression not supported | `UnsupportedFormat` | no | Reply | Safe | Safe | none |
+| Fault: job id not found | `NotFound` | no | Reply | Safe | Safe | none |
+| Fault: job cancelled | `Cancelled` | no | Reply | Safe | Safe | none |
+| Fault: invalid arguments and the other client errors | `InvalidRequest` | no | Reply | Safe | Safe | none |
+| Fault: internal error | `Failed` | no | Reply | Safe | Safe | none |
+| Fault: last document already sent | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
+| Fault: operation failed, action not supported, vendor codes | `Rejected` | no | Reply | Safe | Safe | none |
+
+For a status read the phase of every failure that reached the wire is `Poll`. A fault is a definite
+answer (the printer said no), which is why it is `Safe` even for an internal error; only "the last
+document was already sent" says an earlier send did arrive.
+
+When the printer sends an HTTP `Retry-After` (on a status error or on the reply that carried a
+fault), `craft-wsd` parses and caps it and the backend uses it as `retry_after`, for the transient
+kinds only. Without one the values above are defaults, not measurements: a printer that is not taking
+jobs is in a mode that lasts (15 s), a temporary error clears sooner (5 s), a document still being
+processed sooner still (2 s). `RetryPolicy` takes the larger of this and its own backoff.
+
+Nothing is read from text. `craft-wsd` reports a transport failure as a typed kind (`refused`,
+`unreachable`, `connect_timeout`, `timeout`, `redirect`, `connection_closed`, `invalid_response`, `io`) and the stage
+the exchange reached (prepare, connect, request, reply). The stage gives the phase and, through
+`craft-wsd`'s own `retry_safety(idempotent)`, the safety: nothing sent (prepare, connect) is `Safe`,
+anything that may have arrived is `OutcomeUnknown` for a create or send and `Idempotent` for the
+rest. HTTP 429 and 503 are a decline and `Safe` there too. What this crate adds is the print
+service's own reading: 408 and 425 are declines, 501, 505 and the other 4xx are definite refusals, a
+SOAP fault is a definite answer. A request the HTTP client could not build is not a transport failure
+at all: `craft-wsd` reports it as `Invalid`, which is a preparation failure and `Safe`. A closed connection is a transport kind, not an error kind of
+its own. `every_transport_kind_for_every_operation` pins every kind against every operation.
+
+**Reconcile.** `WsdBackend::reconcile(printer, title)` is the answer to `OutcomeUnknown`: read
+`GetActiveJobs` and `GetJobHistory` and look for jobs with that title from this backend's user name
+(`Found`, `Ambiguous`, `NotFound`). WS-Print job summaries carry no creation time, so "created in the
+window" is whatever the printer still lists. After a failed send with an unknown outcome the backend
+deliberately does **not** cancel the job it created: cancelling could abort a job that is printing.

@@ -625,7 +625,9 @@ dependencies = [
 name = "craft-print"
 version = "0.1.0"
 dependencies = [
+ "craft-print",
  "craft-winprint-gdi",
+ "craft-wsd",
  "miniz_oxide 0.8.9",
  "roxmltree",
  "tempfile",

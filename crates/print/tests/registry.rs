@@ -2,43 +2,19 @@
 //! a CUPS-like one (driver options, no status), an IPP-like one (state up front), a WSD-like one
 //! (several formats, consent required) and one that always fails.
 
-use std::sync::{Arc, Mutex};
-
-use craft_print::backends::Backend;
+use craft_print::testing::FakeBackend;
 use craft_print::{
-    BackendClass, CancelToken, ColourMode, Document, DocumentFormat, ErrorKind, Job, JobHint, JobId, JobOptions, NativeCode, Orientation, PrintError,
-    PrinterDetails, PrinterOption, PrinterRef, PrinterState, PrinterStatus, Progress, Quality, Receipt, RegisterError, Registry, Resolution,
-    SubmitRequest, Submitted, UserConfirmed, namespaced_id, split_id,
+    BackendClass, CancelToken, ColourMode, Document, DocumentFormat, ErrorKind, Job, JobHint, JobOptions, NativeCode, Orientation, PrintError,
+    PrinterDetails, PrinterOption, PrinterRef, PrinterState, PrinterStatus, Progress, Quality, RegisterError, Registry, Resolution, SubmitRequest,
+    UserConfirmed, namespaced_id, split_id,
 };
 
-type Seen = Arc<Mutex<Vec<(Option<String>, DocumentFormat, usize)>>>;
-
-fn printer(id: &str, default: bool) -> PrinterRef {
-    PrinterRef { id: id.into(), name: format!("Printer {id}"), default, two_sided: None }
-}
-
-fn record(seen: &Seen, request: &SubmitRequest<'_>) {
-    seen.lock().unwrap().push((request.job.printer.clone(), request.document.format, request.document.bytes.len()));
-}
-
 /// Options and driver keywords, no status, PDF only, local.
-struct CupsLike {
-    seen: Seen,
-}
-impl Backend for CupsLike {
-    fn name(&self) -> &'static str {
-        "cups"
-    }
-    fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
-        Ok(vec![printer("Office", true), printer("Label:Writer", false)])
-    }
-    fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
-        if native_id != "Office" && native_id != "Label:Writer" {
-            return Err(PrintError::new(ErrorKind::NotFound, "no such queue"));
-        }
-        Ok(PrinterDetails {
-            id: native_id.into(),
-            name: native_id.into(),
+fn cups_like() -> FakeBackend {
+    FakeBackend::new("cups")
+        .with_printer("Office", true)
+        .with_printer("Label:Writer", false)
+        .with_details(PrinterDetails {
             formats: vec![DocumentFormat::Pdf],
             options: vec![PrinterOption {
                 key: "InputSlot".into(),
@@ -51,95 +27,71 @@ impl Backend for CupsLike {
             status: None,
             ..PrinterDetails::default()
         })
-    }
-    fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-        record(&self.seen, &request);
-        Ok(Receipt { backend: "cups", message: "request id is Office-1".into(), job_id: Some("Office-1".into()) }.into())
-    }
+        .with_message("request id is Office-1")
+        .with_job_handle(|_, _| Some("Office-1".into()))
 }
 
-/// Reports state up front, ignores duplex and colour, reports progress.
-struct IppLike;
-impl Backend for IppLike {
-    fn name(&self) -> &'static str {
-        "ipp"
-    }
-    fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
-        Ok(vec![PrinterRef { two_sided: Some(true), ..printer("net-1", false) }])
-    }
-    fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
-        Ok(PrinterDetails {
-            id: native_id.into(),
-            name: native_id.into(),
+/// Reports state up front, ignores duplex and colour, reports progress, hands out no job.
+fn ipp_like() -> FakeBackend {
+    FakeBackend::new("ipp")
+        .with_printer_ref(PrinterRef { two_sided: Some(true), ..printer("net-1", false) })
+        .with_details(PrinterDetails {
             formats: vec![DocumentFormat::Pdf, DocumentFormat::PwgRaster],
             honoured: Some(vec![JobHint::Copies]),
             status: Some(PrinterStatus { state: PrinterState::Stopped, reasons: vec!["paper empty".into()] }),
             ..PrinterDetails::default()
         })
-    }
-    fn submit(&self, mut request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-        if let Some(progress) = request.progress.as_deref_mut() {
-            progress(Progress::of(0, 2));
-            progress(Progress::of(2, 2));
-        }
-        Ok(Receipt { backend: "ipp", message: "accepted".into(), job_id: None }.into())
-    }
+        .with_progress_events(vec![Progress::of(0, 2), Progress::of(2, 2)])
+        .with_job_handle(|_, _| None)
 }
 
-/// Network class: several formats, consent required.
-struct WsdLike {
-    seen: Seen,
-}
-impl Backend for WsdLike {
-    fn name(&self) -> &'static str {
-        "wsd"
-    }
-    fn class(&self) -> BackendClass {
-        BackendClass::Network
-    }
-    fn accepted_formats(&self) -> &[DocumentFormat] {
-        &[DocumentFormat::PwgRaster, DocumentFormat::OctetStream]
-    }
-    fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
-        Ok(vec![printer("device-a", false)])
-    }
-    fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
-        Ok(PrinterDetails { id: native_id.into(), name: native_id.into(), ..PrinterDetails::default() })
-    }
-    fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-        record(&self.seen, &request);
-        Err(PrintError::new(ErrorKind::Busy, "the device is busy").with_native(NativeCode {
+/// Network class: several formats, consent required, always busy.
+fn wsd_like() -> FakeBackend {
+    FakeBackend::new("wsd")
+        .with_class(BackendClass::Network)
+        .with_formats(vec![DocumentFormat::PwgRaster, DocumentFormat::OctetStream])
+        .with_printer("device-a", false)
+        .failing_submit(PrintError::new(ErrorKind::Busy, "the device is busy").with_native(NativeCode {
             domain: "wsd-fault",
             code: 7,
             name: Some("ServerErrorBusy"),
         }))
-    }
 }
 
 /// Lists nothing but errors.
-struct Broken;
-impl Backend for Broken {
-    fn name(&self) -> &'static str {
-        "broken"
-    }
-    fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
-        Err(PrintError::new(ErrorKind::Unavailable, "the service is down").with_native(NativeCode { domain: "win32", code: 1722, name: None }))
-    }
-    fn printer_details(&self, _: &str) -> Result<PrinterDetails, PrintError> {
-        Err(PrintError::new(ErrorKind::Unavailable, "the service is down"))
-    }
-    fn submit(&self, _: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-        Err(PrintError::new(ErrorKind::Unavailable, "the service is down"))
+fn broken() -> FakeBackend {
+    let down = || PrintError::new(ErrorKind::Unavailable, "the service is down");
+    FakeBackend::new("broken")
+        .failing_list(down().with_native(NativeCode { domain: "win32", code: 1722, name: None }))
+        .failing_details(down())
+        .failing_submit(down())
+}
+
+fn printer(id: &str, default: bool) -> PrinterRef {
+    PrinterRef { id: id.into(), name: format!("Printer {id}"), default, two_sided: None }
+}
+
+struct Fakes {
+    cups: FakeBackend,
+    wsd: FakeBackend,
+}
+
+type Seen = Vec<(Option<String>, DocumentFormat, usize)>;
+
+impl Fakes {
+    /// What the CUPS-like and the WSD-like backend were handed, in that order.
+    fn seen(&self) -> Seen {
+        self.cups.submissions().into_iter().chain(self.wsd.submissions()).map(|s| (s.printer, s.format, s.bytes.len())).collect()
     }
 }
 
-fn all() -> (Registry, Seen) {
-    let seen: Seen = Arc::default();
+fn all() -> (Registry, Fakes) {
+    let fakes = Fakes { cups: cups_like(), wsd: wsd_like() };
     let registry = Registry::new();
-    registry.register(Box::new(CupsLike { seen: seen.clone() })).unwrap();
-    registry.register(Box::new(IppLike)).unwrap();
-    registry.register(Box::new(WsdLike { seen: seen.clone() })).unwrap();
-    (registry, seen)
+    registry.register(Box::new(fakes.cups.clone())).unwrap();
+    registry.register(Box::new(ipp_like())).unwrap();
+    registry.register(Box::new(fakes.wsd.clone())).unwrap();
+    (registry, fakes)
 }
 
 fn job_for(id: Option<&str>) -> Job {
@@ -172,7 +124,7 @@ fn listing_aggregates_every_backend_with_namespaced_ids() {
 #[test]
 fn a_failing_backend_does_not_hide_the_others() {
     let (registry, _) = all();
-    registry.register(Box::new(Broken)).unwrap();
+    registry.register(Box::new(broken())).unwrap();
     let listing = registry.list_printers().unwrap();
     assert!(!listing.is_complete());
     assert_eq!(listing.items.len(), 4, "the three working backends' printers are all there");
@@ -187,7 +139,7 @@ fn a_failing_backend_does_not_hide_the_others() {
 #[test]
 fn only_failing_backends_list_no_printers_and_report_each_error() {
     let registry = Registry::new();
-    registry.register(Box::new(Broken)).unwrap();
+    registry.register(Box::new(broken())).unwrap();
     let listing = registry.list_printers().unwrap();
     assert!(listing.items.is_empty());
     assert_eq!(listing.errors.len(), 1);
@@ -196,7 +148,7 @@ fn only_failing_backends_list_no_printers_and_report_each_error() {
 #[test]
 fn registering_a_name_twice_is_an_error_value() {
     let (registry, _) = all();
-    let err = registry.register(Box::new(IppLike)).unwrap_err();
+    let err = registry.register(Box::new(ipp_like())).unwrap_err();
     assert_eq!(err, RegisterError::DuplicateName { name: "ipp" });
     assert!(err.to_string().contains("already registered"));
     assert_eq!(registry.backend_names().len(), 3, "the first registration stays");
@@ -237,11 +189,11 @@ fn an_unknown_or_missing_prefix_names_the_registered_backends() {
 
 #[test]
 fn a_job_routes_to_its_backend_with_the_native_id() {
-    let (registry, seen) = all();
+    let (registry, fakes) = all();
     let receipt = registry.submit(SubmitRequest::new(Document::pdf(b"%PDF-1.7"), job_for(Some("cups:Label:Writer")))).unwrap();
     assert_eq!(receipt.backend, "cups");
     assert_eq!(receipt.job_id.as_deref(), Some("Office-1"));
-    assert_eq!(seen.lock().unwrap().as_slice(), [(Some("Label:Writer".to_string()), DocumentFormat::Pdf, 8)]);
+    assert_eq!(fakes.seen(), [(Some("Label:Writer".to_string()), DocumentFormat::Pdf, 8)]);
 
     let mut events = Vec::new();
     let mut progress = |event: Progress| events.push((event.done, event.total));
@@ -252,24 +204,24 @@ fn a_job_routes_to_its_backend_with_the_native_id() {
 
 #[test]
 fn no_printer_chosen_goes_to_the_backend_with_a_default() {
-    let (registry, seen) = all();
+    let (registry, fakes) = all();
     registry.submit(SubmitRequest::new(Document::pdf(b"x"), job_for(None))).unwrap();
-    assert_eq!(seen.lock().unwrap()[0].0, None, "the backend gets no printer and picks its own default");
+    assert_eq!(fakes.seen()[0].0, None, "the backend gets no printer and picks its own default");
 
     let no_default = Registry::new();
-    no_default.register(Box::new(IppLike)).unwrap();
-    no_default.register(Box::new(Broken)).unwrap();
+    no_default.register(Box::new(ipp_like())).unwrap();
+    no_default.register(Box::new(broken())).unwrap();
     let err = no_default.submit(SubmitRequest::new(Document::pdf(b"x"), job_for(None))).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::NotFound, "several backends and none lists a default");
 
     let single = Registry::new();
-    single.register(Box::new(IppLike)).unwrap();
+    single.register(Box::new(ipp_like())).unwrap();
     assert!(single.submit(SubmitRequest::new(Document::pdf(b"x"), job_for(None))).is_ok(), "one backend takes the default job");
 }
 
 #[test]
 fn a_format_the_backend_does_not_accept_is_refused_before_it_is_called() {
-    let (registry, seen) = all();
+    let (registry, fakes) = all();
     let doc = Document::new(DocumentFormat::PostScript, b"%!PS");
     let err = registry.submit(SubmitRequest::new(doc, job_for(Some("cups:Office")))).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::UnsupportedFormat);
@@ -277,24 +229,24 @@ fn a_format_the_backend_does_not_accept_is_refused_before_it_is_called() {
     let request = SubmitRequest::new(Document::pdf(b"x"), job_for(Some("wsd:device-a"))).with_consent(UserConfirmed::interactive());
     let err = registry.submit(request).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::UnsupportedFormat, "the WSD-like backend wants raster or its own language, not PDF");
-    assert!(seen.lock().unwrap().is_empty(), "no backend saw a refused document");
+    assert!(fakes.seen().is_empty(), "no backend saw a refused document");
 }
 
 #[test]
 fn a_network_backend_needs_consent_and_a_local_one_does_not() {
-    let (registry, seen) = all();
+    let (registry, fakes) = all();
     let raster = Document::new(DocumentFormat::PwgRaster, b"RaS2");
 
     let err = registry.submit(SubmitRequest::new(raster, job_for(Some("wsd:device-a")))).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::ConsentRequired);
-    assert!(seen.lock().unwrap().is_empty(), "the backend was not reached");
+    assert!(fakes.seen().is_empty(), "the backend was not reached");
 
     let consent = UserConfirmed::attest(Some(true)).unwrap();
     let err = registry.submit(SubmitRequest::new(raster, job_for(Some("wsd:device-a"))).with_consent(consent)).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Busy, "with consent the backend ran and its error came back");
     assert!(err.is_retryable());
     assert_eq!(err.native(), Some(NativeCode { domain: "wsd-fault", code: 7, name: Some("ServerErrorBusy") }));
-    assert_eq!(seen.lock().unwrap().len(), 1);
+    assert_eq!(fakes.seen().len(), 1);
 
     // A local backend does not need consent.
     assert!(registry.submit(SubmitRequest::new(Document::pdf(b"x"), job_for(Some("cups:Office")))).is_ok());
@@ -312,46 +264,31 @@ fn attest_wants_an_explicit_true() {
 
 #[test]
 fn a_cancelled_token_stops_the_job_before_any_backend_runs() {
-    let (registry, seen) = all();
+    let (registry, fakes) = all();
     let cancel = CancelToken::new();
     cancel.cancel();
     assert!(cancel.clone().is_cancelled(), "clones share the flag");
     let err = registry.submit(SubmitRequest::new(Document::pdf(b"x"), job_for(Some("cups:Office"))).with_cancel(cancel)).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Cancelled);
     assert!(!err.is_retryable());
-    assert!(seen.lock().unwrap().is_empty());
+    assert!(fakes.seen().is_empty());
 }
 
 #[test]
 fn a_backends_job_error_comes_back_unchanged() {
     let registry = Registry::new();
-    registry.register(Box::new(Broken)).unwrap();
+    registry.register(Box::new(broken())).unwrap();
     let err = registry.submit(SubmitRequest::new(Document::pdf(b"x"), job_for(Some("broken:any")))).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Unavailable);
 }
 
 #[test]
 fn names_are_validated_and_kinds_say_whether_to_retry() {
-    struct Named(&'static str);
-    impl Backend for Named {
-        fn name(&self) -> &'static str {
-            self.0
-        }
-        fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
-            Ok(Vec::new())
-        }
-        fn printer_details(&self, _: &str) -> Result<PrinterDetails, PrintError> {
-            Err(PrintError::new(ErrorKind::NotFound, "none"))
-        }
-        fn submit(&self, _: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-            Err(PrintError::new(ErrorKind::Failed, "none"))
-        }
-    }
     let registry = Registry::new();
     for bad in ["", "Upper", "has:colon", "sp ace"] {
-        assert_eq!(registry.register(Box::new(Named(bad))).unwrap_err(), RegisterError::InvalidName { name: bad });
+        assert_eq!(registry.register(Box::new(FakeBackend::new(bad))).unwrap_err(), RegisterError::InvalidName { name: bad });
     }
-    assert!(registry.register(Box::new(Named("my-backend_2"))).is_ok());
+    assert!(registry.register(Box::new(FakeBackend::new("my-backend_2"))).is_ok());
     for kind in [ErrorKind::Unavailable, ErrorKind::Busy, ErrorKind::Timeout] {
         assert!(kind.is_retryable());
     }
@@ -378,25 +315,9 @@ fn the_process_wide_registry_holds_the_platform_backend() {
 
 #[test]
 fn per_job_options_reach_the_backend_through_the_registry() {
-    struct Echo(Arc<Mutex<Option<JobOptions>>>);
-    impl Backend for Echo {
-        fn name(&self) -> &'static str {
-            "echo"
-        }
-        fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
-            Ok(vec![printer("p", true)])
-        }
-        fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
-            Ok(PrinterDetails { id: native_id.into(), name: native_id.into(), ..PrinterDetails::default() })
-        }
-        fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
-            *self.0.lock().unwrap() = Some(request.options);
-            Ok(Submitted::new("echo", "ok").with_job(JobId::new("echo", "1")))
-        }
-    }
-    let got = Arc::new(Mutex::new(None));
+    let echo = FakeBackend::new("echo").with_printer("p", true).with_job_handle(|_, _| Some("1".into()));
     let registry = Registry::new();
-    registry.register(Box::new(Echo(got.clone()))).unwrap();
+    registry.register(Box::new(echo.clone())).unwrap();
     let options = JobOptions::new()
         .with_media("iso_a4_210x297mm")
         .with_orientation(Orientation::Landscape)
@@ -405,10 +326,10 @@ fn per_job_options_reach_the_backend_through_the_registry() {
         .with_colour(ColourMode::Mono)
         .with_expected_pages(2);
     let submitted = registry.submit_job(SubmitRequest::new(Document::pdf(b"%PDF"), job_for(None)).with_options(options.clone())).unwrap();
-    assert_eq!(got.lock().unwrap().as_ref(), Some(&options));
+    assert_eq!(echo.submissions()[0].options, options);
     assert_eq!(submitted.job.map(|j| j.to_string()).as_deref(), Some("echo:1"));
     assert_eq!(submitted.expected.pages, Some(2));
     // Without options the backend sees the defaults.
     registry.submit_job(SubmitRequest::new(Document::pdf(b"%PDF"), job_for(None))).unwrap();
-    assert_eq!(got.lock().unwrap().as_ref(), Some(&JobOptions::default()));
+    assert_eq!(echo.submissions()[1].options, JobOptions::default());
 }

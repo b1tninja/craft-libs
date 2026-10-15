@@ -24,7 +24,7 @@ pub struct Package {
     pub body: Vec<u8>,
 }
 
-/// Wrap the envelope text (which must hold [`xop_include`] for `cid`) and the document into a package.
+/// Wrap the envelope text (which must hold [`xop_include_ref`] for `cid`) and the document into a package.
 pub fn package(envelope: &str, cid: &str, document: &[u8]) -> Package {
     let boundary = unique_boundary(document);
     let root_id = format!("root.{}@craft-wsd", new_uuid());
@@ -147,7 +147,7 @@ fn bare_id(s: &str) -> String {
     s.trim().trim_matches(|c| c == '<' || c == '>').to_owned()
 }
 
-/// Every part of a `multipart/related` body, in order. Bounded: at most [`MAX_PARTS`] parts, and
+/// Every part of a `multipart/related` body, in order. Bounded: at most 16 parts, and
 /// each part's data is a slice of `body`.
 pub fn parts<'a>(content_type: &str, body: &'a [u8]) -> Result<Vec<Part<'a>>> {
     let boundary = param(content_type, "boundary").filter(|b| !b.is_empty() && b.len() <= 200);

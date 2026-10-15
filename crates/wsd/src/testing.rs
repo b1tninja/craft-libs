@@ -114,8 +114,8 @@ pub use device::{FakeDevice, Logged};
 /// A WSD device that lives in memory: it answers WS-Transfer `Get`, WS-MetadataExchange
 /// `GetMetadata` and WS-Eventing on its service endpoint, and any other operation in the service
 /// namespace with a canned `<Op>Response`. One implementation shaped like a printer or a scanner,
-/// chosen by [`ServiceKind`], so the same core code can be driven against both. It is a
-/// [`Transport`], so no socket is involved.
+/// chosen by [`ServiceKind`](crate::ServiceKind), so the same core code can be driven against both. It is a
+/// [`Transport`](crate::Transport), so no socket is involved.
 pub mod device {
     use std::sync::Mutex;
 

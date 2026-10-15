@@ -134,7 +134,8 @@ length is decided; the backend applies it and the page records the answer in `Pa
    and cut at the end of the sheet found by `infer_sheet_end`. `LengthSource::Inferred`, always
    `approximate`.
 
-`PageLength::Driver` is the default and changes nothing. `Auto` is steps 1 and 2 (deterministic, never
+`PageLength::Driver` is the default and changes nothing. `Size` is step 2 alone (the chosen size's length even when the
+device could detect one). `Auto` is steps 1 and 2 (deterministic, never
 looks at pixels); `AutoInfer` adds step 3 only when neither applies.
 
 `infer_sheet_end(bytes, dpi_y, &InferOptions)` is pure. It treats the last row holding a pixel that is not

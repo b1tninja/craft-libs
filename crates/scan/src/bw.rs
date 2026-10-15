@@ -16,7 +16,7 @@
 //!   16 bits) go through the `image` decoders, and their 1-bit PNG and TIFF files are recognised from
 //!   the header so they stay as delivered. A page that cannot be read is returned unchanged.
 
-use crate::{Color, Page, ScanSettings, bmp, density, image_format, image_size};
+use crate::{Color, InferOptions, LengthRecord, LengthSource, Page, ScanSettings, assess_sheet_end, bmp, density, image_format, image_size, length};
 
 /// Used when the request carries no threshold.
 pub const DEFAULT_THRESHOLD: u8 = 128;
@@ -27,12 +27,31 @@ pub struct PageRule {
     pub dpi: u32,
     /// `Some` for a black-and-white request: pages deeper than 1 bit are thresholded at this value.
     pub bw_threshold: Option<u8>,
+    /// How the page's length was decided and whether to infer it from the pixels ([`LengthPlan`]).
+    pub length: LengthPlan,
+}
+
+/// What the backend decided about page length before the transfer, for [`page_for`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct LengthPlan {
+    /// The source recorded on the page when nothing is inferred: [`LengthSource::Driver`] unless the backend
+    /// wrote extents ([`LengthSource::Size`]) or the device detected the length ([`LengthSource::Device`]).
+    pub source: LengthSource,
+    /// `Some` when the backend asked for the item's maximum extent so the sheet end can be inferred. The
+    /// inference runs on the delivered pixels **before** any 1-bit thresholding (which would remove the paper
+    /// noise the rule needs); a refusal leaves the page as delivered with `source`.
+    pub infer: Option<InferOptions>,
 }
 
 impl PageRule {
     pub fn for_settings(settings: &ScanSettings) -> Self {
         let bw_threshold = (settings.color == Color::BlackAndWhite).then(|| threshold_byte(settings.threshold));
-        Self { dpi: settings.dpi, bw_threshold }
+        Self { dpi: settings.dpi, bw_threshold, length: LengthPlan::default() }
+    }
+
+    /// The same rule with the backend's length decision.
+    pub fn with_length(self, length: LengthPlan) -> Self {
+        Self { length, ..self }
     }
 }
 
@@ -117,13 +136,24 @@ fn threshold_with_pels(bytes: &[u8], threshold: u8, pels: (u32, u32)) -> Thresho
 ///
 /// The page's resolution is the one the delivered file carries (see [`crate::density`]); the request's dpi is only
 /// the fallback for a file that carries nothing usable, and is recorded as [`Page::requested_dpi`].
-pub fn page_for(bytes: &[u8], rule: PageRule) -> (Page, Option<u32>) {
-    let found = density::image_density(bytes);
+pub fn page_for(delivered: &[u8], rule: PageRule) -> (Page, Option<u32>) {
+    let found = density::image_density(delivered);
     let (dx, dy) = found.unwrap_or((f64::from(rule.dpi), f64::from(rule.dpi)));
     let (dpi, dpi_y) = (round_dpi(dx), round_dpi(dy));
+    let mut source = rule.length.source;
+    let mut cut = None;
+    if let Some(options) = rule.length.infer
+        && let Ok(sheet) = assess_sheet_end(delivered, dpi_y, &options)
+        && let Some(bytes) = length::crop_bottom_bytes(delivered, sheet.rows)
+    {
+        cut = Some(bytes);
+        source = LengthSource::Inferred;
+    }
+    let bytes = cut.as_deref().unwrap_or(delivered);
     if let Some(threshold) = rule.bw_threshold
         && let Thresholded::Converted(one) = threshold_to_one_bit_at(bytes, threshold, (dx, dy))
     {
+        let length = LengthRecord::with_source(one.height, dpi_y, source);
         let page = Page {
             bytes: one.bytes,
             format: "bmp",
@@ -133,23 +163,14 @@ pub fn page_for(bytes: &[u8], rule: PageRule) -> (Page, Option<u32>) {
             dpi_y,
             requested_dpi: rule.dpi,
             thresholded: true,
-            length: crate::LengthRecord::from_delivered(one.height, dpi_y),
+            length,
         };
         return (page, Some(one.from_bits));
     }
     let (width, height) = image_size(bytes).unwrap_or((0, 0));
+    let length = LengthRecord::with_source(height, dpi_y, source);
     (
-        Page {
-            format: image_format(bytes),
-            width,
-            height,
-            dpi,
-            dpi_y,
-            requested_dpi: rule.dpi,
-            bytes: bytes.to_vec(),
-            thresholded: false,
-            length: crate::LengthRecord::from_delivered(height, dpi_y),
-        },
+        Page { format: image_format(bytes), width, height, dpi, dpi_y, requested_dpi: rule.dpi, bytes: bytes.to_vec(), thresholded: false, length },
         None,
     )
 }
@@ -515,7 +536,7 @@ mod tests {
         for palette in [[[0, 0, 0], [255, 255, 255]], [[255, 255, 255], [0, 0, 0]]] {
             let bytes = bmp(13, 1, &palette, false, &[vec![0b1010_1010, 0b1010_0000]]);
             assert_eq!(threshold_to_one_bit(&bytes, 128, 300), Thresholded::AlreadyOneBit);
-            let (page, from) = page_for(&bytes, PageRule { dpi: 300, bw_threshold: Some(128) });
+            let (page, from) = page_for(&bytes, PageRule { dpi: 300, bw_threshold: Some(128), length: LengthPlan::default() });
             assert_eq!(page.bytes, bytes);
             assert!(!page.thresholded);
             assert_eq!((page.format, page.width, page.height, from), ("bmp", 13, 1, None));
@@ -590,7 +611,7 @@ mod tests {
         assert_eq!(threshold_to_one_bit(&bytes, 128, 300), Thresholded::Unreadable);
         assert_eq!(threshold_to_one_bit(b"not an image", 128, 300), Thresholded::Unreadable);
         assert_eq!(threshold_to_one_bit(b"", 128, 300), Thresholded::Unreadable);
-        let (page, from) = page_for(&bytes, PageRule { dpi: 100, bw_threshold: Some(128) });
+        let (page, from) = page_for(&bytes, PageRule { dpi: 100, bw_threshold: Some(128), length: LengthPlan::default() });
         assert!(!page.thresholded && from.is_none());
         assert_eq!(page.bytes, bytes);
     }
@@ -599,11 +620,11 @@ mod tests {
     fn page_for_converts_only_a_black_and_white_request() {
         let rows = rgb_rows(&[&[0, 255, 0]]);
         let bytes = bmp(3, 24, &[], true, &rows);
-        let (gray, from) = page_for(&bytes, PageRule { dpi: 150, bw_threshold: None });
+        let (gray, from) = page_for(&bytes, PageRule { dpi: 150, bw_threshold: None, length: LengthPlan::default() });
         assert!(!gray.thresholded && from.is_none());
         assert_eq!((gray.bytes.as_slice(), gray.width, gray.height), (bytes.as_slice(), 3, 1));
 
-        let (bw, from) = page_for(&bytes, PageRule { dpi: 150, bw_threshold: Some(128) });
+        let (bw, from) = page_for(&bytes, PageRule { dpi: 150, bw_threshold: Some(128), length: LengthPlan::default() });
         assert!(bw.thresholded);
         assert_eq!(from, Some(24));
         assert_eq!((bw.format, bw.width, bw.height, bw.dpi), ("bmp", 3, 1, 150));
@@ -625,7 +646,7 @@ mod tests {
         let gray = ScanSettings { color: Color::Gray, ..ScanSettings::default() };
         assert_eq!(PageRule::for_settings(&gray).bw_threshold, None);
         let bw = ScanSettings { color: Color::BlackAndWhite, threshold: Some(77), dpi: 300, ..ScanSettings::default() };
-        assert_eq!(PageRule::for_settings(&bw), PageRule { dpi: 300, bw_threshold: Some(77) });
+        assert_eq!(PageRule::for_settings(&bw), PageRule { dpi: 300, bw_threshold: Some(77), length: LengthPlan::default() });
     }
 
     #[test]

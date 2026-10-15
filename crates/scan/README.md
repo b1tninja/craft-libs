@@ -120,6 +120,40 @@ The optional `serde` feature (off by default) adds `Serialize`/`Deserialize` on 
 command-line run writes beside its pages, and the contract enums with their existing wire strings;
 `ScanJob::continuing_from(..)` starts a later run from the journal. Page bytes and tokens are never serialised.
 
+## Page length
+
+A feeder often cannot tell how long the sheet it pulled is. `ScanSettings::page_length` says how the
+length is decided; the backend applies it and the page records the answer in `Page::length`
+(`LengthRecord`: `source`, `length_mils`, `approximate`). In priority order:
+
+1. **Device detection** when the scanner publishes it (`Scanner::length_support(source).device_detect`,
+   three-state `Presence`: `Present` only when the property or value is published). `LengthSource::Device`.
+2. **An explicit `page_size`** becomes extents, which works on any scanner that takes an extent (inside the
+   item's published range, never an unlisted page-size value). `LengthSource::Size`.
+3. **Inference from the image**, opt in with `PageLength::AutoInfer`: request the item's maximum extent
+   and cut at the end of the sheet found by `infer_sheet_end`. `LengthSource::Inferred`, always
+   `approximate`.
+
+`PageLength::Driver` is the default and changes nothing. `Auto` is steps 1 and 2 (deterministic, never
+looks at pixels); `AutoInfer` adds step 3 only when neither applies.
+
+`infer_sheet_end(bytes, dpi_y, &InferOptions)` is pure. It treats the last row holding a pixel that is not
+fill (exactly `255`; a small tolerance for JPEG) as the sheet end, adds a small margin, and refuses
+unless the rows above the end show scanner paper noise (so a noiseless white margin is never mistaken for
+fill). It never touches the width and does nothing when content runs to the last row. See the module
+documentation of `length` for the rule and its limits. The rule was measured on one scanner that pads
+everything beyond the sheet with pure white; treat it as a heuristic.
+
+```rust
+use craft_scan::{InferOptions, infer_sheet_end};
+# let bytes: Vec<u8> = Vec::new();
+// A BMP, PNG, TIFF or JPEG as delivered; None when nothing clear can be inferred.
+let _ = infer_sheet_end(&bytes, 200, &InferOptions::for_bytes(&bytes));
+```
+
+A backend may override `Backend::page_length_support` (unknown by default) and fill
+`Reported::glass_length` / `feeder_length` in `scanner_details`.
+
 ## Environment variables
 
 | Variable | Meaning |

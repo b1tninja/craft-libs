@@ -247,6 +247,10 @@ impl WsdError {
         if let Self::Fault(f) = self {
             let (code, name) = f.code.native();
             error = error.with_native(NativeCode { domain: "wsd-fault", code, name });
+            // The printer answered and named the job as unknown: the printer is fine, the job is gone.
+            if f.code == FaultCode::ClientErrorJobIdNotFound {
+                error = error.with_subject(crate::NotFoundSubject::Job);
+            }
         }
         error
     }

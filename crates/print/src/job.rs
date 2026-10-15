@@ -9,167 +9,42 @@
 
 use std::time::{Duration, SystemTime};
 
+use craft_job::{ExpectedTotals, JobId, JobState, ParseIdError, Tag};
+
 use crate::backend::{ErrorKind, PrintError, Receipt};
 use crate::convert::Conversion;
 use crate::options::JobOptions;
-use crate::registry::{namespaced_id, split_id};
 use crate::{Duplex, Job};
 
-/// The typed id of a job a printer has accepted: the owning backend's registry name and that
-/// backend's own handle for the job (its **native** part).
-///
-/// The text form is `"<backend>:<native>"` ([`fmt::Display`](std::fmt::Display) and
-/// [`FromStr`](std::str::FromStr) round-trip it), the same shape as namespaced printer ids. A
-/// native part may contain colons and anything else but must not be empty; only the first colon
-/// separates the backend. An app keeps the typed value, or the string form when it must store it,
-/// and never concatenates or splits ids by hand; a backend offers a typed constructor for its
-/// native part (for example a printer URL and a job number) so that nobody builds that string
-/// either.
-///
-/// A native handle is only meaningful to the backend that made it.
-///
-/// This type replaces the earlier `JobRef` (`id`/`native` strings, `from_id` returning `Option`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct JobId {
-    backend: String,
-    native: String,
-}
-
-impl JobId {
-    /// A job of `backend` with its native handle. Does not validate: use
-    /// [`str::parse`] (or [`Self::try_new`]) for text from outside. A backend names its jobs
-    /// with its own [`Backend::name`](crate::backends::Backend::name).
-    pub fn new(backend: impl Into<String>, native: impl Into<String>) -> Self {
-        Self { backend: backend.into(), native: native.into() }
-    }
-
-    /// [`Self::new`] that checks what [`FromStr`](std::str::FromStr) checks, so the result always
-    /// round-trips through its text form.
-    pub fn try_new(backend: impl Into<String>, native: impl Into<String>) -> Result<Self, ParseJobIdError> {
-        let (backend, native) = (backend.into(), native.into());
-        if backend.is_empty() {
-            return Err(ParseJobIdError::new(ParseJobIdErrorKind::EmptyBackend));
-        }
-        if !valid_backend_name(&backend) {
-            return Err(ParseJobIdError::new(ParseJobIdErrorKind::InvalidBackend));
-        }
-        if native.is_empty() {
-            return Err(ParseJobIdError::new(ParseJobIdErrorKind::EmptyNative));
-        }
-        Ok(Self { backend, native })
-    }
-
-    /// The owning backend's registry name.
-    pub fn backend(&self) -> &str {
-        &self.backend
-    }
-
-    /// The backend's own handle for the job.
-    pub fn native(&self) -> &str {
-        &self.native
-    }
-
-    /// The text form, `"<backend>:<native>"`.
-    pub fn to_id_string(&self) -> String {
-        namespaced_id(&self.backend, &self.native)
-    }
-}
-
-impl std::fmt::Display for JobId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.backend, self.native)
-    }
-}
-
-fn valid_backend_name(name: &str) -> bool {
-    name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-}
-
-/// Why text is not a [`JobId`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ParseJobIdErrorKind {
-    /// No colon: not `"<backend>:<native>"`.
-    MissingSeparator,
-    /// Nothing before the first colon.
-    EmptyBackend,
-    /// The backend part has a character other than lowercase ASCII, digits, `-` and `_`.
-    InvalidBackend,
-    /// Nothing after the first colon.
-    EmptyNative,
-}
-
-/// The typed failure of parsing a [`JobId`]; see [`Self::kind`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ParseJobIdError {
-    kind: ParseJobIdErrorKind,
-}
-
-impl ParseJobIdError {
-    fn new(kind: ParseJobIdErrorKind) -> Self {
-        Self { kind }
-    }
-
-    pub fn kind(&self) -> ParseJobIdErrorKind {
-        self.kind
-    }
-}
-
-impl std::fmt::Display for ParseJobIdError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self.kind {
-            ParseJobIdErrorKind::MissingSeparator => "a job id looks like <backend>:<native id>, and this has no colon",
-            ParseJobIdErrorKind::EmptyBackend => "the job id has no backend name before its colon",
-            ParseJobIdErrorKind::InvalidBackend => "the backend name of the job id has a character other than a-z, 0-9, '-' and '_'",
-            ParseJobIdErrorKind::EmptyNative => "the job id has nothing after its colon",
-        })
-    }
-}
-
-impl std::error::Error for ParseJobIdError {}
+// `JobId`, `ParseIdError`, `JobState` and `ExpectedTotals` are `craft-job`'s (shared with scanning);
+// the crate root re-exports them, so `craft_print::JobId` and the others keep their paths.
 
 /// A malformed job id is a bad request for [`PrintError`] consumers.
-impl From<ParseJobIdError> for PrintError {
-    fn from(error: ParseJobIdError) -> Self {
+impl From<ParseIdError> for PrintError {
+    fn from(error: ParseIdError) -> Self {
         PrintError::new(ErrorKind::InvalidRequest, error.to_string())
     }
 }
 
-impl std::str::FromStr for JobId {
-    type Err = ParseJobIdError;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let (backend, native) = split_id(text).ok_or(ParseJobIdError::new(ParseJobIdErrorKind::MissingSeparator))?;
-        Self::try_new(backend, native)
-    }
+/// Printing's additions to [`ExpectedTotals`]: reading the totals off a request and filling them
+/// into a status reading.
+pub trait ExpectedTotalsExt {
+    /// What a request expects ([`ExpectedTotals::for_request`] over the job's duplex and copies and
+    /// the option's page count). Zero pages is "unknown".
+    fn for_job(job: &Job, options: &JobOptions) -> ExpectedTotals;
+    /// Fill the totals a reading lacks; a total the backend reported is kept.
+    fn apply(&self, status: &mut JobStatus);
+    /// Whether anything is expected.
+    fn is_empty(&self) -> bool;
 }
 
-/// The totals a caller expects for a job, used only where the backend reports none. The registry
-/// computes them from the request ([`Self::for_request`]) and puts them in [`Submitted::expected`];
-/// a [`crate::JobWatch`] applies them to every reading, and the registry applies the sheet total
-/// to progress events. A backend-reported total always wins.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ExpectedTotals {
-    /// Pages of the document ([`JobOptions::expected_pages`]).
-    pub pages: Option<u32>,
-    /// Sheets this job should use: pages halved (rounded up) for two-sided jobs, times the copies.
-    /// An estimate; collation, booklet layouts and the device's own counting can differ.
-    pub sheets: Option<u32>,
-}
-
-impl ExpectedTotals {
-    /// What a request expects. Zero pages is "unknown".
-    pub fn for_request(job: &Job, options: &JobOptions) -> Self {
-        let Some(pages) = options.expected_pages.filter(|p| *p > 0) else {
-            return Self::default();
-        };
-        let per_sheet = if matches!(job.duplex, Some(Duplex::LongEdge | Duplex::ShortEdge)) { 2 } else { 1 };
-        let sheets = pages.div_ceil(per_sheet).saturating_mul(job.copies.max(1));
-        Self { pages: Some(pages), sheets: Some(sheets) }
+impl ExpectedTotalsExt for ExpectedTotals {
+    fn for_job(job: &Job, options: &JobOptions) -> ExpectedTotals {
+        let two_sided = matches!(job.duplex, Some(Duplex::LongEdge | Duplex::ShortEdge));
+        ExpectedTotals::for_request(options.expected_pages, two_sided, job.copies)
     }
 
-    /// Fill the totals a reading lacks.
-    pub fn apply(&self, status: &mut JobStatus) {
+    fn apply(&self, status: &mut JobStatus) {
         if status.pages_total.is_none() {
             status.pages_total = self.pages.filter(|p| *p > 0);
         }
@@ -178,63 +53,8 @@ impl ExpectedTotals {
         }
     }
 
-    /// Whether anything is expected.
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.pages.is_none() && self.sheets.is_none()
-    }
-}
-
-/// Where a job is, in the printer's own words reduced to what every backend can say.
-///
-/// [`JobState::Unknown`] means "accepted, outcome unknown": the backend cannot (or could not just
-/// now) say. It is **not** terminal and not a failure; a UI shows "sent" and stops promising more.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum JobState {
-    /// Accepted and waiting (also: the document is still arriving).
-    Pending,
-    /// Held: waiting for a person or a release (a hold, a PIN, a schedule).
-    Held,
-    Processing,
-    /// Paused by the printer or the queue; needs attention (see the reasons).
-    Stopped,
-    Completed,
-    /// Finished, and the printer says something went slightly wrong.
-    CompletedWithWarnings,
-    /// Finished, and the printer says it did not print everything.
-    CompletedWithErrors,
-    Cancelled,
-    /// The printer gave up on it.
-    Aborted,
-    /// The backend cannot say. Not terminal.
-    Unknown,
-}
-
-impl JobState {
-    /// Whether the job has ended for good; a terminal state never changes again.
-    pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::CompletedWithWarnings | Self::CompletedWithErrors | Self::Cancelled | Self::Aborted)
-    }
-
-    /// Whether the job ended and printed ([`Self::Completed`] or [`Self::CompletedWithWarnings`]).
-    pub const fn is_success(self) -> bool {
-        matches!(self, Self::Completed | Self::CompletedWithWarnings)
-    }
-
-    /// A stable lowercase name for logs and tool results.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Held => "held",
-            Self::Processing => "processing",
-            Self::Stopped => "stopped",
-            Self::Completed => "completed",
-            Self::CompletedWithWarnings => "completed_with_warnings",
-            Self::CompletedWithErrors => "completed_with_errors",
-            Self::Cancelled => "cancelled",
-            Self::Aborted => "aborted",
-            Self::Unknown => "unknown",
-        }
     }
 }
 
@@ -244,6 +64,11 @@ pub struct JobStatus {
     pub state: JobState,
     /// The device's reasons, as reported (`"JobPrinting"`, `"media-empty"`); empty when none.
     pub reasons: Vec<String>,
+    /// What the printer says went slightly wrong in a job that otherwise completed (text for
+    /// people). Empty when nothing. This is how "completed with warnings" is modelled: the state is
+    /// [`JobState::Completed`] and this list says more; a [`crate::PrintJob`] then ends as
+    /// [`crate::Outcome::CompletedWithWarnings`].
+    pub warnings: Vec<String>,
     pub sheets_done: Option<u32>,
     pub sheets_total: Option<u32>,
     pub pages_done: Option<u32>,
@@ -255,7 +80,16 @@ pub struct JobStatus {
 impl JobStatus {
     /// A reading with this state and no counters or reasons, taken now.
     pub fn new(state: JobState) -> Self {
-        Self { state, reasons: Vec::new(), sheets_done: None, sheets_total: None, pages_done: None, pages_total: None, updated_at: SystemTime::now() }
+        Self {
+            state,
+            reasons: Vec::new(),
+            warnings: Vec::new(),
+            sheets_done: None,
+            sheets_total: None,
+            pages_done: None,
+            pages_total: None,
+            updated_at: SystemTime::now(),
+        }
     }
 
     /// "Accepted, outcome unknown": what a backend that cannot report status answers.
@@ -282,6 +116,7 @@ impl JobStatus {
     pub fn same_as(&self, other: &Self) -> bool {
         self.state == other.state
             && self.reasons == other.reasons
+            && self.warnings == other.warnings
             && self.sheets_done == other.sheets_done
             && self.sheets_total == other.sheets_total
             && self.pages_done == other.pages_done
@@ -338,6 +173,12 @@ pub struct Submitted {
     /// Filled in by the registry from the request's [`JobOptions::expected_pages`]; see
     /// [`ExpectedTotals`]. [`crate::JobWatch::for_submitted`] uses it.
     pub expected: ExpectedTotals,
+    /// Filled in by the registry: the idempotency tag the backend carried for this job, `None` when
+    /// the request had none or the backend cannot carry one.
+    pub tag: Option<Tag>,
+    /// How the backend sent the request, in its own words, for diagnostics (WS-Print: the ticket
+    /// shape). Not for parsing.
+    pub effective: Option<String>,
     /// Filled in by the registry when the app's [`DocumentConverter`](crate::DocumentConverter)
     /// had to make the document the printer accepts; `None` when it was sent as it was.
     pub conversion: Option<Conversion>,
@@ -356,8 +197,17 @@ impl Submitted {
             watch: WatchSupport::None,
             poll_interval: None,
             expected: ExpectedTotals::default(),
+            tag: None,
+            effective: None,
             conversion: None,
         }
+    }
+
+    /// A short, backend-specific description of how the request was sent (diagnostics only).
+    #[must_use]
+    pub fn with_effective(mut self, effective: impl Into<String>) -> Self {
+        self.effective = Some(effective.into());
+        self
     }
 
     #[must_use]
@@ -399,25 +249,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminal_states_are_exactly_the_five_endings() {
+    fn terminal_states_are_exactly_the_four_endings() {
         use JobState as S;
-        let all = [
-            S::Pending,
-            S::Held,
-            S::Processing,
-            S::Stopped,
-            S::Completed,
-            S::CompletedWithWarnings,
-            S::CompletedWithErrors,
-            S::Cancelled,
-            S::Aborted,
-            S::Unknown,
-        ];
+        let all = [S::Pending, S::Held, S::Processing, S::NeedsAttention, S::Completed, S::CompletedWithErrors, S::Cancelled, S::Aborted, S::Unknown];
         let terminal: Vec<_> = all.iter().filter(|s| s.is_terminal()).map(|s| s.name()).collect();
-        assert_eq!(terminal, ["completed", "completed_with_warnings", "completed_with_errors", "cancelled", "aborted"]);
+        assert_eq!(terminal, ["completed", "completed_with_errors", "cancelled", "aborted"]);
         assert!(!S::Unknown.is_terminal(), "unknown is 'accepted, outcome unknown', not an ending");
-        assert!(S::Completed.is_success() && S::CompletedWithWarnings.is_success() && !S::CompletedWithErrors.is_success());
+        assert!(!S::NeedsAttention.is_terminal(), "a stopped printer can be fixed");
+        assert!(S::Completed.is_success() && !S::CompletedWithErrors.is_success());
         assert!(JobStatus::new(S::Cancelled).terminal() && !JobStatus::unknown().terminal());
+    }
+
+    #[test]
+    fn warnings_are_part_of_a_reading_but_not_of_the_state() {
+        let mut a = JobStatus::new(JobState::Completed);
+        let b = a.clone();
+        assert!(a.same_as(&b));
+        a.warnings.push("job completed with warnings".into());
+        assert!(!a.same_as(&b), "a new warning is a change");
+        assert_eq!(a.state, b.state);
     }
 
     #[test]
@@ -431,7 +281,7 @@ mod tests {
 
     #[test]
     fn malformed_job_ids_are_typed_errors() {
-        use ParseJobIdErrorKind as K;
+        use craft_job::ParseIdErrorKind as K;
         let kind = |text: &str| text.parse::<JobId>().map_err(|e| e.kind());
         assert_eq!(kind("no-prefix"), Err(K::MissingSeparator));
         assert_eq!(kind(""), Err(K::MissingSeparator));
@@ -464,12 +314,12 @@ mod tests {
     fn expected_sheets_follow_duplex_and_copies() {
         use crate::{Duplex, Job};
         let options = JobOptions::new().with_expected_pages(5);
-        let simplex = ExpectedTotals::for_request(&Job::default(), &options);
+        let simplex = ExpectedTotals::for_job(&Job::default(), &options);
         assert_eq!((simplex.pages, simplex.sheets), (Some(5), Some(5)));
         let duplex = Job { duplex: Some(Duplex::LongEdge), copies: 2, ..Job::default() };
-        let both = ExpectedTotals::for_request(&duplex, &options);
+        let both = ExpectedTotals::for_job(&duplex, &options);
         assert_eq!((both.pages, both.sheets), (Some(5), Some(6)));
-        assert_eq!(ExpectedTotals::for_request(&Job::default(), &JobOptions::new()), ExpectedTotals::default());
+        assert_eq!(ExpectedTotals::for_job(&Job::default(), &JobOptions::new()), ExpectedTotals::default());
     }
 
     #[test]
@@ -491,7 +341,7 @@ mod tests {
     fn a_receipt_converts_and_the_receipt_view_comes_back() {
         let receipt = Receipt { backend: "cups", message: "request id is Office-1".into(), job_id: Some("Office-1".into()) };
         let submitted = Submitted::from(receipt.clone());
-        assert_eq!(submitted.job.as_ref().map(|j| j.native.as_str()), Some("Office-1"));
+        assert_eq!(submitted.job.as_ref().map(|j| j.native()), Some("Office-1"));
         assert_eq!(submitted.watch, WatchSupport::None);
         assert_eq!(submitted.receipt(), receipt);
     }

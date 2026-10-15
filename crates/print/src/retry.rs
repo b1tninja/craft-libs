@@ -1,7 +1,9 @@
-//! Retry semantics: whether an error is transient ([`crate::PrintError::is_retryable`]), whether
-//! repeating the request could print twice ([`RetrySafety`]), where it failed ([`Phase`]) and how
-//! long to wait ([`RetryPolicy`]). Also the small clock and jitter sources that make waiting
-//! testable.
+//! Retry semantics for printing: where a failure happened ([`Phase`]), the clock that makes waiting
+//! testable, and the glue from a [`PrintError`] to [`craft_job`]'s retry decision.
+//!
+//! [`crate::RetrySafety`], [`crate::RetryPolicy`], [`RetryFacts`], [`RetryAdvice`], [`advise`] and [`Jitter`] are
+//! `craft-job`'s (shared with scanning) and re-exported from the crate root; [`retry_facts`] and
+//! [`advise_error`] build the facts from the error.
 //!
 //! Two questions, kept apart on purpose:
 //!
@@ -10,12 +12,16 @@
 //! * *Is repeating the request safe?* Only if nothing was accepted, or the request is idempotent.
 //!   A connection that closed after the request was written, or a timeout while waiting for the
 //!   reply to a create/send, may have been delivered: retrying could print twice. Such an error is
-//!   transient **and** [`RetrySafety::OutcomeUnknown`]; [`RetryPolicy`] never retries it on its own,
-//!   and a backend that can offers a reconcile step (look for the job before resubmitting).
+//!   transient **and** [`crate::RetrySafety::OutcomeUnknown`]; [`advise`] answers
+//!   [`RetryAdvice::CheckDeviceFirst`] for it (also when the attempts are used up) and nothing here
+//!   retries it on its own; a backend that can offers a reconcile step (look for the job before
+//!   resubmitting).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
+
+use craft_job::{Jitter, RetryAdvice, RetryFacts, RetryPolicy, advise};
 
 use crate::backend::{CancelToken, PrintError};
 
@@ -43,36 +49,6 @@ impl Phase {
             Self::Request => "request",
             Self::Reply => "reply",
             Self::Poll => "poll",
-        }
-    }
-}
-
-/// What repeating the failed request would do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum RetrySafety {
-    /// Nothing was sent or accepted (refused before connect, policy, a connect failure, a 429 or
-    /// 503 before the printer processed anything). Repeating cannot duplicate anything.
-    Safe,
-    /// The request may have been delivered (the connection closed or reset after the request was
-    /// written, a timeout waiting for the reply to a create/send). Repeating a submit could print
-    /// twice: reconcile first.
-    OutcomeUnknown,
-    /// The request is a query or a cancel: repeating it is harmless.
-    Idempotent,
-}
-
-impl RetrySafety {
-    /// Whether a retry may be made without asking a person or reconciling first.
-    pub const fn allows_automatic_retry(self) -> bool {
-        !matches!(self, Self::OutcomeUnknown)
-    }
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Safe => "safe",
-            Self::OutcomeUnknown => "outcome_unknown",
-            Self::Idempotent => "idempotent",
         }
     }
 }
@@ -149,99 +125,51 @@ pub(crate) fn sleep_cancellable(clock: &dyn Clock, cancel: &CancelToken, mut dur
 /// The longest a waiting helper sleeps without looking at its cancel token.
 pub const CANCEL_SLICE: Duration = Duration::from_millis(100);
 
-/// A tiny deterministic random source for jitter (xorshift64*). Not for anything but spreading
-/// retries out.
-#[derive(Clone, Debug)]
-pub struct Jitter(u64);
-
-impl Jitter {
-    /// A source with this seed (a zero seed is replaced; the same seed gives the same sequence).
-    pub fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed })
-    }
-
+/// Jitter seeded from a clock, the one thing [`craft_job::Jitter`] leaves to the domain crate (it
+/// has no clock of its own).
+pub trait JitterExt: Sized {
     /// A source seeded from a clock reading and a process-wide counter, so two watchers started
     /// together do not wait in step.
-    pub fn from_clock(clock: &dyn Clock) -> Self {
+    fn from_clock(clock: &dyn Clock) -> Self;
+    /// A seed for [`RetryFacts::with_jitter_seed`], drawn from this source.
+    fn next_seed(&mut self) -> u64;
+}
+
+impl JitterExt for Jitter {
+    fn from_clock(clock: &dyn Clock) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(1);
         let salt = COUNTER.fetch_add(0x9E37_79B9, Ordering::Relaxed);
         Self::new((clock.now().as_nanos() as u64) ^ salt.rotate_left(17))
     }
 
-    /// The next value in `[0, 1)`.
-    pub fn unit(&mut self) -> f64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        let out = x.wrapping_mul(0x2545_F491_4F6C_DD1D);
-        (out >> 11) as f64 / (1u64 << 53) as f64
+    fn next_seed(&mut self) -> u64 {
+        (self.unit() * (1u64 << 53) as f64) as u64
     }
 }
 
-/// How often and how long to retry. Attempts count tries, the first one included: `max_attempts: 1`
-/// never retries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RetryPolicy {
-    pub max_attempts: u32,
-    /// The wait after the first failure; it doubles per failure up to `max_delay`.
-    pub base: Duration,
-    pub max_delay: Duration,
-    /// Spread each wait by up to this many percent either way (0 to 100).
-    pub jitter_percent: u32,
-    /// Longest a device's own "come back in" hint is honoured.
-    pub max_retry_after: Duration,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self {
-        Self {
-            max_attempts: 4,
-            base: Duration::from_millis(500),
-            max_delay: Duration::from_secs(8),
-            jitter_percent: 20,
-            max_retry_after: Duration::from_secs(60),
-        }
+/// The facts [`craft_job::advise`] needs about a failed try, read from the error: is it transient,
+/// is repeating it safe, the device's own wait, and which try this was (1 for the first).
+pub fn retry_facts(error: &PrintError, attempts_so_far: u32) -> RetryFacts {
+    let facts = RetryFacts::new(error.is_retryable(), error.retry_safety()).with_attempts(attempts_so_far);
+    match error.retry_after() {
+        Some(wait) => facts.with_retry_after(wait),
+        None => facts,
     }
 }
 
-impl RetryPolicy {
-    /// A policy that never retries.
-    pub fn none() -> Self {
-        Self { max_attempts: 1, ..Self::default() }
-    }
-
-    /// The wait after failure number `attempt` (1 is the first failure): `base * 2^(attempt-1)`
-    /// capped at `max_delay`, spread by `jitter_percent` around its value with `unit` in `[0, 1]`
-    /// (a non-finite `unit` counts as the middle, no spread). Never longer than `max_delay`.
-    pub fn delay(&self, attempt: u32, unit: f64) -> Duration {
-        let doublings = attempt.saturating_sub(1).min(30);
-        let backoff = self.base.saturating_mul(1u32 << doublings).min(self.max_delay);
-        let unit = if unit.is_finite() { unit.clamp(0.0, 1.0) } else { 0.5 };
-        let spread = f64::from(self.jitter_percent.min(100)) / 100.0;
-        let factor = 1.0 + (unit * 2.0 - 1.0) * spread;
-        Duration::try_from_secs_f64(backoff.as_secs_f64() * factor).unwrap_or(backoff).min(self.max_delay)
-    }
-
-    /// What to do after `error` on try number `attempt`: `Some(wait)` to try again, `None` to give
-    /// up. `None` when the error is not transient, when repeating could duplicate the job
-    /// ([`RetrySafety::OutcomeUnknown`]) or when the attempts are used up. A device hint
-    /// ([`PrintError::retry_after`]) makes the wait at least that long, up to `max_retry_after`.
-    pub fn next_delay(&self, error: &PrintError, attempt: u32, unit: f64) -> Option<Duration> {
-        if attempt >= self.max_attempts || !error.is_retryable() || !error.retry_safety().allows_automatic_retry() {
-            return None;
-        }
-        let hint = error.retry_after().map_or(Duration::ZERO, |d| d.min(self.max_retry_after));
-        Some(self.delay(attempt, unit).max(hint))
-    }
+/// What to do after `error` on try number `attempts_so_far` ([`craft_job::advise`] over
+/// [`retry_facts`]). [`RetryAdvice::RetryNow`] and [`RetryAdvice::RetryAfter`] mean try again;
+/// [`RetryAdvice::CheckDeviceFirst`] means the request may have been delivered (never repeated on
+/// its own, even when the attempts are used up); [`RetryAdvice::DoNotRetry`] means give up.
+pub fn advise_error(error: &PrintError, attempts_so_far: u32, policy: &RetryPolicy, jitter: &mut Jitter) -> RetryAdvice {
+    advise(&retry_facts(error, attempts_so_far).with_jitter_seed(jitter.next_seed()), policy)
 }
 
-/// Run `op` (given the try number, from 1) until it succeeds or [`RetryPolicy::next_delay`] says
-/// stop. The waits go through `clock` and a set `cancel` ends the loop with the last error.
+/// Run `op` (given the try number, from 1) until it succeeds or [`advise_error`] says to stop.
+/// The waits go through `clock` and a set `cancel` ends the loop with the last error.
 ///
-/// Use it for queries, cancels and anything else whose errors are [`RetrySafety::Safe`] or
-/// [`RetrySafety::Idempotent`]. A submit whose error is [`RetrySafety::OutcomeUnknown`] comes back
+/// Use it for queries, cancels and anything else whose errors are [`crate::RetrySafety::Safe`] or
+/// [`crate::RetrySafety::Idempotent`]. A submit whose error is [`crate::RetrySafety::OutcomeUnknown`] comes back
 /// after the first try: reconcile, do not repeat.
 pub fn retry<T>(
     policy: &RetryPolicy,
@@ -256,8 +184,9 @@ pub fn retry<T>(
             Ok(value) => return Ok(value),
             Err(error) => error,
         };
-        match policy.next_delay(&error, attempt, jitter.unit()) {
-            Some(wait) if !cancel.is_cancelled() => sleep_cancellable(clock, cancel, wait),
+        match advise_error(&error, attempt, policy, jitter) {
+            RetryAdvice::RetryNow if !cancel.is_cancelled() => {}
+            RetryAdvice::RetryAfter(wait) if !cancel.is_cancelled() => sleep_cancellable(clock, cancel, wait),
             _ => return Err(error),
         }
         attempt = attempt.saturating_add(1);
@@ -267,6 +196,7 @@ pub fn retry<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RetrySafety;
     use crate::backend::ErrorKind;
 
     fn policy() -> RetryPolicy {
@@ -279,57 +209,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn delays_double_up_to_the_cap() {
-        let p = policy();
-        let ms: Vec<u128> = (1..=6).map(|a| p.delay(a, 0.5).as_millis()).collect();
-        assert_eq!(ms, [100, 200, 400, 800, 1000, 1000]);
-        assert_eq!(p.delay(0, 0.5), Duration::from_millis(100), "attempt 0 is treated like 1");
-        assert_eq!(p.delay(u32::MAX, 0.5), Duration::from_millis(1000), "no overflow");
-    }
-
-    #[test]
-    fn jitter_spreads_within_its_bounds_and_never_exceeds_the_cap() {
-        let p = RetryPolicy { jitter_percent: 50, ..policy() };
-        assert_eq!(p.delay(1, 0.0), Duration::from_millis(50));
-        assert_eq!(p.delay(1, 1.0), Duration::from_millis(150));
-        assert_eq!(p.delay(1, 0.5), Duration::from_millis(100));
-        assert_eq!(p.delay(5, 1.0), Duration::from_millis(1000), "capped after jitter");
-        assert_eq!(p.delay(1, f64::NAN), Duration::from_millis(100));
-        assert_eq!(p.delay(1, -3.0), Duration::from_millis(50));
-        let huge = RetryPolicy { max_delay: Duration::MAX, base: Duration::MAX, ..p };
-        let _ = huge.delay(40, 1.0); // must not panic
-        let mut j = Jitter::new(7);
-        for _ in 0..1000 {
-            let u = j.unit();
-            assert!((0.0..1.0).contains(&u));
-        }
-        assert_eq!(Jitter::new(7).unit(), Jitter::new(7).unit());
-        assert_ne!(Jitter::new(7).unit(), Jitter::new(8).unit());
-    }
-
     fn error(kind: ErrorKind, safety: RetrySafety) -> PrintError {
         PrintError::new(kind, "x").with_safety(safety)
+    }
+
+    fn advice(p: &RetryPolicy, error: &PrintError, attempt: u32) -> RetryAdvice {
+        advise_error(error, attempt, p, &mut Jitter::new(1))
     }
 
     #[test]
     fn only_transient_and_repeatable_errors_are_retried_and_attempts_are_bounded() {
         let p = policy();
-        assert!(p.next_delay(&error(ErrorKind::Busy, RetrySafety::Safe), 1, 0.5).is_some());
-        assert!(p.next_delay(&error(ErrorKind::Timeout, RetrySafety::Idempotent), 1, 0.5).is_some());
-        assert_eq!(p.next_delay(&error(ErrorKind::Timeout, RetrySafety::OutcomeUnknown), 1, 0.5), None, "may have printed: never automatic");
-        assert_eq!(p.next_delay(&error(ErrorKind::Rejected, RetrySafety::Safe), 1, 0.5), None, "not transient");
-        assert_eq!(p.next_delay(&error(ErrorKind::Busy, RetrySafety::Safe), 5, 0.5), None, "attempts used up");
-        assert_eq!(RetryPolicy::none().next_delay(&error(ErrorKind::Busy, RetrySafety::Safe), 1, 0.5), None);
+        assert!(advice(&p, &error(ErrorKind::Busy, RetrySafety::Safe), 1).is_automatic_retry());
+        assert!(advice(&p, &error(ErrorKind::Timeout, RetrySafety::Idempotent), 1).is_automatic_retry());
+        assert_eq!(
+            advice(&p, &error(ErrorKind::Timeout, RetrySafety::OutcomeUnknown), 1),
+            RetryAdvice::CheckDeviceFirst,
+            "may have printed: never automatic, look at the printer first"
+        );
+        assert_eq!(
+            advice(&p, &error(ErrorKind::Timeout, RetrySafety::OutcomeUnknown), 5),
+            RetryAdvice::CheckDeviceFirst,
+            "an unknown outcome stays one when the attempts are used up (craft-job's rule)"
+        );
+        assert_eq!(advice(&p, &error(ErrorKind::Rejected, RetrySafety::Safe), 1), RetryAdvice::DoNotRetry, "not transient");
+        assert_eq!(advice(&p, &error(ErrorKind::Busy, RetrySafety::Safe), 5), RetryAdvice::DoNotRetry, "attempts used up");
+        assert_eq!(advice(&RetryPolicy::none(), &error(ErrorKind::Busy, RetrySafety::Safe), 1), RetryAdvice::DoNotRetry);
     }
 
     #[test]
     fn a_device_hint_lengthens_the_wait_up_to_a_cap() {
         let p = RetryPolicy { max_retry_after: Duration::from_secs(10), ..policy() };
         let busy = |secs| error(ErrorKind::Busy, RetrySafety::Safe).with_retry_after(Duration::from_secs(secs));
-        assert_eq!(p.next_delay(&busy(5), 1, 0.5), Some(Duration::from_secs(5)));
-        assert_eq!(p.next_delay(&busy(3600), 1, 0.5), Some(Duration::from_secs(10)));
-        assert_eq!(p.next_delay(&busy(0), 1, 0.5), Some(Duration::from_millis(100)), "backoff still applies");
+        assert_eq!(advice(&p, &busy(5), 1), RetryAdvice::RetryAfter(Duration::from_secs(5)));
+        assert_eq!(advice(&p, &busy(3600), 1), RetryAdvice::RetryAfter(Duration::from_secs(10)));
+        assert_eq!(advice(&p, &busy(0), 1), RetryAdvice::RetryAfter(Duration::from_millis(100)), "backoff still applies");
+    }
+
+    #[test]
+    fn retry_facts_read_the_error() {
+        let e = error(ErrorKind::Timeout, RetrySafety::OutcomeUnknown).with_retry_after(Duration::from_secs(2));
+        let f = retry_facts(&e, 3);
+        assert_eq!((f.retryable, f.safety, f.retry_after, f.attempts_so_far), (true, RetrySafety::OutcomeUnknown, Some(Duration::from_secs(2)), 3));
+        assert!(!retry_facts(&error(ErrorKind::Rejected, RetrySafety::Safe), 1).retryable);
     }
 
     #[test]

@@ -85,8 +85,8 @@ fact and the system print queue UI follows the job. For our purposes it is the C
 * `Backend::submit` returns `Submitted` when the printer has accepted the document. It is bounded by
   the backend's per-request timeouts and never waits for output.
 * `Backend::job_status(&JobId) -> JobStatus` is **one request**. `JobState` is Pending, Held,
-  Processing, Stopped, Completed, CompletedWithWarnings, CompletedWithErrors, Cancelled, Aborted or
-  Unknown; `Unknown` means "accepted, outcome unknown" and is not terminal. `Backend::cancel_job`
+  Processing, NeedsAttention (a stopped printer), Completed, CompletedWithErrors, Cancelled, Aborted or
+  Unknown (a completed job the printer qualified is `Completed` with `JobStatus::warnings`); `Unknown` means "accepted, outcome unknown" and is not terminal. `Backend::cancel_job`
   cancels (and "too late" is not an error).
 * `Backend::watch_support()` is `None` (cannot report: do not poll), `Poll` or `Events`
   (`recommended_poll_interval()` is the cadence; events remain a future option, nothing listens).
@@ -120,11 +120,11 @@ Two separate questions.
     503 before the printer processed anything).
   * `OutcomeUnknown`: the request may have been delivered (the connection closed or reset after the
     request was written, a timeout while waiting for the reply to a create or send). Retrying a submit
-    could print twice. The error is transient *and* unsafe; `RetryPolicy` never repeats it by itself,
+    could print twice. The error is transient *and* unsafe; `craft_job::advise` answers `CheckDeviceFirst` for it (also when the attempts are used up), so nothing repeats it by itself,
     and a backend that can offers a *reconcile* step (look for the job before resubmitting).
   * `Idempotent`: a query or a cancel; repeating is harmless.
 * `PrintError::phase()`: `Prepare` (before any traffic), `Connect`, `Request`, `Reply`, `Poll`.
-* `PrintError::retry_after()`: the wait the device or backend suggests; `RetryPolicy::next_delay`
+* `PrintError::retry_after()`: the wait the device or backend suggests; `craft_job::advise`
   honours it (up to `max_retry_after`) on top of an exponential, jittered, capped backoff.
 
 Neutral defaults when a backend does not say (`ErrorKind::default_retry_safety`):
@@ -218,3 +218,8 @@ its own. `every_transport_kind_for_every_operation` pins every kind against ever
 (`Found`, `Ambiguous`, `NotFound`). WS-Print job summaries carry no creation time, so "created in the
 window" is whatever the printer still lists. After a failed send with an unknown outcome the backend
 deliberately does **not** cancel the job it created: cancelling could abort a job that is printing.
+
+**One level up.** Following a remote job, retrying safely and reconciling are combined into one
+object per user-visible print, `PrintJob`, with an idempotency tag that makes the reconcile exact where
+the backend can carry one; see [job-tracking.md](job-tracking.md). `Registry::find_job` is the
+backend-neutral form of `WsdBackend::reconcile`.

@@ -13,10 +13,14 @@
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
-use crate::backend::{Backend, BackendClass, DocumentFormat, ErrorKind, PrintError, PrinterDetails, PrinterRef, Progress, Receipt, SubmitRequest};
+use craft_job::{BackendName, ExpectedTotals, Fingerprint, JobId, Progress, RetrySafety, TagSupport, namespaced_id, split_id};
+
+use crate::backend::{Backend, BackendClass, DocumentFormat, ErrorKind, PrintError, PrinterDetails, PrinterRef, Receipt, SubmitRequest};
 use crate::convert::{Conversion, ConversionPolicy, ConvertContext, DocumentConverter, OwnedDocument, choose_resolution, pick_target, wants_colour};
-use crate::job::{ExpectedTotals, JobId, JobStatus, Submitted, WatchSupport};
-use crate::retry::{Phase, RetrySafety};
+use crate::job::{ExpectedTotalsExt as _, JobStatus, Submitted, WatchSupport};
+use crate::remote::{JobFilter, JobQueryCaps, Reconciled, RemoteJob};
+use crate::retry::Phase;
+use crate::tag::TagSupportExt as _;
 use crate::watch::{JobWatch, WaitPolicy};
 
 /// Why [`Registry::register`] refused a backend.
@@ -61,18 +65,18 @@ impl<T> Listing<T> {
     }
 }
 
-/// `"<backend>:<native id>"`.
-pub fn namespaced_id(backend: &str, native_id: &str) -> String {
-    format!("{backend}:{native_id}")
-}
-
-/// Split a namespaced id at its first colon.
-pub fn split_id(id: &str) -> Option<(&str, &str)> {
-    id.split_once(':')
-}
-
-fn valid_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+/// What the backend that serves a printer is and can do; see [`Registry::backend_info`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BackendInfo {
+    /// The backend's registry name.
+    pub name: &'static str,
+    pub class: BackendClass,
+    pub watch: WatchSupport,
+    pub tag_support: TagSupport,
+    pub query_caps: JobQueryCaps,
+    /// See [`Backend::open_job_timeout`].
+    pub open_job_timeout: Option<std::time::Duration>,
 }
 
 /// The print backends of a process. The free functions of this crate's [`registry`] use one global
@@ -133,7 +137,7 @@ impl Registry {
     /// [`RegisterError::DuplicateName`] (the new backend is dropped), never a panic.
     pub fn register(&self, backend: Box<dyn Backend>) -> Result<(), RegisterError> {
         let name = backend.name();
-        if !valid_name(name) {
+        if BackendName::new(name).is_err() {
             return Err(RegisterError::InvalidName { name });
         }
         let mut backends = self.backends.write().unwrap_or_else(PoisonError::into_inner);
@@ -255,35 +259,17 @@ impl Registry {
             return Err(unsupported());
         }
         let mut request = request;
-        let (backend, native): (&Arc<dyn Backend>, Option<String>) = match request.job.printer.clone() {
-            Some(id) => {
-                let (backend, native) = Self::route(&backends, &id)?;
-                (backend, Some(native.to_string()))
-            }
-            None => match backends.as_slice() {
-                [only] => (only, None),
-                many => {
-                    let with_default = many.iter().find(|b| b.list_printers().is_ok_and(|list| list.iter().any(|p| p.default)));
-                    match with_default {
-                        Some(backend) => (backend, None),
-                        None => {
-                            return Err(PrintError::new(
-                                ErrorKind::NotFound,
-                                format!("no default printer and no printer chosen (registered: {})", Self::names_text(many)),
-                            ));
-                        }
-                    }
-                }
-            },
-        };
+        let (backend, native) = Self::pick(&backends, request.job.printer.as_deref())?;
         if request.cancel.is_cancelled() {
             return Err(PrintError::new(ErrorKind::Cancelled, "the print job was cancelled before it started"));
         }
         let converted = self.prepare_document(backend.as_ref(), native.as_deref(), &mut request, known)?;
         require_consent(backend.as_ref(), &request)?;
         request.job.printer = native;
-        let expected = ExpectedTotals::for_request(&request.job, &request.options);
-        let SubmitRequest { document, job, options, consent, cancel, progress } = request;
+        // A tag only travels where the backend can carry it.
+        let tag = request.tag.take().filter(|_| backend.tag_support().carries());
+        let expected = ExpectedTotals::for_job(&request.job, &request.options);
+        let SubmitRequest { document, job, options, consent, cancel, progress, .. } = request;
         // The converted bytes (if any) are what is sent.
         let document = match &converted {
             Some((owned, _)) => owned.as_document(),
@@ -297,7 +283,8 @@ impl Registry {
                 report(event.or_expected(expected.sheets));
             }
         };
-        let forwarded = SubmitRequest { document, job, options, consent, cancel, progress: if has_callback { Some(&mut with_total) } else { None } };
+        let forwarded =
+            SubmitRequest { document, job, options, consent, cancel, progress: if has_callback { Some(&mut with_total) } else { None }, tag };
         let mut submitted = backend.submit(forwarded)?;
         let name = backend.name();
         submitted.backend = name;
@@ -305,6 +292,7 @@ impl Registry {
         submitted.watch = backend.watch_support();
         submitted.poll_interval = backend.recommended_poll_interval();
         submitted.expected = expected;
+        submitted.tag = tag;
         submitted.conversion = converted.map(|(_, conversion)| conversion);
         if let Some(status) = submitted.status.as_mut() {
             expected.apply(status);
@@ -412,6 +400,98 @@ impl Registry {
     /// It no longer waits for the job: a receipt means "accepted".
     pub fn submit(&self, request: SubmitRequest<'_>) -> Result<Receipt, PrintError> {
         self.submit_job(request).map(|submitted| submitted.receipt())
+    }
+
+    /// The backend and native printer id a request for `printer` (a namespaced id, or `None` for
+    /// the default printer) goes to; see [`Self::submit_job`] for the rules.
+    fn pick(backends: &[Arc<dyn Backend>], printer: Option<&str>) -> Result<(Arc<dyn Backend>, Option<String>), PrintError> {
+        if backends.is_empty() {
+            return Err(unsupported());
+        }
+        match printer {
+            Some(id) => {
+                let (backend, native) = Self::route(backends, id)?;
+                Ok((Arc::clone(backend), Some(native.to_string())))
+            }
+            None => match backends {
+                [only] => Ok((Arc::clone(only), None)),
+                many => many
+                    .iter()
+                    .find(|b| b.list_printers().is_ok_and(|list| list.iter().any(|p| p.default)))
+                    .map(|backend| (Arc::clone(backend), None))
+                    .ok_or_else(|| {
+                        PrintError::new(
+                            ErrorKind::NotFound,
+                            format!("no default printer and no printer chosen (registered: {})", Self::names_text(many)),
+                        )
+                    }),
+            },
+        }
+    }
+
+    /// What the backend that serves `printer` is: its class, what it can report on a job, whether it
+    /// carries an idempotency tag and what it can say about its queue. `printer` is routed exactly
+    /// as in [`Self::submit_job`] (`None` is the default printer). Opens no connection.
+    pub fn backend_info(&self, printer: Option<&str>) -> Result<BackendInfo, PrintError> {
+        let backends = self.snapshot();
+        let (backend, _) = Self::pick(&backends, printer)?;
+        Ok(BackendInfo {
+            name: backend.name(),
+            class: backend.class(),
+            watch: backend.watch_support(),
+            tag_support: backend.tag_support(),
+            query_caps: backend.job_query_caps(),
+            open_job_timeout: backend.open_job_timeout(),
+        })
+    }
+
+    /// The namespaced id of the printer a request without a printer would use: the first listed
+    /// printer that is the default of its backend. [`ErrorKind::NotFound`] when there is none.
+    /// A tracked job pins this id so that every retry goes to the same printer.
+    pub fn default_printer(&self) -> Result<String, PrintError> {
+        let backends = self.snapshot();
+        if backends.is_empty() {
+            return Err(unsupported());
+        }
+        for backend in &backends {
+            if let Ok(list) = backend.list_printers()
+                && let Some(printer) = list.iter().find(|p| p.default)
+            {
+                return Ok(namespaced_id(backend.name(), &printer.id));
+            }
+        }
+        Err(PrintError::new(ErrorKind::NotFound, "no backend lists a default printer"))
+    }
+
+    /// The jobs of a printer (a namespaced id), listed by its backend with one bounded read;
+    /// [`ErrorKind::Unsupported`] when the backend cannot list. See
+    /// [`crate::backends::Backend::list_jobs`]. The returned ids are namespaced.
+    pub fn list_jobs(&self, printer: &str, filter: &JobFilter) -> Result<Vec<RemoteJob>, PrintError> {
+        let backends = self.snapshot();
+        let (backend, native) = Self::route(&backends, printer)?;
+        let name = backend.name();
+        let mut jobs = backend.list_jobs(native, filter)?;
+        for job in &mut jobs {
+            job.id = JobId::new(name, job.id.native());
+        }
+        Ok(jobs)
+    }
+
+    /// After an attempt whose outcome is unknown: look for the job it may have created on a printer
+    /// (a namespaced id). See [`crate::backends::Backend::find_job`].
+    pub fn find_job(&self, printer: &str, fingerprint: &Fingerprint) -> Result<Reconciled, PrintError> {
+        let backends = self.snapshot();
+        let (backend, native) = Self::route(&backends, printer)?;
+        let name = backend.name();
+        let restamp = |mut job: RemoteJob| {
+            job.id = JobId::new(name, job.id.native());
+            job
+        };
+        Ok(match backend.find_job(native, fingerprint)? {
+            Reconciled::NotFound => Reconciled::NotFound,
+            Reconciled::Found(job) => Reconciled::Found(restamp(job)),
+            Reconciled::Ambiguous(jobs) => Reconciled::Ambiguous(jobs.into_iter().map(restamp).collect()),
+        })
     }
 
     /// The backend that owns a job.

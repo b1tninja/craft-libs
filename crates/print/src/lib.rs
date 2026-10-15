@@ -24,15 +24,18 @@ mod options;
 mod progress;
 pub mod pwg;
 mod registry;
+mod remote;
 mod retry;
 #[cfg(any(test, windows))]
 mod sheets;
+mod tag;
 #[cfg(feature = "testing")]
 pub mod testing;
 #[cfg(test)]
 mod tests;
 #[cfg(any(test, windows))]
 mod ticket;
+mod tracked;
 mod watch;
 #[cfg(windows)]
 mod windows;
@@ -52,19 +55,36 @@ pub mod backends {
     pub use crate::backend::*;
 }
 pub use backend::{
-    BackendClass, CancelToken, Document, DocumentFormat, ErrorKind, JobHint, NativeCode, PrintError, PrinterDetails, PrinterRef, PrinterState,
-    PrinterStatus, Progress, ProgressCallback, Receipt, SubmitRequest, UserConfirmed,
+    BackendClass, CancelToken, Document, DocumentFormat, ErrorKind, JobHint, NotFoundSubject, PrintError, PrinterDetails, PrinterRef, PrinterState,
+    PrinterStatus, ProgressCallback, Receipt, SubmitRequest, UserConfirmed,
 };
 #[cfg(any(windows, all(unix, not(target_arch = "wasm32"))))]
 pub use builtin::SystemSpooler;
 pub use convert::{Conversion, ConversionPolicy, ConvertContext, DocumentConverter, OwnedDocument, choose_resolution};
-pub use job::{ExpectedTotals, JobId, JobState, JobStatus, ParseJobIdError, ParseJobIdErrorKind, Submitted, WatchSupport};
+/// The shared job vocabulary lives in the `craft-job` crate (also used by scanning) and keeps its
+/// names here, so `craft_print::JobId`, `craft_print::RetryPolicy` and the others resolve as before.
+/// Renamed on the way in: `JobTag` is [`Tag`], `ParseJobIdError` is [`ParseIdError`] (and its
+/// kind `ParseIdErrorKind`), `RetryAdvice::CheckPrinterFirst` is `RetryAdvice::CheckDeviceFirst`,
+/// and `JobState::Stopped` is `JobState::NeedsAttention`; `JobState::CompletedWithWarnings` is
+/// `JobState::Completed` with [`JobStatus::warnings`].
+pub use craft_job::{
+    BackendName, DeviceId, DocumentRef, ExpectedTotals, Fingerprint, HRESULT_DOMAIN, Jitter, JobDocuments, JobId, JobKind, JobState, JobTimes,
+    JobView, NativeCode, ParseIdError, ParseIdErrorKind, Progress, RetryAdvice, RetryFacts, RetryPolicy, RetrySafety, Tag, TagError, TagPlacement,
+    TagSupport, Timestamp, advise, namespaced_id, split_id,
+};
+pub use job::{ExpectedTotalsExt, JobStatus, Submitted, WatchSupport};
 pub use options::{ColourMode, JobOptions, Orientation, Quality, Resolution};
 pub use registry::{
-    BackendError, Listing, RegisterError, Registry, cancel_job, job_status, list_printers, namespaced_id, printer_details, register, registry,
-    set_converter, split_id, submit_job, submit_to_backend,
+    BackendError, BackendInfo, Listing, RegisterError, Registry, cancel_job, job_status, list_printers, printer_details, register, registry,
+    set_converter, submit_job, submit_to_backend,
 };
-pub use retry::{CANCEL_SLICE, Clock, Jitter, ManualClock, Phase, RetryPolicy, RetrySafety, SystemClock, retry};
+pub use remote::{FingerprintExt, JobFilter, JobQueryCaps, Reconciled, RemoteJob, filter_jobs, reconcile_jobs};
+pub use retry::{CANCEL_SLICE, Clock, JitterExt, ManualClock, Phase, SystemClock, advise_error, retry, retry_facts};
+pub use tag::{TagExt, TagPolicy, TagSupportExt};
+pub use tracked::{
+    Advance, Attempt, AttemptError, AttemptOutcome, BytesSource, DocumentInfo, DocumentSource, FnSource, JobProgress, LifecycleState, LocalJobId,
+    Outcome, PrintJob, PrintJobConfig, RequestRecord, SimpleState, Snapshot, StaleReason, Staleness, TrailEntry, TrailEvent,
+};
 pub use watch::{JobSource, JobWatch, WaitPolicy, WatchOutcome, WatchStep, wait_for_job};
 
 /// A system spooler failure. Document permissions belong to the caller.

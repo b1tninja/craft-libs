@@ -25,7 +25,7 @@ pub(crate) fn register_builtin(registry: &Registry) {
 
 #[cfg(any(test, windows, all(unix, not(target_arch = "wasm32"))))]
 mod spooler {
-    use crate::backend::{Backend, ErrorKind, JobHint, PrintError, PrinterDetails, PrinterRef, SubmitRequest};
+    use crate::backend::{Backend, JobHint, PrintError, PrinterDetails, PrinterRef, SubmitRequest};
     use crate::job::Submitted;
     use crate::{Printer, Progress, printers, submit_with_progress};
 
@@ -82,7 +82,7 @@ mod spooler {
             let printer = printers()
                 .into_iter()
                 .find(|p| p.name == native_id)
-                .ok_or_else(|| PrintError::new(ErrorKind::NotFound, format!("the printer is not available: {native_id}")))?;
+                .ok_or_else(|| PrintError::printer_not_found(format!("the printer is not available: {native_id}")))?;
             let options = crate::printer_options(&printer.name);
             Ok(details_for(printer, options))
         }

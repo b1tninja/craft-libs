@@ -36,7 +36,7 @@ impl fmt::Display for ParseWireError {
 impl std::error::Error for ParseWireError {}
 
 macro_rules! wire_text {
-    ($ty:ident, $what:literal) => {
+    ($ty:ident, $what:literal $(, unknown_reads_as $fallback:expr)?) => {
         impl FromStr for $ty {
             type Err = ParseWireError;
 
@@ -48,6 +48,30 @@ macro_rules! wire_text {
         impl fmt::Display for $ty {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(self.as_str())
+            }
+        }
+
+        /// With the `serde` feature: the existing wire string.
+        #[cfg(feature = "serde")]
+        impl serde::Serialize for $ty {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl<'de> serde::Deserialize<'de> for $ty {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+                match text.parse::<$ty>() {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        let _ = &error;
+                        $(return Ok($fallback);)?
+                        #[allow(unreachable_code)]
+                        Err(serde::de::Error::custom(error))
+                    }
+                }
             }
         }
     };
@@ -166,7 +190,7 @@ impl InterruptKind {
         Self::ALL.iter().copied().find(|value| value.as_str() == text)
     }
 }
-wire_text!(InterruptKind, "interrupt kind");
+wire_text!(InterruptKind, "interrupt kind", unknown_reads_as InterruptKind::Other);
 
 // ---- enums that only exist here -------------------------------------------------------------------
 
@@ -433,9 +457,11 @@ impl ErrorContext {
 /// `ScanError`'s `Display` text is unchanged; this sits beside it. The kind, phase, recovery flags
 /// and message are neutral; `native` carries the backend's own code for logs and diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ScanErrorInfo {
     /// The backend's own error code, when the error carried one. A sentence an app decided on from
     /// a status read (a jam, an empty tray) keeps the code that triggered it.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub native: Option<NativeCode>,
     /// The cause. Taken from the structured source (the backend's own decision at the point it
     /// built the error); only an error with none behind it falls back to its sentence.

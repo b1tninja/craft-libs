@@ -112,6 +112,7 @@ fn an_unknown_outcome_survives_the_journal() {
             dpi_y: 200,
             requested_dpi: 200,
             thresholded: false,
+            length: Default::default(),
         });
     }
     let offline = ScanError::native_error(InterruptKind::Offline, NativeCode::new("http", 503, None), InterruptKind::Offline.sentence());
@@ -135,4 +136,33 @@ fn a_journal_tolerates_unknown_and_missing_fields() {
     assert_eq!(job.page_count(), 2);
     let info: PageInfo = serde_json::from_str(r#"{"number":4,"format":"png"}"#).expect("page");
     assert_eq!((info.number, info.bytes), (4, 0));
+}
+
+#[test]
+fn the_page_length_wire_strings_and_the_per_page_record_survive_the_journal() {
+    use craft_scan::{LengthRecord, LengthSource, PageLength};
+    assert_eq!(round(&PageLength::AutoInfer), "\"infer\"");
+    assert_eq!(round(&PageLength::Driver), "\"driver\"");
+    assert_eq!(round(&LengthSource::Inferred), "\"inferred\"");
+    let record = LengthRecord { source: LengthSource::Inferred, length_mils: Some(10_730), approximate: true };
+    let text = round(&record);
+    assert_eq!(text, r#"{"source":"inferred","length_mils":10730,"approximate":true}"#);
+    let info =
+        PageInfo { number: 1, attempt: 1, source: Some(Source::Feeder), format: "bmp", width: 10, height: 20, dpi: 200, bytes: 5, length: record };
+    let again: PageInfo = serde_json::from_str(&serde_json::to_string(&info).expect("page")).expect("read");
+    assert_eq!(again, info);
+    // A journal written before the field existed reads as a driver length.
+    let old: PageInfo = serde_json::from_str(r#"{"number":1,"format":"bmp","height":20,"dpi":200}"#).expect("old page");
+    assert_eq!(old.length, LengthRecord::default());
+    assert_eq!(old.length.source, LengthSource::Driver);
+}
+
+#[test]
+fn a_job_plan_carries_the_page_length_request_unchanged() {
+    use craft_scan::PageLength;
+    let request = ScanSettings { page_length: PageLength::AutoInfer, ..feeder(3) };
+    let mut job = ScanJob::new(request, ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    assert_eq!(plan.settings.page_length, PageLength::AutoInfer);
+    assert_eq!(job.settings().page_length, PageLength::AutoInfer);
 }

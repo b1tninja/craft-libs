@@ -116,6 +116,7 @@ impl Backend for EsclLike {
                 dpi_y: settings.dpi,
                 requested_dpi: settings.dpi,
                 thresholded: false,
+                length: Default::default(),
             };
             if let Some(progress) = &settings.progress {
                 progress.push_page(page.clone());

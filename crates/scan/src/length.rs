@@ -21,6 +21,8 @@
 //!    is never the default.
 //!
 //! [`PageLength::Driver`] (the default) does none of this: the driver keeps whatever extent it has.
+//! [`PageLength::Size`] is step 2 alone, for a caller that wants the chosen size's length even when the device
+//! could detect one.
 //!
 //! # The inference rule
 //!
@@ -52,6 +54,9 @@ pub enum PageLength {
     /// Leave the extent to the driver, exactly as before this setting existed. The default.
     #[default]
     Driver,
+    /// The length of [`ScanSettings::page_size`] as extents, whatever the device could detect. Deterministic.
+    /// Without a page size that names a length (`Auto` and `Custom` do not) it is the driver default.
+    Size,
     /// Device detection when the device publishes it; otherwise the extents of
     /// [`ScanSettings::page_size`] when one is set; otherwise the driver default. Deterministic: never
     /// inspects the image.
@@ -63,12 +68,13 @@ pub enum PageLength {
 
 impl PageLength {
     /// Every value, in the order a UI lists them.
-    pub const ALL: &'static [PageLength] = &[PageLength::Driver, PageLength::Auto, PageLength::AutoInfer];
+    pub const ALL: &'static [PageLength] = &[PageLength::Driver, PageLength::Size, PageLength::Auto, PageLength::AutoInfer];
 
-    /// Wire string: `driver`, `auto`, `infer`.
+    /// Wire string: `driver`, `size`, `auto`, `infer`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Driver => "driver",
+            Self::Size => "size",
             Self::Auto => "auto",
             Self::AutoInfer => "infer",
         }
@@ -77,6 +83,7 @@ impl PageLength {
     pub fn parse(text: &str) -> Option<Self> {
         match text.to_ascii_lowercase().as_str() {
             "driver" | "default" => Some(Self::Driver),
+            "size" | "match" => Some(Self::Size),
             "auto" => Some(Self::Auto),
             "infer" | "auto-infer" | "auto_infer" => Some(Self::AutoInfer),
             _ => None,

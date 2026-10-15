@@ -432,6 +432,7 @@ pub enum Feedback {
 
 /// What is known about the selected scanner's capabilities.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // `Ready` is the common case and boxing it would change the public variant
 pub enum DetailsState {
     #[default]
     Idle,

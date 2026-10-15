@@ -362,6 +362,8 @@ impl Backend for WiaLike {
         scanner.feeder = feeder;
         scanner.flatbed = flatbed;
         scanner.duplex = duplex;
+        // The handling bits were read, so a unit missing from them is absent.
+        scanner.reported.units = true;
         scanner.connection = Connection::Wsd;
         scanner.feeder_ready = Some(self.bits & 0x1 != 0);
         scanner.handling_status = status_from_bits(self.bits);

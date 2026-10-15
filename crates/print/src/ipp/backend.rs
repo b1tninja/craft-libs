@@ -36,8 +36,8 @@ const OPEN_JOB_MARGIN: Duration = Duration::from_secs(5);
 const FORMATS: &[DocumentFormat] = &DocumentFormat::ALL;
 
 /// The `Job` and `JobOptions` settings this backend applies: copies, duplex, colour, media,
-/// orientation, quality and resolution. Collation and scaling have no job attribute used here, and
-/// driver keywords are a CUPS notion.
+/// orientation, quality and resolution. Collation has no job attribute used here, and driver
+/// keywords are a CUPS notion. Scaling (`print-scaling`) is added per printer, see [`honoured_for`].
 const HONOURED: &[JobHint] =
     &[JobHint::Copies, JobHint::Duplex, JobHint::Colour, JobHint::Media, JobHint::Orientation, JobHint::Quality, JobHint::Resolution];
 
@@ -415,11 +415,23 @@ fn clamp(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+/// The settings applied for one printer: [`HONOURED`], plus [`JobHint::Scaling`] when the printer
+/// publishes `print-scaling-supported` with a keyword this backend sends (see
+/// [`plan::scaling_keyword`]). A printer that does not publish it is `Unsupported`: the attribute is
+/// never sent to it, and a shrink-to-fit request is reported as not applied.
+fn honoured_for(attrs: &PrinterAttrs) -> Vec<JobHint> {
+    let mut hints = HONOURED.to_vec();
+    if plan::scaling_advertised(attrs) {
+        hints.push(JobHint::Scaling);
+    }
+    hints
+}
+
 fn details_of(entry: &Entry, attrs: &PrinterAttrs) -> PrinterDetails {
     let id = entry.uri.canonical();
     let name =
         [attrs.name.as_deref(), entry.name.as_deref(), attrs.info.as_deref()].into_iter().flatten().find(|n| !n.is_empty()).unwrap_or(&id).to_owned();
-    let mut details = PrinterDetails { id: id.clone(), name, default: false, honoured: Some(HONOURED.to_vec()), ..PrinterDetails::default() };
+    let mut details = PrinterDetails { id: id.clone(), name, default: false, honoured: Some(honoured_for(attrs)), ..PrinterDetails::default() };
     for format in attrs.formats.iter().filter_map(|f| DocumentFormat::from_mime(f)) {
         if !details.formats.contains(&format) {
             details.formats.push(format);

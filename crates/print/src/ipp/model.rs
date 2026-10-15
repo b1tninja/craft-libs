@@ -69,6 +69,10 @@ pub struct PrinterAttrs {
     /// `print-quality-supported`.
     pub qualities: Option<Vec<i32>>,
     pub content_optimize: Option<Vec<String>>,
+    /// `print-scaling-supported` (PWG 5100.13): `None` when the printer does not publish it.
+    pub scaling: Option<Vec<String>>,
+    /// `print-scaling-default`.
+    pub scaling_default: Option<String>,
     pub orientations: Option<Vec<i32>>,
     /// `multiple-operation-time-out`, seconds.
     pub multiple_operation_timeout: Option<u32>,
@@ -143,6 +147,8 @@ impl PrinterAttrs {
             resolutions,
             qualities: integers("print-quality-supported"),
             content_optimize: strings(group, "print-content-optimize-supported"),
+            scaling: strings(group, "print-scaling-supported"),
+            scaling_default: group.first_str("print-scaling-default").map(str::to_owned),
             orientations: integers("orientation-requested-supported"),
             multiple_operation_timeout: group.first_i32("multiple-operation-time-out").and_then(|n| u32::try_from(n).ok()),
             up_time: group.first_i32("printer-up-time"),
@@ -195,6 +201,12 @@ impl PrinterAttrs {
 
     pub fn supports_colour_mode(&self, keyword: &str) -> Option<bool> {
         self.color_modes.as_ref().map(|m| m.iter().any(|k| k == keyword))
+    }
+
+    /// Whether the printer lists this `print-scaling` keyword (`None`: it does not publish
+    /// `print-scaling-supported`, so it has not said it takes the attribute at all).
+    pub fn supports_scaling(&self, keyword: &str) -> Option<bool> {
+        self.scaling.as_ref().map(|s| s.iter().any(|k| k == keyword))
     }
 
     pub fn lists_content_optimize(&self, keyword: &str) -> bool {

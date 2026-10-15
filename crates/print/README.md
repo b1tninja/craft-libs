@@ -440,7 +440,7 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   and grey come from the `Job`; media size, orientation, quality, resolution and an explicit
   colour choice come from the request's `JobOptions` and go into that job's ticket (the printer's
   capability list still decides: an unlisted value is dropped with a warning, or refused in strict
-  mode; a reduced ticket shape refuses or drops them as before); collation, scaling and driver options have no WS-Print setting and are reported as
+  mode; a reduced ticket shape refuses or drops them as before); collation, scaling and driver options have no WS-Print setting (the PrintTicket schema has no scaling element, so none is invented; shrink-to-fit on WS-Print needs a `DocumentConverter` that rescales to the page size, which `ConvertContext` does not yet carry and which is never called for a printer that takes PDF: a follow-up) and are reported as
   warnings in `Submitted::warnings`. Progress events are `Progress::of(done, 3)` protocol phases (capabilities read,
   job created, document accepted), not sheets; the sheets come from `job_status`. The cancel token is polled between round trips;
   cancelling before the document is sent cancels the created job and returns
@@ -531,7 +531,7 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   WS-Print service of a test server; it is skipped otherwise.
 
 - **macOS/Linux:** CUPS `lpstat`, `lpoptions` and `lp`. Jobs stream through stdin. Exact-size
-  sheets use `fit-to-page=false`; shrink-to-fit uses IPP `print-scaling=auto-fit`.
+  sheets use `fit-to-page=false`; shrink-to-fit uses IPP `print-scaling=auto-fit`. The IPP backend sends `print-scaling` (`auto-fit` for shrink-to-fit, `none` for actual size when the printer's default differs) only to a printer whose `print-scaling-supported` lists it, and then lists `JobHint::Scaling` as honoured; otherwise shrink-to-fit is a warning and the document goes as it is.
 - **Windows:** in this process, with no PowerShell, script or other program started, so
   printing works where App Control for Business or AppLocker enforce script rules. Printers
   come from `EnumPrinters` (local queues and `\\server\queue` connections) and the default from

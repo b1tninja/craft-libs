@@ -5,18 +5,28 @@
 //! The printers come from `EnumPrinters` (local queues and the user's connections, such as
 //! `\\server\queue`), the default from `GetDefaultPrinter`, and whether each driver takes
 //! two-sided settings from its PrintCapabilities. A job is drawn by the in-box
-//! `Windows.Data.Pdf` with Direct2D into the XPS print API, as vectors, and its options (copies,
+//! `Windows.Data.Pdf` with Direct2D into the XPS print API, and its options (copies,
 //! collation, two-sided, colour, paper, orientation, no driver scaling) travel as a PrintTicket
 //! that the driver validates before anything is sent. `winprint` and `winsafe` wrap the Win32
 //! and WinRT calls, so there is no `unsafe` here.
+//!
+//! Vector content (paths, text) stays vector in the job. `Windows.Data.Pdf` draws the images of a
+//! page at the page's destination size, by default 96 dpi whatever the images in the PDF are.
+//! The pages are drawn with a destination at the printer's own resolution instead (at most 600
+//! dpi unless the job asks for more, and lower for a page whose bitmap would be too large); the
+//! job's resolution and quality hints choose the figure ([`crate::spool_render`]). The renderer
+//! hands over an image at the smaller of its own size and about 4 million pixels (measured: an
+//! A4 page's image arrives at about 211 dpi however large the source and the destination are);
+//! tiling the page does not get past that, since every tile gets the whole image at that size.
 
 use std::io::Write as _;
 
-use winprint::printer::{PrinterDevice, WinPdfPrinter};
+use winprint::printer::{PdfRenderOptions, PrinterDevice, WinPdfPrinter};
 use winprint::ticket::document::{NS_PSK, OwnedName, PrintFeature, PrintTicketDocument, reader::ParsableXmlDocument as _};
 use winprint::ticket::{FeatureOptionPack as _, PageMediaSize, PrintCapabilities, PrintTicket, PrintTicketBuilder};
 
 use crate::sheets::{self, Fit, SAME};
+use crate::spool_render::{self, RenderChoice};
 use crate::ticket::{self, Paper};
 use crate::trace::JobTrace;
 use crate::{Error, Job, Printer, Scaling};
@@ -137,6 +147,20 @@ fn imageable_margin(device: &PrinterDevice, ticket: &PrintTicket) -> f64 {
 /// it, and the folder is removed however the job ended. Windows answers once the job is in the
 /// queue: a paused queue or an offline printer keeps the job there, as with any program.
 pub(crate) fn submit_with_progress(pdf: &[u8], job: &Job, progress: &mut dyn FnMut(usize, usize)) -> Result<String, Error> {
+    submit_with_render(pdf, job, &RenderChoice::default(), progress).map(|spooled| spooled.message)
+}
+
+/// What the spooler accepted: the message for people and what was changed on the way.
+pub(crate) struct Spooled {
+    pub(crate) message: String,
+    pub(crate) warnings: Vec<String>,
+}
+
+/// [`submit_with_progress`] with the render resolution chosen by `choice`; its notes and any
+/// difference between the resolution asked for and the one used come back as warnings.
+pub(crate) fn submit_with_render(pdf: &[u8], job: &Job, choice: &RenderChoice, progress: &mut dyn FnMut(usize, usize)) -> Result<Spooled, Error> {
+    let trace = JobTrace::begin();
+    trace.line(|| format!("submit: {} bytes, printer {:?}, scaling {:?}, copies {}", pdf.len(), job.printer, job.scaling, job.copies));
     let trace = JobTrace::begin();
     trace.line(|| format!("submit: {} bytes, printer {:?}, scaling {:?}, copies {}", pdf.len(), job.printer, job.scaling, job.copies));
     let read = sheets::read(pdf)?;
@@ -176,8 +200,15 @@ pub(crate) fn submit_with_progress(pdf: &[u8], job: &Job, progress: &mut dyn FnM
         trace.line(|| {
             format!("job file written ({count} sheet(s) read); starting the spool job (StartDoc equivalent: the document package target is created)")
         });
+        let default_render = PdfRenderOptions::default();
+        let render = PdfRenderOptions {
+            dpi: choice.dpi,
+            max_dpi: choice.dpi.map_or(default_render.max_dpi, |d| d.max(default_render.max_dpi)),
+            limit_to_device: choice.limit_to_device,
+            ..default_render
+        };
         let printed = WinPdfPrinter::new(device)
-            .print_with_progress(&path, ticket, |processed, total| {
+            .print_with_render_options(&path, ticket, &render, |processed, total| {
                 trace.line(|| format!("page {processed}/{total} accepted by Direct2D (the source PDF has {count} sheet(s))"));
                 // Page acceptance is distinct from terminal job success. The callback
                 // drains on the submitter's thread, so it can retain non-Send UI state.
@@ -185,7 +216,7 @@ pub(crate) fn submit_with_progress(pdf: &[u8], job: &Job, progress: &mut dyn FnM
             })
             .map_err(|e| spool_error(chain(&e)));
         match &printed {
-            Ok(()) => trace
+            Ok(_) => trace
                 .line(|| "the spooler reported the package complete (EndDoc equivalent: the job is in the queue, not necessarily printed)".into()),
             Err(e) => trace.line(|| format!("the job failed and was cancelled by winprint (AbortDoc equivalent): {e}")),
         }
@@ -195,9 +226,16 @@ pub(crate) fn submit_with_progress(pdf: &[u8], job: &Job, progress: &mut dyn FnM
     if let Err(e) = &result {
         trace.line(|| format!("submit failed: {e}"));
     }
-    result?;
+    let report = result?;
     trace.line(|| "submit finished".into());
-    Ok(format!("spooled {count} sheet(s)"))
+    let mut warnings = choice.notes.clone();
+    let rendered: Vec<u32> = report.pages.iter().map(|p| p.dpi).collect();
+    warnings.extend(spool_render::resolution_note(choice.dpi, &rendered, choice.limit_to_device, report.device_dpi));
+    // A reduction nobody asked about (the printer's own resolution did not fit) is still said.
+    if choice.dpi.is_none() {
+        warnings.extend(report.warnings());
+    }
+    Ok(Spooled { message: format!("spooled {count} sheet(s)"), warnings })
 }
 
 #[cfg(test)]
@@ -317,10 +355,14 @@ mod tests {
     /// A real job, for checking a printer by hand (paper, or a paused queue's spool file):
     /// `CRAFT_PRINT_TEST_FILE` printed on `CRAFT_PRINT_TEST_PRINTER`, shrink-to-fit when
     /// `CRAFT_PRINT_TEST_SCALING=shrink`, two-sided on the long edge when
-    /// `CRAFT_PRINT_TEST_DUPLEX=long`.
+    /// `CRAFT_PRINT_TEST_DUPLEX=long`. `CRAFT_PRINT_TEST_DPI` asks for a resolution and
+    /// `CRAFT_PRINT_TEST_QUALITY` (`draft`, `normal`, `high`, `photo`) for a quality, as the
+    /// registry's job hints do; the warnings the backend answers are printed. Print to a
+    /// fake queue only: the page arrives at the device's resolution unless the hints say otherwise.
     #[test]
     #[ignore = "sends a real job: needs CRAFT_PRINT_TEST_PRINTER and CRAFT_PRINT_TEST_FILE"]
     fn an_installed_printer_prints_a_file() {
+        use crate::backends::Backend as _;
         let pdf = std::fs::read(std::env::var("CRAFT_PRINT_TEST_FILE").unwrap()).unwrap();
         let job = Job {
             printer: Some(std::env::var("CRAFT_PRINT_TEST_PRINTER").unwrap()),
@@ -329,7 +371,15 @@ mod tests {
             title: "craft-print test".into(),
             ..Job::default()
         };
-        let sent = crate::submit(&pdf, &job);
+        let mut options = crate::JobOptions::new();
+        if let Some(dpi) = std::env::var("CRAFT_PRINT_TEST_DPI").ok().and_then(|v| v.parse().ok()) {
+            options = options.with_resolution(crate::Resolution::square(dpi));
+        }
+        if let Some(quality) = std::env::var("CRAFT_PRINT_TEST_QUALITY").ok().and_then(|v| crate::Quality::from_name(&v)) {
+            options = options.with_quality(quality);
+        }
+        let request = crate::SubmitRequest::new(crate::Document::pdf(&pdf), job).with_options(options);
+        let sent = crate::SystemSpooler.submit(request);
         eprintln!("{sent:?}");
         assert!(sent.is_ok());
     }

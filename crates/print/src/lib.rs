@@ -31,6 +31,8 @@ mod remote;
 mod retry;
 #[cfg(any(test, windows))]
 mod sheets;
+#[cfg(any(test, windows, all(unix, not(target_arch = "wasm32"))))]
+mod spool_render;
 mod tag;
 #[cfg(feature = "testing")]
 pub mod testing;

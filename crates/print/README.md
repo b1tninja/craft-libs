@@ -535,13 +535,27 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
 - **Windows:** in this process, with no PowerShell, script or other program started, so
   printing works where App Control for Business or AppLocker enforce script rules. Printers
   come from `EnumPrinters` (local queues and `\\server\queue` connections) and the default from
-  `GetDefaultPrinter`. A job is drawn as vectors by the in-box `Windows.Data.Pdf` with Direct2D
+  `GetDefaultPrinter`. A job is drawn by the in-box `Windows.Data.Pdf` with Direct2D
   into the XPS print API (the `winprint` crate), and copies, collation, duplex, colour, paper,
   orientation and "no scaling" travel in a PrintTicket that the driver validates first; a
   driver that would change the paper, orientation or scaling is refused before anything is
   sent. Paper is the driver's own option for the sheet's size (to 0.25 mm), preferring the one
   named like the standard size ("ARCH D" over a custom 24 × 36 in entry). This backend comes
   from storytold/pdfcraft#599 and #1132.
+  **Resolution.** Vector content stays vector. `Windows.Data.Pdf` draws a page's images at the
+  page's destination size, by default 96 dpi whatever the images in the PDF are. The spooler
+  backend gives each page a destination at the printer's own resolution instead (read from its
+  device context with the ticket applied, else 300 dpi; at most 600 dpi; lower for a page whose
+  bitmap would pass 256 MiB or 16384 px, never below 96 dpi), so an image reaches the driver at
+  its own resolution, up to the renderer's limit of about 4 million pixels per image (an A4
+  page's image arrives at most at about 211 dpi; measured, and tiling does not lift it). A request's `JobOptions::resolution` is a requirement (the higher axis, at most 2400
+  dpi); `JobOptions::quality` is a wish that never goes above the printer's resolution (draft
+  150 dpi, normal 300, high 600, photo 1200); a resolution wins over a quality. Both are in
+  `honoured` on Windows. A difference between what was asked for and what was drawn, a hint
+  that was merged, lowered or ignored, and the media and orientation hints (the job's pages
+  decide those) are `Submitted::warnings`; CUPS also warns for the four hints it leaves to the
+  driver's own options. The driver may still re-encode the bitmap (the Microsoft class driver
+  stores JPEG q90): that is not controllable from here.
   A job has one ticket, so one paper and orientation. Sheets of the other orientation are
   turned back with `/Rotate`, so portrait and landscape sheets still print as one job. Exact
   size refuses sheets of different sizes and paper the driver lacks. Shrink-to-fit uses the

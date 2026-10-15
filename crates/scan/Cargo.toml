@@ -12,7 +12,15 @@ workspace = true
 
 [dependencies]
 craft-job = { workspace = true }
+serde = { version = "1", features = ["derive"], optional = true }
 thiserror = "2"
 log = "0.4"
 # Decoders for JPEG, PNG, TIFF and the BMP forms bw.rs does not read itself (software 1-bit).
 image = { version = "0.25", default-features = false, features = ["bmp", "jpeg", "png", "tiff"] }
+
+[features]
+# Serialize and Deserialize on the snapshot, journal and wire enums (and craft-job/serde for the views).
+serde = ["dep:serde", "craft-job/serde"]
+
+[dev-dependencies]
+serde_json = "1"

@@ -27,7 +27,17 @@ fn feeder_request(pages: u32) -> ScanSettings {
 }
 
 fn page(bytes: usize) -> Page {
-    Page { bytes: vec![0; bytes], format: "jpeg", width: 16, height: 8, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false }
+    Page {
+        bytes: vec![0; bytes],
+        format: "jpeg",
+        width: 16,
+        height: 8,
+        dpi: 200,
+        dpi_y: 200,
+        requested_dpi: 200,
+        thresholded: false,
+        length: Default::default(),
+    }
 }
 
 /// What a backend does for a script: push `push` pages through the token, then end with `end`.
@@ -504,8 +514,17 @@ fn snapshot_and_view_carry_no_page_bytes_and_the_fields_are_right() {
     let mut job = ScanJob::new(request, config);
     let plan = job.begin_attempt(t(101)).expect("attempt");
     // Three pages of a megabyte each.
-    let big =
-        || Page { bytes: vec![7; 1 << 20], format: "png", width: 2000, height: 3000, dpi: 300, dpi_y: 300, requested_dpi: 300, thresholded: false };
+    let big = || Page {
+        bytes: vec![7; 1 << 20],
+        format: "png",
+        width: 2000,
+        height: 3000,
+        dpi: 300,
+        dpi_y: 300,
+        requested_dpi: 300,
+        thresholded: false,
+        length: Default::default(),
+    };
     for _ in 0..3 {
         plan.progress.push_page(big());
     }
@@ -811,7 +830,17 @@ fn offline_before_any_page_is_an_unknown_outcome_and_never_retried() {
 #[test]
 fn continuing_after_12_of_40_feeder_pages_asks_for_the_28_left() {
     let kept: Vec<PageInfo> = (1..=12)
-        .map(|n| PageInfo { number: 99 + n, attempt: 1, source: Some(Source::Feeder), format: "jpeg", width: 16, height: 8, dpi: 200, bytes: 1000 })
+        .map(|n| PageInfo {
+            number: 99 + n,
+            attempt: 1,
+            source: Some(Source::Feeder),
+            format: "jpeg",
+            width: 16,
+            height: 8,
+            dpi: 200,
+            bytes: 1000,
+            length: Default::default(),
+        })
         .collect();
     let request = ScanSettings { device: "sane:x".into(), source: Source::Feeder, pages: 40, ..ScanSettings::default() };
     let mut job = ScanJob::continuing(request, ScanJobConfig::default().with_title("Archive"), kept);
@@ -837,8 +866,9 @@ fn continuing_after_12_of_40_feeder_pages_asks_for_the_28_left() {
     let fresh = ScanJob::continuing(feeder_request(3), ScanJobConfig::default(), Vec::new());
     assert_eq!(fresh.state(), ScanJobState::Preparing);
     // Everything already kept: nothing to append, finish instead.
-    let all: Vec<PageInfo> =
-        (1..=3).map(|n| PageInfo { number: n, attempt: 1, source: None, format: "png", width: 1, height: 1, dpi: 100, bytes: 1 }).collect();
+    let all: Vec<PageInfo> = (1..=3)
+        .map(|n| PageInfo { number: n, attempt: 1, source: None, format: "png", width: 1, height: 1, dpi: 100, bytes: 1, length: Default::default() })
+        .collect();
     let mut full = ScanJob::continuing(feeder_request(3), ScanJobConfig::default(), all);
     assert_eq!(full.begin_attempt_with(t(1), Continuation::Append).map(|_| ()), Err(ScanJobError::NothingLeft { kept: 3 }));
     assert_eq!(full.finish(t(2)), Ok(Outcome::Completed));

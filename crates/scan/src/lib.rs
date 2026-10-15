@@ -31,11 +31,12 @@ pub mod bw;
 mod contract;
 pub mod density;
 pub mod job;
+pub mod length;
 pub mod trace;
 
 pub use backend::{
-    Backend, BackendError, Listing, RegisterError, Registry, acquire, backend_names, diagnostic_dump, global, register, scanner_details,
-    scanner_list, scanners, status, supported, tag_support,
+    Backend, BackendError, Listing, RegisterError, Registry, acquire, backend_names, diagnostic_dump, global, page_length_support, register,
+    scanner_details, scanner_list, scanners, status, supported, tag_support,
 };
 pub use contract::{
     Compression, ErrorContext, ImageFormat, ListDetails, NativeCodeExt, ParseWireError, Phase, Recovery, ScanErrorInfo, contract_json, recovery,
@@ -43,6 +44,10 @@ pub use contract::{
 /// The vocabulary shared with the print side lives in craft-job; these are the same names and wire formats this
 /// crate has always exported (`"<backend>:<native id>"`, the native error code).
 pub use craft_job::{HRESULT_DOMAIN, NativeCode, namespaced_id, split_id};
+pub use length::{
+    InferOptions, Inference, Inferred, LengthRecord, LengthSource, PageLength, PageLengthSupport, Refusal, assess_sheet_end, infer_and_crop,
+    infer_sheet_end,
+};
 
 /// Where the page sits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -878,6 +883,10 @@ pub struct Reported {
     pub glass_absent: Vec<ChoiceField>,
     /// The same for the feeder item.
     pub feeder_absent: Vec<ChoiceField>,
+    /// Sheet-length detection and longest page of the glass item, as far as the backend read them.
+    pub glass_length: PageLengthSupport,
+    /// The same for the feeder item.
+    pub feeder_length: PageLengthSupport,
 }
 
 impl ImageChoices {
@@ -918,6 +927,15 @@ impl Scanner {
     /// Hardware duplex unit.
     pub fn duplex_presence(&self) -> Presence {
         self.unit_presence(self.duplex)
+    }
+
+    /// What the item for `source` publishes about page length. All unknown when the backend did not read
+    /// it. `Source::Auto` asks the glass.
+    pub fn length_support(&self, source: Source) -> PageLengthSupport {
+        match source {
+            Source::Feeder => self.reported.feeder_length,
+            Source::Glass | Source::Auto => self.reported.glass_length,
+        }
     }
 
     /// Whether the glass or feeder item lists `field`. `Present` when it has values; `Absent` when
@@ -995,6 +1013,9 @@ pub struct ScanSettings {
     pub intent: Option<Intent>,
     /// Page-size preset. A [`Self::region`] still overrides the extent afterward.
     pub page_size: Option<PageSize>,
+    /// How the page length is decided: [`PageLength::Driver`] (the default) leaves it to the driver, as
+    /// before this field existed. See [`PageLength`] for `Auto` and `AutoInfer`.
+    pub page_length: PageLength,
     /// Automatic deskew when the driver publishes the control.
     pub auto_deskew: Option<bool>,
     /// Orientation code from the driver's list (`WIA_IPS_ORIENTATION`), when distinct from rotation.
@@ -1066,6 +1087,10 @@ pub struct Page {
     /// A black-and-white request got deeper data from the driver, so this page was thresholded in
     /// software to a real 1-bit BMP (see [`bw`]). `false` for pages delivered as they came.
     pub thresholded: bool,
+    /// How this page's length was obtained and what it is: [`LengthSource::Driver`] unless the backend sized
+    /// the page (see [`PageLength`]). An [`LengthSource::Inferred`] page is cropped from the delivered image
+    /// and its length is approximate.
+    pub length: LengthRecord,
 }
 
 /// Pages from `acquire`, with the source that was actually used (never [`Source::Auto`]).
@@ -1099,6 +1124,7 @@ impl Default for ScanSettings {
             compression: None,
             intent: None,
             page_size: None,
+            page_length: PageLength::Driver,
             auto_deskew: None,
             orientation: None,
             photometric: None,
@@ -1733,8 +1759,28 @@ mod tests {
         assert_eq!(token.bytes_expected(), Some(1_000));
         token.set_transfer(Some(80), 800, None);
         assert_eq!(token.page_percent(), Some(80));
-        token.push_page(Page { bytes: vec![1], format: "bmp", width: 1, height: 1, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false });
-        token.push_page(Page { bytes: vec![2], format: "bmp", width: 1, height: 1, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false });
+        token.push_page(Page {
+            bytes: vec![1],
+            format: "bmp",
+            width: 1,
+            height: 1,
+            dpi: 200,
+            dpi_y: 200,
+            requested_dpi: 200,
+            thresholded: false,
+            length: Default::default(),
+        });
+        token.push_page(Page {
+            bytes: vec![2],
+            format: "bmp",
+            width: 1,
+            height: 1,
+            dpi: 200,
+            dpi_y: 200,
+            requested_dpi: 200,
+            thresholded: false,
+            length: Default::default(),
+        });
         assert_eq!(token.pages_done(), 2);
         assert_eq!(token.page_percent(), None, "a finished page clears in-page fill");
         let taken = token.take_pages();
@@ -1777,8 +1823,28 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("craft-scan-write-pages-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let pages = [
-            Page { bytes: b"BM-a".to_vec(), format: "bmp", width: 1, height: 1, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false },
-            Page { bytes: b"BM-b".to_vec(), format: "bmp", width: 1, height: 1, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false },
+            Page {
+                bytes: b"BM-a".to_vec(),
+                format: "bmp",
+                width: 1,
+                height: 1,
+                dpi: 200,
+                dpi_y: 200,
+                requested_dpi: 200,
+                thresholded: false,
+                length: Default::default(),
+            },
+            Page {
+                bytes: b"BM-b".to_vec(),
+                format: "bmp",
+                width: 1,
+                height: 1,
+                dpi: 200,
+                dpi_y: 200,
+                requested_dpi: 200,
+                thresholded: false,
+                length: Default::default(),
+            },
         ];
         let paths = super::write_pages(&dir, &pages).expect("write");
         assert_eq!(paths.len(), 2);
@@ -2029,7 +2095,17 @@ mod tests {
             message: "the feeder reported no more paper.".into(),
             acquired: Acquired {
                 source: Source::Feeder,
-                pages: vec![Page { bytes: Vec::new(), format: "bmp", width: 1, height: 1, dpi: 1, dpi_y: 1, requested_dpi: 1, thresholded: false }],
+                pages: vec![Page {
+                    bytes: Vec::new(),
+                    format: "bmp",
+                    width: 1,
+                    height: 1,
+                    dpi: 1,
+                    dpi_y: 1,
+                    requested_dpi: 1,
+                    thresholded: false,
+                    length: Default::default(),
+                }],
             },
             cause: None,
         };

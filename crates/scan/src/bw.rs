@@ -124,12 +124,34 @@ pub fn page_for(bytes: &[u8], rule: PageRule) -> (Page, Option<u32>) {
     if let Some(threshold) = rule.bw_threshold
         && let Thresholded::Converted(one) = threshold_to_one_bit_at(bytes, threshold, (dx, dy))
     {
-        let page =
-            Page { bytes: one.bytes, format: "bmp", width: one.width, height: one.height, dpi, dpi_y, requested_dpi: rule.dpi, thresholded: true };
+        let page = Page {
+            bytes: one.bytes,
+            format: "bmp",
+            width: one.width,
+            height: one.height,
+            dpi,
+            dpi_y,
+            requested_dpi: rule.dpi,
+            thresholded: true,
+            length: crate::LengthRecord::from_delivered(one.height, dpi_y),
+        };
         return (page, Some(one.from_bits));
     }
     let (width, height) = image_size(bytes).unwrap_or((0, 0));
-    (Page { format: image_format(bytes), width, height, dpi, dpi_y, requested_dpi: rule.dpi, bytes: bytes.to_vec(), thresholded: false }, None)
+    (
+        Page {
+            format: image_format(bytes),
+            width,
+            height,
+            dpi,
+            dpi_y,
+            requested_dpi: rule.dpi,
+            bytes: bytes.to_vec(),
+            thresholded: false,
+            length: crate::LengthRecord::from_delivered(height, dpi_y),
+        },
+        None,
+    )
 }
 
 fn round_dpi(dpi: f64) -> u32 {
@@ -142,6 +164,19 @@ fn round_dpi(dpi: f64) -> u32 {
 pub fn bmp_luma(bytes: &[u8]) -> Option<(u32, u32, u32, Vec<u8>)> {
     match read_bmp(bytes)? {
         Read::Luma(luma) => Some((u32::try_from(luma.width).ok()?, u32::try_from(luma.height).ok()?, luma.from_bits, luma.pixels)),
+        Read::OneBit | Read::Unreadable => None,
+    }
+}
+
+/// Top-down luminance of any page this crate can decode (BMP read here, JPEG/PNG/TIFF/other BMP through the
+/// `image` decoders): `(width, height, pixels)`. `None` for a 1-bit page and for anything unreadable.
+pub(crate) fn decode_luma(bytes: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let read = match read_bmp(bytes) {
+        Some(read) => read,
+        None => read_other(bytes),
+    };
+    match read {
+        Read::Luma(luma) => Some((luma.width, luma.height, luma.pixels)),
         Read::OneBit | Read::Unreadable => None,
     }
 }

@@ -17,7 +17,7 @@
 //! let mut job = ScanJob::new(settings, ScanJobConfig::default().with_title("Contract"));
 //! let t = Timestamp::from_secs;
 //!
-//! let page = || Page { bytes: vec![0; 8], format: "jpeg", width: 4, height: 4, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false };
+//! let page = || Page { bytes: vec![0; 8], format: "jpeg", width: 4, height: 4, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false, length: Default::default() };
 //! let plan = job.begin_attempt(t(1))?;
 //! assert_eq!(plan.settings.pages, 3);
 //! // ... the app runs `craft_scan::acquire(&plan.settings)` on its worker thread. Say the feeder
@@ -49,8 +49,8 @@ use craft_job::{
 };
 
 use crate::{
-    Acquired, CancelToken, ErrorContext, HandlingStatus, InterruptKind, Page, Phase, ProgressToken, ScanError, ScanErrorInfo, ScanSettings, Scanner,
-    Source, auto_fallback_to_glass, split_id,
+    Acquired, CancelToken, ErrorContext, HandlingStatus, InterruptKind, LengthRecord, Page, Phase, ProgressToken, ScanError, ScanErrorInfo,
+    ScanSettings, Scanner, Source, auto_fallback_to_glass, split_id,
 };
 
 mod device;
@@ -389,6 +389,8 @@ pub struct PageInfo {
     pub height: u32,
     pub dpi: u32,
     pub bytes: u64,
+    /// How the page's length was obtained (see [`crate::PageLength`]).
+    pub length: LengthRecord,
 }
 
 /// How an attempt ended.
@@ -530,6 +532,8 @@ impl<'de> serde::Deserialize<'de> for PageInfo {
             dpi: u32,
             #[serde(default)]
             bytes: u64,
+            #[serde(default)]
+            length: LengthRecord,
         }
         let wire = Wire::deserialize(deserializer)?;
         let format = ["bmp", "png", "jpeg", "tiff", "pdf"].into_iter().find(|f| *f == wire.format).unwrap_or("bin");
@@ -542,6 +546,7 @@ impl<'de> serde::Deserialize<'de> for PageInfo {
             height: wire.height,
             dpi: wire.dpi,
             bytes: wire.bytes,
+            length: wire.length,
         })
     }
 }
@@ -1335,5 +1340,6 @@ fn info_of(page: &Page, number: u32, attempt: u32, source: Option<Source>) -> Pa
         height: page.height,
         dpi: page.dpi,
         bytes: page.bytes.len() as u64,
+        length: page.length,
     }
 }

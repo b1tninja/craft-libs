@@ -855,6 +855,20 @@ pub enum Presence {
     Present,
 }
 
+impl Presence {
+    /// Every state, in the order `unknown`, `absent`, `present`.
+    pub const ALL: &'static [Presence] = &[Presence::Unknown, Presence::Absent, Presence::Present];
+
+    /// Wire string: `unknown`, `absent`, `present`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Absent => "absent",
+            Self::Present => "present",
+        }
+    }
+}
+
 /// One list or range option of an item ([`ImageChoices`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]

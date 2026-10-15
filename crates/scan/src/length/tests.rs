@@ -392,3 +392,10 @@ fn the_page_builder_infers_before_thresholding_so_black_and_white_pages_keep_the
     let (refused, _) = bw::page_for(&blank, bw::PageRule { dpi, bw_threshold: None, length: plan });
     assert_eq!((refused.height, refused.length.source), (1800, LengthSource::Driver));
 }
+
+#[test]
+fn presence_has_stable_wire_strings() {
+    let names: Vec<_> = Presence::ALL.iter().map(|v| v.as_str()).collect();
+    assert_eq!(names, ["unknown", "absent", "present"]);
+    assert_eq!(Presence::default(), Presence::Unknown);
+}

@@ -14,6 +14,7 @@ pub mod icons;
 pub mod layout;
 pub mod panes;
 pub mod printing;
+pub mod scanning;
 pub mod tabs;
 pub mod text;
 pub mod theme;

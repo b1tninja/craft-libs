@@ -306,3 +306,20 @@ fn the_registry_names_are_checked() {
     // The default `status` answers "cannot preflight".
     assert_eq!(registry.status("ok-name_2:x"), Ok(None));
 }
+
+#[test]
+fn page_length_support_is_unknown_unless_a_backend_reads_it() {
+    use craft_scan::{PageLengthSupport, Presence};
+    let registry = all_three();
+    for id in [format!("wia:{WIA_ID}"), format!("sane:{SANE_ID}"), format!("escl:{ESCL_ID}")] {
+        let support = registry.page_length_support(&id, Source::Feeder).expect("routes");
+        assert_eq!(support, PageLengthSupport::default(), "{id}");
+        assert_eq!(support.device_detect, Presence::Unknown);
+    }
+    assert!(registry.page_length_support("nobody:x", Source::Glass).is_err());
+    assert_eq!(Registry::new().page_length_support("sane:x", Source::Glass).err(), Some(ScanError::Unsupported));
+    // A scanner row that never read an item reports nothing for either source.
+    let scanner = common::scanner("x", "X");
+    assert_eq!(scanner.length_support(Source::Glass), PageLengthSupport::default());
+    assert_eq!(scanner.length_support(Source::Feeder), PageLengthSupport::default());
+}

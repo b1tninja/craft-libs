@@ -52,7 +52,7 @@ use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use craft_job::{BackendName, TagSupport, namespaced_id, split_id};
 
-use crate::{Acquired, HandlingStatus, ScanError, ScanSettings, Scanner, ScannerRef};
+use crate::{Acquired, HandlingStatus, PageLengthSupport, ScanError, ScanSettings, Scanner, ScannerRef, Source};
 #[cfg(doc)]
 use crate::{InterruptKind, NativeCode, Page};
 
@@ -79,6 +79,15 @@ pub trait Backend: Send + Sync {
     fn status(&self, native_id: &str) -> Option<HandlingStatus> {
         let _ = native_id;
         None
+    }
+
+    /// Whether the item for `source` publishes sheet-length detection, and how long a page it can scan
+    /// (see [`crate::PageLength`]). **Unknown by default**: a backend overrides it only when it reads the
+    /// item's properties. Feeds no paper. [`Backend::scanner_details`] reports the same answers in
+    /// [`Scanner::length_support`](crate::Scanner::length_support).
+    fn page_length_support(&self, native_id: &str, source: Source) -> PageLengthSupport {
+        let _ = (native_id, source);
+        PageLengthSupport::default()
     }
 
     /// Whether the backend can carry an idempotency tag through to a job listing, so that a scan whose
@@ -255,6 +264,13 @@ impl Registry {
         Ok(backend.status(native))
     }
 
+    /// [`Backend::page_length_support`] of one scanner by namespaced id.
+    pub fn page_length_support(&self, id: &str, source: Source) -> Result<PageLengthSupport, ScanError> {
+        let backends = self.snapshot();
+        let (backend, native) = Self::by_prefix(&backends, id)?;
+        Ok(backend.page_length_support(native, source))
+    }
+
     /// [`Backend::tag_support`] of the backend that owns the namespaced scanner id.
     pub fn tag_support(&self, id: &str) -> Result<TagSupport, ScanError> {
         let backends = self.snapshot();
@@ -364,6 +380,11 @@ pub fn scanners() -> Result<Listing<Scanner>, ScanError> {
 /// What the paper path is doing before a scan. See [`Registry::status`].
 pub fn status(id: &str) -> Result<Option<HandlingStatus>, ScanError> {
     global().status(id)
+}
+
+/// Sheet-length detection the scanner publishes. See [`Registry::page_length_support`].
+pub fn page_length_support(id: &str, source: Source) -> Result<PageLengthSupport, ScanError> {
+    global().page_length_support(id, source)
 }
 
 /// Whether the scanner's backend can carry a tag. See [`Registry::tag_support`].

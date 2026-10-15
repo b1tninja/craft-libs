@@ -397,6 +397,7 @@ impl Backend for WiaLike {
                 dpi_y: settings.dpi,
                 requested_dpi: settings.dpi,
                 thresholded: false,
+                length: Default::default(),
             };
             let busy = explain_transfer_failure(error_from_hresult(0x8021_0006, ""), status_from_bits(0x1), true, 1, settings.pages as usize);
             let stop = craft_scan::after_transfer_checked(settings.pages as usize, true, 1, false, Some(busy)).err();
@@ -418,6 +419,7 @@ impl Backend for WiaLike {
             dpi_y: settings.dpi,
             requested_dpi: settings.dpi,
             thresholded: false,
+            length: Default::default(),
         };
         Ok(Acquired { source: Source::Glass, pages: vec![page] })
     }

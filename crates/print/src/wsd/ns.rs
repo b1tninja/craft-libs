@@ -45,6 +45,56 @@ impl Action {
     }
 }
 
+/// The events a WS-Print service pushes (each is also its `wsa:Action` and its body element).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Event {
+    PrinterElementsChange,
+    PrinterStatusSummary,
+    PrinterStatusCondition,
+    PrinterStatusConditionCleared,
+    JobStatus,
+    JobEndState,
+}
+
+impl Event {
+    pub const ALL: [Event; 6] = [
+        Self::PrinterElementsChange,
+        Self::PrinterStatusSummary,
+        Self::PrinterStatusCondition,
+        Self::PrinterStatusConditionCleared,
+        Self::JobStatus,
+        Self::JobEndState,
+    ];
+
+    /// The element name, `<Name>Event`.
+    pub const fn element(self) -> &'static str {
+        match self {
+            Self::PrinterElementsChange => "PrinterElementsChangeEvent",
+            Self::PrinterStatusSummary => "PrinterStatusSummaryEvent",
+            Self::PrinterStatusCondition => "PrinterStatusConditionEvent",
+            Self::PrinterStatusConditionCleared => "PrinterStatusConditionClearedEvent",
+            Self::JobStatus => "JobStatusEvent",
+            Self::JobEndState => "JobEndStateEvent",
+        }
+    }
+
+    /// The `wsa:Action` of the notification (and the WS-Eventing action filter value).
+    pub fn uri(self) -> String {
+        format!("{WPRT_ACTIONS}/{}", self.element())
+    }
+
+    /// The event an action URI names, if it is one of the six.
+    pub fn from_action(action: &str) -> Option<Self> {
+        let name = action.strip_prefix(WPRT_ACTIONS)?.strip_prefix('/')?;
+        Self::ALL.into_iter().find(|e| e.element() == name)
+    }
+
+    /// Whether the event is about one job (its body carries a `JobId`).
+    pub const fn is_job_event(self) -> bool {
+        matches!(self, Self::JobStatus | Self::JobEndState)
+    }
+}
+
 const WPRT_ACTIONS: &str = "http://schemas.microsoft.com/windows/2006/08/wdp/print";
 
 #[cfg(test)]

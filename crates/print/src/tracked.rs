@@ -761,6 +761,9 @@ pub struct PrintJob {
     accepted_at: Option<Duration>,
     last_news: Option<Duration>,
     last_news_wall: Option<SystemTime>,
+    /// The latest moment a push event woke the watch (job clock). News from the printer, but not a
+    /// good read: see `news_anchor`.
+    last_event: Option<Duration>,
     changed_at: Option<Duration>,
     stale: Option<StaleReason>,
     probe_at: Option<Duration>,
@@ -826,6 +829,7 @@ impl PrintJob {
             accepted_at: None,
             last_news: None,
             last_news_wall: None,
+            last_event: None,
             changed_at: None,
             stale: None,
             probe_at: None,
@@ -1016,7 +1020,7 @@ impl PrintJob {
         }
         if self.stale.is_none() {
             if let Some(silence) = st.silence_after {
-                due.push(self.last_news.unwrap_or(accepted).max(accepted).saturating_add(silence));
+                due.push(self.news_anchor(accepted, silence).saturating_add(silence));
             }
             if let LifecycleState::Watching(printer) = self.state
                 && let Some(stall) = self.stall_threshold(printer)
@@ -1025,6 +1029,25 @@ impl PrintJob {
             }
         }
         due.into_iter().min().map(|at| at.saturating_sub(now))
+    }
+
+    /// Remember when a push event last woke the watch.
+    fn sync_wake(&mut self, watch: &JobWatch) {
+        if let Some(at) = watch.last_wake() {
+            self.last_event = Some(self.last_event.map_or(at, |old| old.max(at)));
+        }
+    }
+
+    /// Where the silence clock ([`Staleness::silence_after`]) starts: the last good read, or the
+    /// last push event if later, but an event postpones the silence by at most twice `silence`
+    /// after the last good read, so a printer that sends events while every status read fails is
+    /// still flagged. Only a good read resets the stall clock; this is the silence rule alone.
+    fn news_anchor(&self, accepted: Duration, silence: Duration) -> Duration {
+        let read = self.last_news.unwrap_or(accepted).max(accepted);
+        match self.last_event {
+            Some(event) => read.max(event.min(read.saturating_add(silence.saturating_mul(2)))),
+            None => read,
+        }
     }
 
     fn stall_threshold(&self, printer: JobState) -> Option<Duration> {
@@ -1070,7 +1093,7 @@ impl PrintJob {
         if self.stale.is_some() {
             return false;
         }
-        let quiet = now.saturating_sub(self.last_news.unwrap_or(accepted).max(accepted));
+        let quiet = now.saturating_sub(self.news_anchor(accepted, st.silence_after.unwrap_or_default()));
         if st.silence_after.is_some_and(|silence| quiet >= silence) {
             self.note("no status read succeeded for a while; probing on");
             return self.go_stale(StaleReason::NoNews, now);
@@ -1289,12 +1312,12 @@ impl PrintJob {
             self.progress.submit = Some(progress);
         }
         match sent.result {
-            Ok(submitted) => self.accepted(submitted),
+            Ok(submitted) => self.accepted(registry, submitted),
             Err(error) => self.fail_attempt(error),
         }
     }
 
-    fn accepted(&mut self, submitted: Submitted) -> Advance {
+    fn accepted(&mut self, registry: &Registry, submitted: Submitted) -> Advance {
         let now = self.now();
         let job = submitted.job.clone();
         if let Some(attempt) = self.latest_attempt() {
@@ -1314,7 +1337,13 @@ impl PrintJob {
         }
         let policy = self.watch_policy(submitted.poll_interval);
         self.watch = match (&submitted.job, submitted.watch.is_watchable()) {
-            (Some(_), true) => JobWatch::for_submitted(&submitted, policy).map(|watch| watch.with_clock(Arc::clone(&self.clock))),
+            (Some(job), true) => JobWatch::for_submitted(&submitted, policy).map(|watch| {
+                let watch = watch.with_clock(Arc::clone(&self.clock));
+                match registry.wake_source(job) {
+                    Some(wake) => watch.with_wake(wake),
+                    None => watch,
+                }
+            }),
             _ => None,
         };
         self.start_following(submitted.job.is_some() && submitted.watch.is_watchable(), now);
@@ -1334,6 +1363,7 @@ impl PrintJob {
         self.accepted_at = Some(now);
         self.last_news = None;
         self.last_news_wall = None;
+        self.last_event = None;
         self.changed_at = Some(now);
         self.stale = None;
         self.probe_at = None;
@@ -1388,6 +1418,7 @@ impl PrintJob {
             return self.step(changed);
         };
         let step = watch.tick(registry);
+        self.sync_wake(&watch);
         if !matches!(step, WatchStep::Done(_)) {
             self.watch = Some(watch);
         }
@@ -1416,6 +1447,7 @@ impl PrintJob {
             }
         };
         let step = watch.poll_status(registry);
+        self.sync_wake(&watch);
         let keep = matches!(step, WatchStep::Update(_));
         let advance = self.handle_step(step);
         if keep && self.stale.is_none() && !self.state.is_terminal() {
@@ -1578,6 +1610,7 @@ impl PrintJob {
             },
         };
         let step = watch.poll_status(registry);
+        self.sync_wake(&watch);
         if !matches!(step, WatchStep::Done(_)) {
             self.watch = Some(watch);
         }
@@ -1906,5 +1939,43 @@ fn kind_name(kind: ErrorKind) -> &'static str {
         ErrorKind::Rejected => "rejected",
         ErrorKind::Io => "i/o",
         ErrorKind::Failed => "failed",
+    }
+}
+
+#[cfg(test)]
+mod news_tests {
+    use super::*;
+    use crate::{BytesSource, DocumentFormat};
+
+    fn job() -> PrintJob {
+        PrintJob::new(Job::default(), BytesSource::new(DocumentFormat::Pdf, b"%PDF-1.7".to_vec()))
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn the_silence_clock_starts_at_the_last_good_read_without_events() {
+        let mut job = job();
+        job.last_news = Some(secs(100));
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(100));
+        job.last_news = None;
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(10));
+    }
+
+    #[test]
+    fn an_event_is_news_but_postpones_the_silence_by_at_most_twice_the_limit() {
+        let mut job = job();
+        job.last_news = Some(secs(100));
+        // A recent event moves the anchor forward ...
+        job.last_event = Some(secs(130));
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(130));
+        // ... but never beyond the last good read plus twice the silence.
+        job.last_event = Some(secs(100 + 500));
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(220));
+        // An event older than the read changes nothing.
+        job.last_event = Some(secs(50));
+        assert_eq!(job.news_anchor(secs(10), secs(60)), secs(100));
     }
 }

@@ -46,6 +46,12 @@
 //! ([`Op`] says whether the failed request was a query or a send), and where it failed. After an
 //! outcome-unknown failure, [`WsdBackend::reconcile`] looks for the job before anything is resent.
 //!
+//! # Push status (opt-in)
+//!
+//! [`WsdBackend::with_events`] starts an inbound listener and WS-Eventing subscriptions so a watch
+//! polls sooner; nothing listens otherwise. Events are only a wake-up, status always comes from
+//! `job_status`. See [`events`] and `docs/events.md`.
+//!
 //! # Tracked jobs
 //!
 //! The backend carries a [`crate::PrintJob`]'s idempotency tag as a suffix of the ticket's job name
@@ -58,6 +64,7 @@ pub mod adapter;
 pub mod client;
 pub mod encoder;
 pub mod error;
+pub mod events;
 pub mod fault;
 pub mod job;
 pub mod model;
@@ -80,6 +87,7 @@ pub use backend::{JobMatch, Reconciled, WsdBackend, WsdJob};
 pub use client::Client;
 pub use encoder::{ColorMode, DocumentEncoder, PassThrough, RasterEncoder};
 pub use error::{Class, KINDS, Op, Result, WsdError};
+pub use events::{EventStats, EventTuning, EventsStatus, NotifyConfig, SubscriptionInfo, Wake};
 pub use fault::{Fault, FaultCode};
 pub use job::{
     Accepted, JobOutcome, JobResult, PollPolicy, PrintOptions, print_document, print_document_with_progress, printer_info, submit_document,

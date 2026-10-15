@@ -8,6 +8,7 @@ use super::adapter::{SharedTransport, Transport, default_transport};
 use super::client::Client;
 use super::encoder::{ColorMode, PassThrough};
 use super::error::{Op, WsdError};
+use super::events::{Events, NotifyConfig};
 use super::fault::FaultCode;
 use super::job::{self, PrintOptions};
 use super::model::{self, JobReason, PrinterElements};
@@ -17,9 +18,9 @@ use super::policy::{NetworkLimits, PrinterUrl};
 use super::ticket::{self, Sides, TicketShape};
 use crate::backends::{Backend, BackendClass, DocumentFormat, JobHint, PrinterDetails, PrinterRef, PrinterState, PrinterStatus, SubmitRequest};
 use crate::{
-    ColourMode, Duplex, ErrorKind, Fingerprint, FingerprintExt as _, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobStatus, PrintError,
-    Progress, Reconciled as FoundJobs, RemoteJob, Resolution, Scaling, Submitted, Tag, TagExt as _, TagPlacement, TagSupport, TagSupportExt as _,
-    WatchSupport, filter_jobs, reconcile_jobs,
+    Clock, ColourMode, Duplex, ErrorKind, Fingerprint, FingerprintExt as _, Job, JobFilter, JobId, JobOptions, JobQueryCaps, JobStatus, PrintError,
+    Progress, Reconciled as FoundJobs, RemoteJob, Resolution, Scaling, Submitted, SystemClock, Tag, TagExt as _, TagPlacement, TagSupport,
+    TagSupportExt as _, WakeReceiver, WatchSupport, filter_jobs, reconcile_jobs,
 };
 
 /// The registry name and id prefix.
@@ -103,11 +104,17 @@ pub struct WsdBackend {
     printers: Arc<RwLock<Vec<Entry>>>,
     transport: SharedTransport,
     config: Arc<Config>,
+    clock: Arc<dyn Clock>,
+    events: Option<Arc<Events>>,
 }
 
 impl fmt::Debug for WsdBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("WsdBackend").field("printers", &self.urls()).field("config", &self.config).finish_non_exhaustive()
+        f.debug_struct("WsdBackend")
+            .field("printers", &self.urls())
+            .field("config", &self.config)
+            .field("events", &self.events)
+            .finish_non_exhaustive()
     }
 }
 
@@ -120,7 +127,7 @@ impl Default for WsdBackend {
 impl WsdBackend {
     /// A backend with no printers and the plain-HTTP transport. Opens no connection.
     pub fn new() -> Self {
-        Self { printers: Arc::default(), transport: default_transport(), config: Arc::default() }
+        Self { printers: Arc::default(), transport: default_transport(), config: Arc::default(), clock: Arc::new(SystemClock), events: None }
     }
 
     /// A backend with these printer URLs added. A URL the policy refuses is an
@@ -188,6 +195,51 @@ impl WsdBackend {
         change(&mut config);
         self.config = Arc::new(config);
         self
+    }
+
+    /// Use another clock for the push-status housekeeping (lease, renewal and back-off times). The
+    /// default is the system's. Set it before [`Self::with_events`].
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Turn on push status over WS-Eventing: bind the listener of `config` and start its thread.
+    /// **Opt-in**: a backend that never calls this listens to nothing and polls, as before. Events
+    /// are only a wake-up for the polling watch (see [`events`](super::events) and
+    /// `docs/events.md`); clones of the backend share the listener, and it is stopped (with
+    /// `Unsubscribe` for each subscription) by [`Self::shutdown_events`] or when the last clone is
+    /// dropped. Set the transport and the clock first: the listener uses the ones the backend has now.
+    pub fn with_events(mut self, config: NotifyConfig) -> Result<Self, PrintError> {
+        let events = Events::start(config, Arc::clone(&self.clock), Arc::clone(&self.transport), self.config.limits)?;
+        self.events = Some(Arc::new(events));
+        Ok(self)
+    }
+
+    /// The listener and subscription manager, when [`Self::with_events`] was called.
+    pub fn events(&self) -> Option<&Events> {
+        self.events.as_deref()
+    }
+
+    /// The listener and subscriptions as plain data; `None` without [`Self::with_events`].
+    pub fn events_status(&self) -> Option<super::events::EventsStatus> {
+        self.events.as_deref().map(Events::status)
+    }
+
+    /// Do the push housekeeping that is due (subscribe, renew, release); see [`Events::maintain`].
+    /// [`Backend::job_status`] calls it, so a watched job needs no extra call. Nothing without events.
+    pub fn maintain_events(&self) {
+        if let Some(events) = &self.events {
+            events.maintain();
+        }
+    }
+
+    /// Unsubscribe everything and stop the listener now (also done when the last clone is dropped).
+    pub fn shutdown_events(&self) {
+        if let Some(events) = &self.events {
+            events.shutdown();
+        }
     }
 
     /// Use another transport (an in-memory fake, a wrapper that adds logging). The default is the
@@ -503,9 +555,19 @@ impl Backend for WsdBackend {
             .with_effective(effective))
     }
 
-    /// WS-Print has no event listener here: callers poll.
+    /// `Events` while at least one printer's subscription is established and trusted (a verified
+    /// event arrived recently; see [`events`](super::events)), otherwise `Poll`. Without
+    /// [`WsdBackend::with_events`] it is always `Poll`. Even with `Events`, status comes from polling.
     fn watch_support(&self) -> WatchSupport {
-        WatchSupport::Poll
+        if self.events.as_deref().is_some_and(Events::any_healthy) { WatchSupport::Events } else { WatchSupport::Poll }
+    }
+
+    /// A wake-up channel for the job's printer, when events are on. Sends nothing; the subscription
+    /// is made by the next housekeeping (the next `job_status`).
+    fn wake_source(&self, job: &JobId) -> Option<WakeReceiver> {
+        let events = self.events.as_deref()?;
+        let (entry, id) = self.job_target(job).ok()?;
+        events.register(&entry.url, id)
     }
 
     fn recommended_poll_interval(&self) -> Option<Duration> {
@@ -522,6 +584,7 @@ impl Backend for WsdBackend {
     /// message says what that usually means: printers forget finished jobs, so a job that was
     /// accepted and is now unknown most likely finished.
     fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
+        self.maintain_events();
         let (entry, id) = self.job_target(job)?;
         match self.client(&entry).job_status(id) {
             Ok(status) => Ok(neutral_status(&status)),

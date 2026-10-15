@@ -12,6 +12,12 @@ pub use craft_wsd::soap::{Attachment, Call, SoapClient};
 pub use craft_wsd::transport::{Request, Response, Transport};
 pub use craft_wsd::{DeviceUrl, NetworkLimits, xml};
 
+/// WS-Eventing, the client side (subscribe, renew, unsubscribe, parse what the printer pushes).
+pub use craft_wsd::eventing as wse;
+pub use craft_wsd::eventing::{Expiry, Filter, Incoming, Notification, SubscribeRequest, Subscription};
+pub use craft_wsd::ns::WSE;
+pub use craft_wsd::{EndpointRef, ReferenceParameter};
+
 /// The shared protocol error, as `craft-wsd` reports it.
 pub type WireError = craft_wsd::Error;
 /// Every value [`WireError::kind`] can return.

@@ -57,6 +57,7 @@ use crate::options::{JobOptions, Resolution};
 use crate::remote::{FingerprintExt as _, JobFilter, JobQueryCaps, Reconciled, RemoteJob, reconcile_jobs};
 use crate::retry::Phase;
 use crate::tag::TagSupportExt as _;
+use crate::wake::WakeReceiver;
 use crate::{Error, Job, PrinterOption};
 
 /// What went wrong, independent of the backend. The kind and [`ErrorKind::is_retryable`] are the
@@ -776,6 +777,18 @@ pub trait Backend: Send + Sync {
     fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
         let _ = job;
         Ok(JobStatus::new(JobState::Unknown))
+    }
+
+    /// A push channel for this job, when the backend has one: a [`WakeReceiver`] that is woken when
+    /// the device says the job (or its printer) changed. A wake carries no data and means only "ask
+    /// [`Backend::job_status`] now"; the status itself always comes from `job_status`, so a lost,
+    /// duplicated or forged wake cannot produce a wrong result. The receiver reports whether the
+    /// backend currently trusts the channel ([`WakeReceiver::is_healthy`]); a [`crate::JobWatch`]
+    /// only relaxes its polling while it does. Defaults to `None`: poll. Getting the receiver is
+    /// cheap and sends nothing; dropping it tells the backend the watch ended.
+    fn wake_source(&self, job: &JobId) -> Option<WakeReceiver> {
+        let _ = job;
+        None
     }
 
     /// How long the device keeps a job open while it waits for the document of a request whose

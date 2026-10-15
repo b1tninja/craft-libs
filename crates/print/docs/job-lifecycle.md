@@ -89,7 +89,8 @@ fact and the system print queue UI follows the job. For our purposes it is the C
   Unknown (a completed job the printer qualified is `Completed` with `JobStatus::warnings`); `Unknown` means "accepted, outcome unknown" and is not terminal. `Backend::cancel_job`
   cancels (and "too late" is not an error).
 * `Backend::watch_support()` is `None` (cannot report: do not poll), `Poll` or `Events`
-  (`recommended_poll_interval()` is the cadence; events remain a future option, nothing listens).
+  (`recommended_poll_interval()` is the cadence). `Events` is opt-in per backend and only a wake-up for
+  the poll (`Backend::wake_source`, `JobWatch::with_wake`); see `docs/events.md`.
 * The registry routes jobs by the `JobId`'s backend exactly as it routes printers
   (`submit_job`, `job_status`, `cancel_job`, `watch_support`, `job_watch`).
 * `JobWatch` is a caller-driven state machine: no thread, no timer. `tick(source)` makes at most one
@@ -108,7 +109,8 @@ fact and the system print queue UI follows the job. For our purposes it is the C
   thread story. A caller-driven state machine lets the caller choose (UI frame, worker loop, CLI).
 * *Async runtime*: the crate has none and the apps do not need one for one request every few seconds.
 * *Push first*: needs a listener and lease renewal; not available behind most desktop firewalls; and
-  the printer may not offer it. `WatchSupport::Events` leaves room without paying for it now.
+  the printer may not offer it. `WatchSupport::Events` leaves room; the WS-Print backend now offers it
+  as an opt-in wake-up on top of polling (`docs/events.md`), never instead of it.
 
 ## 3. Retry semantics
 

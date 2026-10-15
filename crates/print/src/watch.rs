@@ -25,6 +25,7 @@ use crate::backend::{CancelToken, ErrorKind, NotFoundSubject, PrintError};
 use crate::job::{ExpectedTotalsExt as _, JobStatus, Submitted, WatchSupport};
 use crate::registry::Registry;
 use crate::retry::{CANCEL_SLICE, Clock, JitterExt as _, SystemClock, advise_error};
+use crate::wake::WakeReceiver;
 
 /// Where a watch gets status from and sends cancels to. The [`Registry`] is one (by job id); a
 /// test can supply its own.
@@ -57,6 +58,11 @@ pub struct WaitPolicy {
     pub max_wait: Duration,
     /// How consecutive failed polls are retried (they are idempotent), then given up on.
     pub retry: RetryPolicy,
+    /// The gap between polls while the backend's push channel is healthy
+    /// ([`JobWatch::with_wake`]): a safety net for a lost event, since a wake makes the next poll
+    /// due at once. Never shorter than the ordinary gap. Default 30 seconds. Unused without a wake
+    /// receiver, and not applied while the receiver says the channel is not healthy.
+    pub safety_interval: Duration,
 }
 
 impl Default for WaitPolicy {
@@ -67,6 +73,7 @@ impl Default for WaitPolicy {
             growth_percent: 150,
             max_wait: Duration::from_secs(120),
             retry: RetryPolicy { max_attempts: 5, ..RetryPolicy::default() },
+            safety_interval: Duration::from_secs(30),
         }
     }
 }
@@ -161,6 +168,12 @@ pub struct JobWatch {
     jitter: Jitter,
     started: Duration,
     next_at: Duration,
+    /// When the next poll is due while the push channel is healthy (the safety poll).
+    safe_at: Duration,
+    wake: Option<WakeReceiver>,
+    last_poll_at: Option<Duration>,
+    last_wake: Option<Duration>,
+    wake_polls: u32,
     failures: u32,
     polls: u32,
     last: Option<JobStatus>,
@@ -183,6 +196,9 @@ impl std::fmt::Debug for JobWatch {
 
 /// The shortest gap between polls, whatever the policy says.
 const MIN_INTERVAL: Duration = Duration::from_millis(10);
+/// The shortest gap between two polls that wakes ask for: a printer that sends a burst of events is
+/// asked about at most once a second.
+const MIN_WAKE_GAP: Duration = Duration::from_secs(1);
 /// The gap when neither the policy nor the backend suggests one.
 const FALLBACK_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -216,6 +232,11 @@ impl JobWatch {
             cancel: CancelToken::new(),
             started,
             next_at: started,
+            safe_at: started,
+            wake: None,
+            last_poll_at: None,
+            last_wake: None,
+            wake_polls: 0,
             failures: 0,
             polls: 0,
             last: None,
@@ -231,6 +252,7 @@ impl JobWatch {
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.started = clock.now();
         self.next_at = self.started;
+        self.safe_at = self.started;
         self.jitter = Jitter::from_clock(clock.as_ref());
         self.clock = clock;
         self
@@ -268,6 +290,17 @@ impl JobWatch {
         self
     }
 
+    /// Follow the backend's push channel ([`crate::backends::Backend::wake_source`]; the registry
+    /// attaches it in [`Registry::job_watch`]). A wake makes the next poll due at once (at most one
+    /// wake-driven poll a second), and while the receiver is healthy the idle gap between polls is
+    /// [`WaitPolicy::safety_interval`] instead of the ordinary one. The status always comes from a
+    /// poll; a wake carries nothing else. An unhealthy receiver changes nothing about the schedule.
+    #[must_use]
+    pub fn with_wake(mut self, wake: WakeReceiver) -> Self {
+        self.wake = Some(wake);
+        self
+    }
+
     /// Replace the jitter source (a fixed seed in tests).
     #[must_use]
     pub fn with_jitter(mut self, jitter: Jitter) -> Self {
@@ -277,6 +310,37 @@ impl JobWatch {
 
     pub fn job(&self) -> &JobId {
         &self.job
+    }
+
+    /// When (on the watch's clock) a poll last consumed a wake, if one did. Staleness treats it as
+    /// news from the printer, not as a good read.
+    pub fn last_wake(&self) -> Option<Duration> {
+        self.last_wake
+    }
+
+    /// How many polls were brought forward by a wake.
+    pub fn wake_polls(&self) -> u32 {
+        self.wake_polls
+    }
+
+    /// Whether the push channel is attached and currently trusted.
+    pub fn is_pushed(&self) -> bool {
+        self.healthy()
+    }
+
+    fn healthy(&self) -> bool {
+        self.wake.as_ref().is_some_and(WakeReceiver::is_healthy)
+    }
+
+    /// When the next poll is due: the ordinary schedule, or the safety poll while the push channel
+    /// is healthy, pulled forward by a pending wake.
+    fn due_at(&self) -> Duration {
+        let scheduled = if self.healthy() { self.safe_at.max(self.next_at) } else { self.next_at };
+        if self.wake.as_ref().is_some_and(WakeReceiver::is_pending) {
+            let woken = self.last_poll_at.map_or(self.started, |at| at.saturating_add(MIN_WAKE_GAP));
+            return scheduled.min(woken);
+        }
+        scheduled
     }
 
     /// The last status read, if any.
@@ -309,7 +373,7 @@ impl JobWatch {
             return Some(Duration::ZERO);
         }
         let deadline = self.started.saturating_add(self.policy.max_wait);
-        Some(self.next_at.min(deadline).saturating_sub(now))
+        Some(self.due_at().min(deadline).saturating_sub(now))
     }
 
     /// Advance: make the one request that is due (a cancel, else a status poll), or report how long
@@ -328,9 +392,10 @@ impl JobWatch {
         if self.support == WatchSupport::None {
             return self.finish(WatchOutcome::NoStatus);
         }
-        if now < self.next_at {
+        let due = self.due_at();
+        if now < due {
             let deadline = self.started.saturating_add(self.policy.max_wait);
-            return WatchStep::Pending { next_in: self.next_at.min(deadline).saturating_sub(now) };
+            return WatchStep::Pending { next_in: due.min(deadline).saturating_sub(now) };
         }
         self.poll(source, now)
     }
@@ -360,6 +425,7 @@ impl JobWatch {
                 self.failures = 0;
                 // Look at how it ended straight away; if the backend cannot report, that is the end.
                 self.next_at = now;
+                self.safe_at = now;
                 if self.support == WatchSupport::None {
                     let mut status = JobStatus::new(JobState::Cancelled);
                     status.reasons.push("cancel requested".into());
@@ -373,6 +439,11 @@ impl JobWatch {
 
     fn poll(&mut self, source: &dyn JobSource, now: Duration) -> WatchStep {
         self.polls = self.polls.saturating_add(1);
+        self.last_poll_at = Some(now);
+        if self.wake.as_ref().is_some_and(|wake| wake.take() > 0) {
+            self.last_wake = Some(now);
+            self.wake_polls = self.wake_polls.saturating_add(1);
+        }
         match source.job_status(&self.job) {
             Ok(mut status) => {
                 self.failures = 0;
@@ -384,6 +455,7 @@ impl JobWatch {
                 let changed = self.last.as_ref().is_none_or(|last| !last.same_as(&status));
                 self.interval = if changed { self.base_interval } else { self.grown() };
                 self.next_at = now.saturating_add(self.interval);
+                self.safe_at = now.saturating_add(self.policy.safety_interval.max(self.interval));
                 self.last = Some(status.clone());
                 WatchStep::Update(status)
             }
@@ -423,6 +495,7 @@ impl JobWatch {
         match wait {
             Some(next_in) => {
                 self.next_at = now.saturating_add(next_in);
+                self.safe_at = self.next_at;
                 WatchStep::Retrying { error, attempt: self.failures, next_in }
             }
             None => self.finish(WatchOutcome::Failed(error)),
@@ -775,5 +848,191 @@ mod tests {
         let script = Script::new(vec![Ok(status(JobState::Processing))]);
         assert!(matches!(watch.tick(&script), WatchStep::Update(_)));
         assert_eq!(watch.next_poll_in(), Some(Duration::from_secs(7)));
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+    use crate::retry::ManualClock;
+    use crate::wake::{WakeSender, wake_channel};
+    use std::sync::Mutex;
+
+    /// Counts polls and answers `Processing` until told to finish.
+    struct Source {
+        polls: Mutex<u32>,
+        done: Mutex<bool>,
+    }
+
+    impl Source {
+        fn new() -> Self {
+            Self { polls: Mutex::new(0), done: Mutex::new(false) }
+        }
+
+        fn polls(&self) -> u32 {
+            *self.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        fn finish(&self) {
+            *self.done.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        }
+    }
+
+    impl JobSource for Source {
+        fn job_status(&self, _: &JobId) -> Result<JobStatus, PrintError> {
+            *self.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+            let done = *self.done.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            Ok(JobStatus::new(if done { JobState::Completed } else { JobState::Processing }))
+        }
+
+        fn cancel_job(&self, _: &JobId) -> Result<(), PrintError> {
+            Ok(())
+        }
+    }
+
+    fn pushed(healthy: bool) -> (JobWatch, ManualClock, WakeSender) {
+        let clock = ManualClock::new();
+        let (tx, rx) = wake_channel();
+        tx.set_healthy(healthy);
+        let policy = WaitPolicy::every(Duration::from_secs(2));
+        let watch = JobWatch::new(JobId::new("t", "1"), policy).with_clock(Arc::new(clock.clone())).with_jitter(Jitter::new(3)).with_wake(rx);
+        (watch, clock, tx)
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    #[test]
+    fn a_healthy_channel_stretches_the_idle_gap_to_the_safety_interval() {
+        let (mut watch, clock, _tx) = pushed(true);
+        let source = Source::new();
+        assert!(matches!(watch.tick(&source), WatchStep::Update(_)));
+        assert!(watch.is_pushed());
+        assert_eq!(watch.next_poll_in(), Some(secs(30)));
+        clock.advance(secs(29));
+        assert!(matches!(watch.tick(&source), WatchStep::Pending { .. }));
+        assert_eq!(source.polls(), 1);
+        clock.advance(secs(1));
+        assert!(matches!(watch.tick(&source), WatchStep::Update(_)));
+        assert_eq!(source.polls(), 2);
+    }
+
+    #[test]
+    fn an_unhealthy_channel_leaves_the_schedule_as_it_was() {
+        let (mut watch, clock, _tx) = pushed(false);
+        let source = Source::new();
+        watch.tick(&source);
+        assert!(!watch.is_pushed());
+        assert_eq!(watch.next_poll_in(), Some(secs(2)));
+        clock.advance(secs(2));
+        watch.tick(&source);
+        assert_eq!(source.polls(), 2);
+    }
+
+    #[test]
+    fn a_wake_makes_the_next_poll_due_now_but_not_faster_than_once_a_second() {
+        let (mut watch, clock, tx) = pushed(true);
+        let source = Source::new();
+        watch.tick(&source);
+        assert!(tx.wake());
+        // Just polled: the wake waits out the one-second floor.
+        assert_eq!(watch.next_poll_in(), Some(secs(1)));
+        assert!(matches!(watch.tick(&source), WatchStep::Pending { next_in } if next_in == secs(1)));
+        clock.advance(secs(1));
+        assert_eq!(watch.next_poll_in(), Some(Duration::ZERO));
+        assert!(matches!(watch.tick(&source), WatchStep::Update(_)));
+        assert_eq!(source.polls(), 2);
+        assert_eq!(watch.wake_polls(), 1);
+        assert_eq!(watch.last_wake(), Some(secs(1)));
+        // The wake was consumed: back to the safety poll.
+        assert_eq!(watch.next_poll_in(), Some(secs(30)));
+    }
+
+    #[test]
+    fn a_burst_of_wakes_is_one_poll() {
+        let (mut watch, clock, tx) = pushed(true);
+        let source = Source::new();
+        watch.tick(&source);
+        for _ in 0..1000 {
+            tx.wake();
+        }
+        clock.advance(secs(1));
+        watch.tick(&source);
+        watch.tick(&source);
+        watch.tick(&source);
+        assert_eq!(source.polls(), 2);
+    }
+
+    #[test]
+    fn a_lost_event_is_caught_by_the_safety_poll() {
+        let (mut watch, clock, _tx) = pushed(true);
+        let source = Source::new();
+        watch.tick(&source);
+        source.finish();
+        // No event ever arrives.
+        clock.advance(secs(10));
+        assert!(matches!(watch.tick(&source), WatchStep::Pending { .. }));
+        clock.advance(secs(20));
+        assert!(matches!(watch.tick(&source), WatchStep::Done(WatchOutcome::Terminal(_))));
+    }
+
+    #[test]
+    fn losing_trust_returns_to_fast_polling() {
+        let (mut watch, clock, tx) = pushed(true);
+        let source = Source::new();
+        watch.tick(&source);
+        assert_eq!(watch.next_poll_in(), Some(secs(30)));
+        tx.set_healthy(false);
+        assert_eq!(watch.next_poll_in(), Some(secs(2)));
+        clock.advance(secs(2));
+        watch.tick(&source);
+        assert_eq!(source.polls(), 2);
+    }
+
+    #[test]
+    fn an_event_does_not_decide_the_outcome_only_a_poll_does() {
+        let (mut watch, clock, tx) = pushed(true);
+        let source = Source::new();
+        watch.tick(&source);
+        // The printer still says Processing: any number of wakes cannot end the job.
+        for _ in 0..3 {
+            tx.wake();
+            clock.advance(secs(1));
+            assert!(matches!(watch.tick(&source), WatchStep::Update(_)));
+        }
+        assert!(!watch.is_done());
+        source.finish();
+        tx.wake();
+        clock.advance(secs(1));
+        assert!(matches!(watch.tick(&source), WatchStep::Done(WatchOutcome::Terminal(_))));
+    }
+
+    #[test]
+    fn a_watch_without_a_receiver_is_unchanged() {
+        let clock = ManualClock::new();
+        let mut watch = JobWatch::new(JobId::new("t", "1"), WaitPolicy::every(secs(2))).with_clock(Arc::new(clock.clone()));
+        let source = Source::new();
+        watch.tick(&source);
+        assert_eq!(watch.next_poll_in(), Some(secs(2)));
+        assert!(!watch.is_pushed());
+        assert_eq!(watch.last_wake(), None);
+    }
+
+    #[test]
+    fn a_failed_poll_keeps_its_backoff_when_healthy() {
+        struct Flaky;
+        impl JobSource for Flaky {
+            fn job_status(&self, _: &JobId) -> Result<JobStatus, PrintError> {
+                Err(PrintError::new(ErrorKind::Unavailable, "down").with_safety(crate::RetrySafety::Idempotent))
+            }
+            fn cancel_job(&self, _: &JobId) -> Result<(), PrintError> {
+                Ok(())
+            }
+        }
+        let (mut watch, _clock, _tx) = pushed(true);
+        assert!(matches!(watch.tick(&Flaky), WatchStep::Retrying { .. }));
+        // The retry is due after the backoff, far sooner than the 30 second safety poll.
+        assert!(watch.next_poll_in().is_some_and(|d| d < secs(30)));
     }
 }

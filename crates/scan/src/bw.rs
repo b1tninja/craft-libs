@@ -16,7 +16,7 @@
 //!   16 bits) go through the `image` decoders, and their 1-bit PNG and TIFF files are recognised from
 //!   the header so they stay as delivered. A page that cannot be read is returned unchanged.
 
-use crate::{Color, Page, ScanSettings, bmp, image_format, image_size};
+use crate::{Color, Page, ScanSettings, bmp, density, image_format, image_size};
 
 /// Used when the request carries no threshold.
 pub const DEFAULT_THRESHOLD: u8 = 128;
@@ -85,6 +85,17 @@ enum Read {
 ///
 /// `dpi` only fills the BMP's resolution fields.
 pub fn threshold_to_one_bit(bytes: &[u8], threshold: u8, dpi: u32) -> Thresholded {
+    let per_metre = u32::try_from(u64::from(dpi) * 10_000 / 254).unwrap_or(0);
+    threshold_with_pels(bytes, threshold, (per_metre, per_metre))
+}
+
+/// [`threshold_to_one_bit`] with the two axes' resolution in dots per inch (rounded to whole pels per metre).
+pub fn threshold_to_one_bit_at(bytes: &[u8], threshold: u8, (x, y): density::Density) -> Thresholded {
+    let pels = |dpi: f64| (dpi / 0.0254).round().clamp(0.0, f64::from(u32::MAX)) as u32;
+    threshold_with_pels(bytes, threshold, (pels(x), pels(y)))
+}
+
+fn threshold_with_pels(bytes: &[u8], threshold: u8, pels: (u32, u32)) -> Thresholded {
     let read = match read_bmp(bytes) {
         Some(read) => read,
         None => read_other(bytes),
@@ -95,7 +106,7 @@ pub fn threshold_to_one_bit(bytes: &[u8], threshold: u8, dpi: u32) -> Thresholde
         Read::Luma(luma) => luma,
     };
     let (Ok(width), Ok(height)) = (u32::try_from(luma.width), u32::try_from(luma.height)) else { return Thresholded::Unreadable };
-    match pack_bmp(&luma, threshold, dpi) {
+    match pack_bmp(&luma, threshold, pels) {
         Some(bytes) => Thresholded::Converted(OneBit { bytes, width, height, from_bits: luma.from_bits }),
         None => Thresholded::Unreadable,
     }
@@ -103,15 +114,26 @@ pub fn threshold_to_one_bit(bytes: &[u8], threshold: u8, dpi: u32) -> Thresholde
 
 /// Build a delivered page. For a black-and-white rule, a page deeper than 1 bit becomes a 1-bit BMP
 /// (the second value is the depth it had). Everything else keeps the bytes the driver sent.
+///
+/// The page's resolution is the one the delivered file carries (see [`crate::density`]); the request's dpi is only
+/// the fallback for a file that carries nothing usable, and is recorded as [`Page::requested_dpi`].
 pub fn page_for(bytes: &[u8], rule: PageRule) -> (Page, Option<u32>) {
+    let found = density::image_density(bytes);
+    let (dx, dy) = found.unwrap_or((f64::from(rule.dpi), f64::from(rule.dpi)));
+    let (dpi, dpi_y) = (round_dpi(dx), round_dpi(dy));
     if let Some(threshold) = rule.bw_threshold
-        && let Thresholded::Converted(one) = threshold_to_one_bit(bytes, threshold, rule.dpi)
+        && let Thresholded::Converted(one) = threshold_to_one_bit_at(bytes, threshold, (dx, dy))
     {
-        let page = Page { bytes: one.bytes, format: "bmp", width: one.width, height: one.height, dpi: rule.dpi, thresholded: true };
+        let page =
+            Page { bytes: one.bytes, format: "bmp", width: one.width, height: one.height, dpi, dpi_y, requested_dpi: rule.dpi, thresholded: true };
         return (page, Some(one.from_bits));
     }
     let (width, height) = image_size(bytes).unwrap_or((0, 0));
-    (Page { format: image_format(bytes), width, height, dpi: rule.dpi, bytes: bytes.to_vec(), thresholded: false }, None)
+    (Page { format: image_format(bytes), width, height, dpi, dpi_y, requested_dpi: rule.dpi, bytes: bytes.to_vec(), thresholded: false }, None)
+}
+
+fn round_dpi(dpi: f64) -> u32 {
+    dpi.round().clamp(1.0, f64::from(u32::MAX)) as u32
 }
 
 /// Top-down luminance of a BMP this crate reads itself: `(width, height, bits per pixel, pixels)`.
@@ -239,14 +261,13 @@ fn tiff_is_one_bit(bytes: &[u8]) -> bool {
 }
 
 /// A bottom-up 1-bpp BMP, palette `[black, white]`: luminance below `threshold` is ink.
-fn pack_bmp(luma: &Luma, threshold: u8, dpi: u32) -> Option<Vec<u8>> {
+fn pack_bmp(luma: &Luma, threshold: u8, (pels_x, pels_y): (u32, u32)) -> Option<Vec<u8>> {
     const PIXELS_AT: usize = 14 + 40 + 8;
     let stride = luma.width.div_ceil(32).checked_mul(4)?;
     let size = stride.checked_mul(luma.height)?;
     let total = size.checked_add(PIXELS_AT)?;
     let mut out = Vec::new();
     out.try_reserve_exact(total).ok()?;
-    let per_metre = u32::try_from(u64::from(dpi) * 10_000 / 254).unwrap_or(0);
     out.extend_from_slice(b"BM");
     out.extend_from_slice(&u32::try_from(total).ok()?.to_le_bytes());
     out.extend_from_slice(&[0; 4]);
@@ -258,8 +279,8 @@ fn pack_bmp(luma: &Luma, threshold: u8, dpi: u32) -> Option<Vec<u8>> {
     out.extend_from_slice(&1u16.to_le_bytes());
     out.extend_from_slice(&[0; 4]); // BI_RGB
     out.extend_from_slice(&u32::try_from(size).ok()?.to_le_bytes());
-    out.extend_from_slice(&per_metre.to_le_bytes());
-    out.extend_from_slice(&per_metre.to_le_bytes());
+    out.extend_from_slice(&pels_x.to_le_bytes());
+    out.extend_from_slice(&pels_y.to_le_bytes());
     out.extend_from_slice(&2u32.to_le_bytes());
     out.extend_from_slice(&[0; 4]);
     out.extend_from_slice(&[0, 0, 0, 0, 255, 255, 255, 0]);
@@ -552,8 +573,9 @@ mod tests {
         assert_eq!(from, Some(24));
         assert_eq!((bw.format, bw.width, bw.height, bw.dpi), ("bmp", 3, 1, 150));
         assert_eq!(crate::bmp_size(&bw.bytes), Some((3, 1)));
-        // 150 dpi is 5905 pixels per metre.
-        assert_eq!(u32::from_le_bytes([bw.bytes[38], bw.bytes[39], bw.bytes[40], bw.bytes[41]]), 5905);
+        // The file carried no density, so the request's 150 dpi is used: 5906 pixels per metre (rounded).
+        assert_eq!(u32::from_le_bytes([bw.bytes[38], bw.bytes[39], bw.bytes[40], bw.bytes[41]]), 5906);
+        assert_eq!((bw.dpi, bw.dpi_y, bw.requested_dpi), (150, 150, 150));
     }
 
     #[test]

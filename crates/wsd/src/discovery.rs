@@ -3,7 +3,7 @@
 //!
 //! **This module opens no socket and sends nothing by itself.** The driver talks to a
 //! [`DiscoverySocket`], a two-method trait (send a datagram, receive one before a deadline). The
-//! crate ships an in-memory implementation for tests ([`fake`]) and *no* implementation that
+//! crate ships an in-memory implementation for tests (`fake`, behind the `testing` feature) and *no* implementation that
 //! touches the network: a real UDP socket, with the multicast group join and the choice of
 //! interface that come with it, is deliberately left to the application that owns the decision
 //! (see `docs/wsd.md`). [`Destination::Multicast`] only says "the discovery group"; the socket

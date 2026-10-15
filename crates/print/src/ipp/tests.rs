@@ -821,11 +821,25 @@ fn a_rejection_of_both_versions_is_the_printers_status_and_nothing_loops() {
     assert!(e.message().contains("server-error-version-not-supported"), "{e}");
     // A 1.1 rejection teaches nothing: the next request tries 2.0 again.
     assert_eq!(b.version_of(URI), Some(IppVersion::V2_0));
-    // A fallback attempt that fails otherwise is that failure, with nothing remembered.
+    // A fallback attempt that gets no answer is that failure, with nothing remembered.
     script.status(0x0503).push(Step::Fail(TransportKind::Refused, Stage::Connect));
     let e = b.printer_details(URI).unwrap_err();
     assert_eq!(e.kind(), ErrorKind::Unavailable);
     assert_eq!(b.version_of(URI), Some(IppVersion::V2_0));
+    assert_eq!(script.pending(), 0);
+}
+
+#[test]
+fn a_printer_that_answers_at_1_1_with_any_other_status_is_remembered_as_speaking_1_1() {
+    let script = Script::new();
+    let b = IppBackend::new().with_transport(script.clone()).with_job_flow(JobFlow::PrintJob);
+    b.add(URI).unwrap();
+    // The Print-Job is rejected for its version at 2.0, and the repeat at 1.1 is answered "busy".
+    script.ok(vec![printer_group()]).status(0x0503).status(0x0507);
+    let e = registry(&b).submit_job(request(job())).unwrap_err();
+    assert_eq!(e.native().unwrap().code, 0x0507, "{e}");
+    assert_eq!(versions_of(&script), [(2, 0), (2, 0), (1, 1)]);
+    assert_eq!(b.version_of(URI), Some(IppVersion::V1_1));
     assert_eq!(script.pending(), 0);
 }
 
@@ -1269,6 +1283,38 @@ fn a_long_or_multibyte_title_is_cut_so_that_the_tag_survives_255_bytes() {
     }
     assert_eq!(b.job_name("short", None), "short");
     assert!(b.job_name(&"\u{4e2d}".repeat(200), None).len() <= 255);
+}
+
+#[test]
+fn control_characters_in_the_title_never_reach_the_job_name_and_the_tag_is_added_once_after() {
+    let sent_name = |title: &str, tag: Option<Tag>| {
+        let script = Script::new();
+        let b = backend(&script);
+        script.ok(vec![printer_group()]).ok(accepted(1));
+        let mut req = request(Job { title: title.into(), ..job() });
+        if let Some(tag) = tag {
+            req = req.with_tag(tag);
+        }
+        registry(&b).submit_job(req).unwrap();
+        let sent = script.last();
+        sent.group(GroupTag::Operation).unwrap().first_str("job-name").unwrap().to_owned()
+    };
+    let tag = Tag::random();
+    let dirty = "Re\u{0}po\u{1}rt\u{7}\t\n\r\u{1f}\u{7f}\u{80}\u{9f} \u{e9}\u{4e2d}\u{1f600}";
+    let want = "Report \u{e9}\u{4e2d}\u{1f600}";
+    assert_eq!(sent_name(dirty, None), want);
+    let name = sent_name(dirty, Some(tag));
+    assert_eq!(name, format!("{want} [ref {tag}]"));
+    assert_eq!(name.matches("[ref ").count(), 1);
+    // A very long dirty title is cut at 255 bytes with the tag kept and still clean.
+    let long = format!("a\u{0}{}", "\u{4e2d}\u{7}".repeat(400));
+    let name = sent_name(&long, Some(tag));
+    assert!(name.len() <= 255 && Tag::find_in(&name) == Some(tag) && !name.chars().any(char::is_control), "{name:?}");
+    // Nothing left: the default title (with the tag when there is one).
+    let only = "\u{0}\u{1}\u{7f}\u{85}\n";
+    assert_eq!(sent_name(only, None), "Craft");
+    assert_eq!(sent_name(only, Some(tag)), format!("Craft [ref {tag}]"));
+    assert_eq!(sent_name("", None), "Craft");
 }
 
 // ---- a static reply vector ---------------------------------------------------------------------------------------------

@@ -381,13 +381,15 @@ impl IppBackend {
         Ok((entry, number))
     }
 
-    /// The job name sent: the title with the tag as a suffix, within 255 bytes.
+    /// The job name sent: the title without control characters, then the tag as a suffix, within
+    /// 255 bytes. A title that is empty once cleaned is the default title.
     pub(super) fn job_name(&self, title: &str, tag: Option<&crate::Tag>) -> String {
+        let clean = sanitize_name(title);
         let mut chars = MAX_NAME_BYTES;
         loop {
             let name: String = match tag {
-                Some(tag) => tag.apply_to(title, Some(chars)),
-                None => title.chars().take(chars).collect(),
+                Some(tag) => tag.apply_to(&clean, Some(chars)),
+                None => clean.chars().take(chars).collect(),
             };
             if name.len() <= MAX_NAME_BYTES || chars == 0 {
                 return name;
@@ -395,6 +397,13 @@ impl IppBackend {
             chars -= 1;
         }
     }
+}
+
+/// The title sent in a name: control characters (C0 including NUL, tab and line breaks, DEL and
+/// C1) are removed, not refused; nothing left means the default title.
+fn sanitize_name(title: &str) -> String {
+    let clean: String = title.chars().filter(|c| !c.is_control()).collect();
+    if clean.is_empty() { crate::Job::default().title } else { clean }
 }
 
 /// `<printer uri>#<job id>`. A printer URI never contains `#` (the policy refuses fragments).

@@ -276,8 +276,10 @@ impl<T: Transport> Client<T> {
 
     /// Send a request and read the reply. With fallback allowed ([`Self::with_fallback`]) and a
     /// request above 1.1, a `server-error-version-not-supported` answer is followed by exactly one
-    /// more attempt at 1.1 (and 1.1 is remembered for the printer); whatever that attempt answers,
-    /// including the same status again, is the result. There is no further retry.
+    /// more attempt at 1.1; whatever that attempt answers,
+    /// including the same status again, is the result. There is no further retry. A printer that
+    /// answers the 1.1 request with success or any status other than version-not-supported is
+    /// remembered as speaking 1.1.
     pub fn exchange(&self, message: &Message) -> Result<Reply> {
         match self.exchange_once(message) {
             Err(IppError::Status { code: StatusCode::VERSION_NOT_SUPPORTED, .. }) if self.fallback && (message.major, message.minor) > (1, 1) => {

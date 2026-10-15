@@ -39,9 +39,10 @@ The default is **IPP 2.0** (every IPP Everywhere printer supports it). Version r
 |---|---|---|
 | nothing known | 2.0 | |
 | the printer's `ipp-versions-supported` was read (`printer_details`, the first step of every submit) | the highest of 2.0 and 1.1 it lists (versions this client does not speak, such as 1.0 or 2.1, are ignored; a list naming neither changes nothing) | yes, per printer, never raised |
-| the printer answers `server-error-version-not-supported` to a 2.0 request | **the same request once more at 1.1**; no third attempt | 1.1 for that printer, for the life of the backend (clones share it) |
+| the printer answers `server-error-version-not-supported` to a 2.0 request | **the same request once more at 1.1**; no third attempt | see the next rows |
+| the printer answers the 1.1 request with success or any status other than `server-error-version-not-supported` (a busy printer, a refused attribute, anything) | that answer is the result | 1.1 for that printer, for the life of the backend (clones share it): a printer that answers a request at 1.1 with any status other than version-not-supported is remembered as speaking 1.1 |
 | the printer rejects 1.1 too | the second failure is the result: `Failed`, `Safe`, `NativeCode { ipp, 0x0503, server-error-version-not-supported }` | nothing |
-| the fallback attempt fails for another reason | that failure | nothing |
+| the 1.1 attempt gets no answer at all (connection refused, timeout) | that failure | nothing (no answer shows nothing) |
 | `with_ipp_version(v)` | exactly `v`, always; an advertised list does not move it | |
 | `with_ipp_version(v)` and `with_version_fallback(true)` | `v`, lowered to 1.1 once on a rejection (and to what is advertised) | as above |
 
@@ -93,7 +94,7 @@ refused with `ErrorKind::UnsupportedFormat` before it is sent.
 | `JobOptions::resolution` | `printer-resolution` (dpi) | `printer-resolution-supported` |
 | `JobOptions::media` | `media` (the PWG name) | `media-supported`, or a `media-size-supported` entry of the size the name spells (half a millimetre tolerance) |
 | `JobOptions::colour`, `Job::grayscale` | `print-color-mode` = `color`, `monochrome`; auto sends nothing | `print-color-mode-supported`, `color-supported` (a colour request to a monochrome printer prints grey with a warning; strict: refused) |
-| title and idempotency tag | `job-name` = title + ` [ref xxxxxxxx]`, cut to 255 bytes with the tag kept | |
+| title and idempotency tag | `job-name` = title + ` [ref xxxxxxxx]`, cut to 255 bytes with the tag kept; control characters (C0, DEL and C1) are removed from the title first, and a title left empty is sent as `Craft` | |
 | (backend) | `requesting-user-name` | |
 | `Job::scaling` shrink-to-fit, collation, driver options | not applied (a warning for scaling and driver options) | |
 

@@ -343,14 +343,15 @@ let submitted = craft_print::submit_job(request)?; // returns when the printer h
   attributes. A setting the printer lists as unsupported is dropped with a warning in `Submitted::warnings`, or
   refused in strict mode (`with_strict`, which also sends `ipp-attribute-fidelity`); attributes the printer
   itself ignores come back as warnings too. The tables both ways are in [docs/ipp.md](docs/ipp.md).
-* **Tracking.** The idempotency tag is a suffix of `job-name`; `list_jobs` / `find_job` read `Get-Jobs`
+* **Tracking.** The idempotency tag is a suffix of `job-name` (the title is sent with control characters removed); `list_jobs` / `find_job` read `Get-Jobs`
   (title, user, state, creation time), so a lost reply is reconciled by tag before anything is resent.
 * **Errors** carry `NativeCode { domain: "ipp", code, name }` (HTTP failures `"http"`) and the retry facts of
   the status table in [docs/ipp.md](docs/ipp.md), pinned by the table tests in `ipp::error`.
 * **IPP version.** Requests go out as IPP 2.0 (every IPP Everywhere printer speaks it). A printer that
   answers `server-error-version-not-supported` gets the same request once more at 1.1 (a rejected request
-  creates nothing, so this is safe for `Print-Job`, `Create-Job` and `Send-Document` too), and 1.1 is
-  remembered for that printer for the life of the backend (clones share it). The printer's own
+  creates nothing, so this is safe for `Print-Job`, `Create-Job` and `Send-Document` too), and a printer that
+  answers a request at 1.1 with any status other than version-not-supported is remembered as speaking 1.1, for the life
+  of the backend (clones share it). The printer's own
   `ipp-versions-supported` is used when it was read (highest of 2.0 and 1.1). `with_ipp_version` pins a version
   that is never downgraded unless the app also calls `with_version_fallback(true)`; `version_of(uri)` says what
   the next request to a printer will use.

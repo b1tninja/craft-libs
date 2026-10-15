@@ -189,12 +189,27 @@ per status bit.
 * The other bits are plain `bool`s that mean "set only when reported". A status that is entirely clear and leaves
   the feeder unreported (`HandlingStatus::default()`) is what a driver that reports nothing looks like (the inbox
   WSD scan driver), so **every** indicator is `NotReported`, never `Off`. `None` (the backend cannot preflight) is
-  the same. Once any bit says something, the others are read as given.
+  the same. Once any bit says something, the others are read as given, except the **ready** bits (see next).
+* The ready bits (`flat_ready`, `duplex_ready`, and `feeder_ready` when `None`) depend on the scanner's
+  `Connection`. On `Usb` a clear ready bit is `Off`. On a network scanner (`Wsd`, `Other`) or `Unknown`, a clear
+  ready bit is `NotReported` even when other bits are set, because those drivers publish no usable tray or ready
+  state; a set bit is a positive reading (`On`) everywhere, and an explicit `feeder_ready: Some(false)` stays `Off`.
+  Fault bits (jam, covers, multi-feed, attention, lamp) are not ready bits and are read as given.
 * Indicators for hardware the scanner lacks (no feeder, flatbed or duplexer) are left out unless the status asserts
   them. The lamp bit is an error flag: `LampError` is `On` or "no error reported".
 * `From<Connection> for DeviceConnection`: `Usb` to `Usb`, `Wsd` to `Network`, `Other` to `Other`, `Unknown` to
   `Unknown`. (craft-job's README describes a different mapping that fits craft-print's wider set; this is what
   craft-scan's four variants are.)
+
+### The source actually used
+
+`finish_attempt` records the source the backend reports in `Acquired` (never `Auto`) as `snapshot().source_in_use`
+and `AttemptRecord::source_used`; for an error with no report it keeps the plan's guess. When the plan was the
+feeder (asked for, or `Auto` that guessed it) and the backend reports the glass, the backend fell back inside the
+call (an `Auto` whose feeder gave no pages): `AttemptRecord::fell_back` is `true` (serde: additive, defaults to
+`false` in older journals) and `JobView::reasons` carries `AUTO_FELL_BACK_REASON` ("auto: used the glass because the
+feeder gave no pages") while that attempt is the latest. This is not the job's own retry on the glass after
+`AttemptOutcome::FellBackToGlass`, whose attempt asks for the glass.
 
 ## 10. Limits
 

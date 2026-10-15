@@ -1,4 +1,10 @@
 //! A scanner's paper-path status as a [`craft_job::DeviceView`].
+//!
+//! The ready bits (`feeder_ready`, `flat_ready`, `duplex_ready`) are read by connection. A USB scanner's
+//! driver publishes them, so a clear bit is `Off`. A network scanner (`Wsd`, `Other`) or one of unknown
+//! connection often publishes no usable tray or ready state (the inbox WSD scan driver reports every bit
+//! clear), so there a clear ready bit is `NotReported`; a set bit is a positive reading, `On`. The fault bits
+//! are not ready bits: they are read as given once the status says anything at all.
 
 use craft_job::{
     CapabilitiesSummary, DeviceConnection, DeviceId, DeviceState, DeviceView, Indicator, IndicatorKey, JobKind, PaperPathView, PaperSource, Tri,
@@ -25,6 +31,10 @@ impl From<Connection> for DeviceConnection {
 /// `Some(scanner.handling_status)` for the reading taken with the details. Every indicator is a [`Tri`]:
 ///
 /// * `feeder_ready` is an `Option<bool>` and is taken as the backend gave it: `None` is `NotReported`.
+/// * The ready bits (`flat_ready`, `duplex_ready`, and `feeder_ready` when it is `Some(false)`) are read by the
+///   scanner's connection. On USB a clear bit is `Off`. On a network (`Wsd`, `Other`) or `Unknown` connection a clear
+///   ready bit is `NotReported` (those drivers publish no usable ready state); a set bit is `On` on any connection.
+///   An explicit `feeder_ready: Some(false)` is a reading and stays `Off`.
 /// * The other bits are plain `bool`s that mean "set only when reported". A status that is entirely clear and
 ///   leaves the feeder unreported ([`HandlingStatus::default`]) is what a driver that reports nothing looks
 ///   like (the inbox WSD scan driver reports every bit clear), so **every** indicator is `NotReported`, never
@@ -38,8 +48,14 @@ pub fn device_view(scanner: &Scanner, status: Option<HandlingStatus>, source_in_
     let reported = status.filter(|s| *s != HandlingStatus::default());
     let flag = |bit: fn(&HandlingStatus) -> bool| reported.map_or(Tri::NotReported, |s| Tri::from_bool(bit(&s)));
     let feeder = reported.map_or(Tri::NotReported, |s| Tri::from_option(s.feeder_ready));
-    let flat = flag(|s| s.flat_ready);
-    let duplex = flag(|s| s.duplex_ready);
+    // A clear ready bit is only "off" where the driver is known to publish readiness: USB.
+    let ready = |bit: fn(&HandlingStatus) -> bool| match reported {
+        Some(s) if bit(&s) => Tri::On,
+        Some(_) if scanner.connection == Connection::Usb => Tri::Off,
+        _ => Tri::NotReported,
+    };
+    let flat = ready(|s| s.flat_ready);
+    let duplex = ready(|s| s.duplex_ready);
 
     let capabilities = CapabilitiesSummary::new()
         .with_feeder(Tri::from_bool(scanner.feeder))

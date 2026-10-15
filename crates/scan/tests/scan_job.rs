@@ -257,6 +257,35 @@ fn an_empty_feeder_with_no_pages_under_auto_falls_back_to_the_glass_and_records_
 }
 
 #[test]
+fn an_auto_that_the_backend_answered_from_the_glass_is_recorded_as_a_fallback() {
+    use craft_scan::job::AUTO_FELL_BACK_REASON;
+    // The WIA-shaped fake answers Auto from the glass (the driver switched inside the call).
+    let wia = WiaLike { bits: 0x3, fail_listing: false };
+    let request = ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
+    let mut job = ScanJob::new(request, ScanJobConfig::default().with_capabilities(true, true, None));
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    assert_eq!(plan.source_guess, Some(Source::Feeder));
+    assert_eq!(job.snapshot().source_in_use, None, "nothing is known before the attempt ends");
+    job.finish_attempt(wia.acquire(&plan.settings), t(2)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!(snap.source_in_use, Some(Source::Glass));
+    assert_eq!((snap.attempts[0].source_used, snap.attempts[0].fell_back), (Some(Source::Glass), true));
+    assert_eq!(snap.pages[0].source, Some(Source::Glass));
+    assert!(job.view().reasons.iter().any(|r| r == AUTO_FELL_BACK_REASON), "{:?}", job.view().reasons);
+
+    // An Auto that used the feeder, and an explicit glass request, are not fallbacks.
+    let mut job = ScanJob::new(feeder_request(1), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(SaneLike::new(1).acquire(&plan.settings), t(2)).expect("finish");
+    assert!(!job.snapshot().attempts[0].fell_back);
+    let glass = ScanSettings { source: Source::Glass, ..ScanSettings::default() };
+    let mut job = ScanJob::new(glass, ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(wia.acquire(&plan.settings), t(2)).expect("finish");
+    assert!(!job.snapshot().attempts[0].fell_back);
+}
+
+#[test]
 fn auto_does_not_fall_back_without_a_glass_or_after_pages_or_for_a_jam() {
     let auto = || ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
 
@@ -646,6 +675,44 @@ fn the_wsd_all_clear_status_is_not_reported_never_off() {
     let none = device_view(&scanner, None, None);
     assert_eq!(none.indicators, view.indicators);
     assert_eq!(none.state, DeviceState::Unknown);
+}
+
+#[test]
+fn ready_bits_are_read_by_connection_a_clear_one_is_off_only_on_usb() {
+    use craft_job::IndicatorKey as K;
+    let build = |connection| {
+        let mut scanner = common::scanner("wia:{x}", "Scanner");
+        scanner.feeder = true;
+        scanner.flatbed = true;
+        scanner.duplex = true;
+        scanner.connection = connection;
+        scanner
+    };
+    // Something is reported (a cover is open), every ready bit is clear.
+    let status = HandlingStatus { cover_open: true, ..HandlingStatus::default() };
+    for connection in [craft_scan::Connection::Wsd, craft_scan::Connection::Other, craft_scan::Connection::Unknown] {
+        let view = device_view(&build(connection), Some(status), None);
+        assert_eq!(state_of(&view, K::FlatbedReady), Some(Tri::NotReported), "{connection:?}");
+        assert_eq!(state_of(&view, K::DuplexReady), Some(Tri::NotReported), "{connection:?}");
+        assert_eq!(state_of(&view, K::FeederPaper), Some(Tri::NotReported), "{connection:?}");
+        assert_eq!(state_of(&view, K::CoverOpen), Some(Tri::On));
+        assert_eq!(state_of(&view, K::Jam), Some(Tri::Off), "fault bits are read as given once the status says something");
+        assert_eq!(view.paper.expect("paper").glass_available, Tri::NotReported);
+    }
+    // A set ready bit is a positive reading, and an explicit feeder reading is kept.
+    let wsd = build(craft_scan::Connection::Wsd);
+    let loaded = HandlingStatus { feeder_ready: Some(true), flat_ready: true, ..HandlingStatus::default() };
+    let view = device_view(&wsd, Some(loaded), None);
+    assert_eq!(state_of(&view, K::FeederPaper), Some(Tri::On));
+    assert_eq!(state_of(&view, K::FlatbedReady), Some(Tri::On));
+    assert_eq!(state_of(&view, K::DuplexReady), Some(Tri::NotReported));
+    let empty = HandlingStatus { feeder_ready: Some(false), flat_ready: true, ..HandlingStatus::default() };
+    assert_eq!(state_of(&device_view(&wsd, Some(empty), None), K::FeederPaper), Some(Tri::Off));
+    // USB: a clear ready bit is off.
+    let view = device_view(&build(craft_scan::Connection::Usb), Some(status), None);
+    assert_eq!(state_of(&view, K::FlatbedReady), Some(Tri::Off));
+    assert_eq!(state_of(&view, K::DuplexReady), Some(Tri::Off));
+    assert_eq!(view.paper.expect("paper").glass_available, Tri::Off);
 }
 
 #[test]

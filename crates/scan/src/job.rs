@@ -438,6 +438,12 @@ pub struct AttemptRecord {
     /// The source the transfer used, when known.
     #[cfg_attr(feature = "serde", serde(default))]
     pub source_used: Option<Source>,
+    /// The backend used the glass although the plan was the feeder (`Feeder`, or `Auto` that guessed the
+    /// feeder): an `Auto` that fell back inside the backend because the feeder gave no pages. The job never
+    /// sees the fallback happen; it reads it from the source the backend reports in [`Acquired`]. This is not
+    /// the job's own retry on the glass after [`AttemptOutcome::FellBackToGlass`] (that attempt asks for the glass).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub fell_back: bool,
     pub pages_before: u32,
     /// New pages this attempt kept (also when it failed).
     pub pages_gained: u32,
@@ -887,6 +893,7 @@ impl ScanJob {
             continuation,
             source_requested,
             source_used: None,
+            fell_back: false,
             pages_before: count(kept),
             pages_gained: 0,
             phase: None,
@@ -976,7 +983,14 @@ impl ScanJob {
             }
             Err(error) => (None, Some(error)),
         };
-        let used = acquired.as_ref().map(|a| a.source).or(token_source).or(running.guess).filter(|s| *s != Source::Auto);
+        let reported = acquired.as_ref().map(|a| a.source).or(token_source).filter(|s| *s != Source::Auto);
+        let used = reported.or(running.guess).filter(|s| *s != Source::Auto);
+        // What the plan expected to use: the feeder when asked for it or when Auto guessed it.
+        let planned_feeder = match running.requested {
+            Source::Auto => running.guess == Some(Source::Feeder),
+            other => other == Source::Feeder,
+        };
+        let fell_back = planned_feeder && reported == Some(Source::Glass);
         if let Some(acquired) = acquired {
             self.merge_result(&mut running, acquired.pages, used);
         }
@@ -1012,6 +1026,7 @@ impl ScanJob {
         self.update_record(running.number, |record| {
             record.ended = Some(at);
             record.source_used = used;
+            record.fell_back = fell_back;
             record.pages_gained = gained;
             record.phase = phase;
             record.outcome = outcome;
@@ -1272,6 +1287,9 @@ impl ScanJob {
         if self.state == ScanJobState::Terminal(Outcome::CancelledByDevice) {
             view = view.with_reason("cancelled_by_device");
         }
+        if self.timeline.last().is_some_and(|r| r.fell_back) {
+            view = view.with_reason(AUTO_FELL_BACK_REASON);
+        }
         for warning in &self.warnings {
             view = view.with_reason(warning.clone());
         }
@@ -1295,6 +1313,9 @@ impl ScanJob {
         }
     }
 }
+
+/// The [`JobView`] reason while the latest attempt is one where the backend used the glass instead of the feeder.
+pub const AUTO_FELL_BACK_REASON: &str = "auto: used the glass because the feeder gave no pages";
 
 fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)

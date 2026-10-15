@@ -142,7 +142,14 @@ pub fn page_for(delivered: &[u8], rule: PageRule) -> (Page, Option<u32>) {
     let (dpi, dpi_y) = (round_dpi(dx), round_dpi(dy));
     let mut source = rule.length.source;
     let mut cut = None;
-    if let Some(options) = rule.length.infer
+    // A JPEG's flat white does not decode to exactly 255 everywhere, so it gets the format's tolerance.
+    let infer = rule.length.infer.map(|mut options| {
+        if image_format(delivered) == "jpeg" {
+            options.tolerance = options.tolerance.max(InferOptions::JPEG_TOLERANCE);
+        }
+        options
+    });
+    if let Some(options) = infer
         && let Ok(sheet) = assess_sheet_end(delivered, dpi_y, &options)
         && let Some(bytes) = length::crop_bottom_bytes(delivered, sheet.rows)
     {

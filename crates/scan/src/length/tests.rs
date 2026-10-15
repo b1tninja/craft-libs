@@ -314,7 +314,8 @@ fn a_cut_is_refused_when_the_image_is_not_shorter_or_cannot_be_cut() {
 fn page_length_and_length_source_have_stable_wire_strings() {
     assert_eq!(PageLength::default(), PageLength::Driver);
     let names: Vec<_> = PageLength::ALL.iter().map(|v| v.as_str()).collect();
-    assert_eq!(names, ["driver", "auto", "infer"]);
+    assert_eq!(names, ["driver", "size", "auto", "infer"]);
+    assert_eq!(PageLength::parse("match"), Some(PageLength::Size));
     for value in PageLength::ALL {
         assert_eq!(PageLength::parse(value.as_str()), Some(*value));
     }

@@ -5,17 +5,29 @@
 //! with the options as a PrintTicket, all in this process (`windows.rs`): no PowerShell or other
 //! program is started, so printing works where scripts are locked down. Other platforms report
 //! that printing isn't available yet; the print-ready PDF can still be saved.
+//!
+//! The spooler is also available as a [`backends::Backend`] in a [`Registry`] that can hold other
+//! backends beside it (see the README); the functions of this crate are unchanged.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod backend;
+mod builtin;
+pub mod convert;
+mod job;
+mod options;
 #[cfg(any(test, windows))]
 mod progress;
+pub mod pwg;
+mod registry;
+mod retry;
 #[cfg(any(test, windows))]
 mod sheets;
 #[cfg(test)]
 mod tests;
 #[cfg(any(test, windows))]
 mod ticket;
+mod watch;
 #[cfg(windows)]
 mod windows;
 
@@ -25,6 +37,27 @@ mod windows;
 pub mod rgb {
     pub use craft_winprint_gdi::*;
 }
+
+/// The [`backend::Backend`] trait and the neutral types a backend speaks. The crate's older
+/// `Backend` enum (the platform's built-in kind, see [`backend()`]) is unchanged.
+pub mod backends {
+    pub use crate::backend::*;
+}
+pub use backend::{
+    BackendClass, CancelToken, Document, DocumentFormat, ErrorKind, JobHint, NativeCode, PrintError, PrinterDetails, PrinterRef, PrinterState,
+    PrinterStatus, Progress, ProgressCallback, Receipt, SubmitRequest, UserConfirmed,
+};
+#[cfg(any(windows, all(unix, not(target_arch = "wasm32"))))]
+pub use builtin::SystemSpooler;
+pub use convert::{Conversion, ConversionPolicy, ConvertContext, DocumentConverter, OwnedDocument, choose_resolution};
+pub use job::{ExpectedTotals, JobId, JobState, JobStatus, ParseJobIdError, ParseJobIdErrorKind, Submitted, WatchSupport};
+pub use options::{ColourMode, JobOptions, Orientation, Quality, Resolution};
+pub use registry::{
+    BackendError, Listing, RegisterError, Registry, cancel_job, job_status, list_printers, namespaced_id, printer_details, register, registry,
+    set_converter, split_id, submit_job, submit_to_backend,
+};
+pub use retry::{CANCEL_SLICE, Clock, Jitter, ManualClock, Phase, RetryPolicy, RetrySafety, SystemClock, retry};
+pub use watch::{JobSource, JobWatch, WaitPolicy, WatchOutcome, WatchStep, wait_for_job};
 
 /// A system spooler failure. Document permissions belong to the caller.
 #[derive(Clone, Debug, PartialEq, Eq)]

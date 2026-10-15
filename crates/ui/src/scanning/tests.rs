@@ -26,6 +26,7 @@ fn rich() -> Choices {
         max_pages: Capability::from_option_range(Some((1, 50))),
         all_pages: presence(Some(true)),
         duplex: presence(Some(true)),
+        detect_length: Capability::Unknown,
     }
 }
 
@@ -355,6 +356,7 @@ fn clamping_brings_settings_into_the_choices() {
         max_pages: Capability::from_option_range(Some((1, 5))),
         all_pages: presence(Some(false)),
         duplex: presence(Some(false)),
+        detect_length: Capability::Unknown,
     };
     let mut s = Settings { source: Source::Auto, color: Color::Gray, dpi: 300, pages: Pages::All, duplex: true, ..Settings::default() };
     s.clamp(&choices);
@@ -474,6 +476,16 @@ fn labels() -> Labels<'static> {
         unsupported_reason: "Nicht vorhanden.",
         unconfirmed_note: "Nicht bestaetigt.",
         reasons: Reasons { feeder: Some("Kein Einzug."), duplex: Some("Keine Duplexeinheit."), ..Reasons::default() },
+        length: LengthLabels {
+            heading: "Seitenlaenge",
+            driver: "Treiberstandard",
+            match_size: "Wie Seitengroesse",
+            detect: "Erkennen (Scanner)",
+            infer: "Aus Bild erkennen (ungefaehr)",
+            no_page_size: "Zuerst eine Seitengroesse waehlen.",
+            no_detection: "Dieser Scanner erkennt die Laenge nicht.",
+            infer_note: "Aus dem Bild geschaetzt, kann falsch sein.",
+        },
         warning_feeder_empty: "Einzug leer.",
         warning_cover_open: "Abdeckung offen.",
         warning_feeder_ready_but_empty: "Einzug bereit, aber leer?",
@@ -752,4 +764,143 @@ fn status_warnings_are_drawn_and_never_disable_anything() {
     assert_eq!(state.warnings(), [Warning::CoverOpen]);
     let settings = Settings { source: Source::Feeder, ..Settings::default() };
     assert_eq!(rich().request(&settings), request_of(&rich(), settings));
+}
+
+// ---- page length ---------------------------------------------------------------------------------
+
+fn lengths(choices: &Choices, chosen: bool) -> Vec<(PageLength, LengthAvailability)> {
+    choices.length_choices(chosen).iter().map(|c| (c.value, c.availability)).collect()
+}
+
+#[test]
+fn the_page_length_options_follow_the_three_state_vocabulary() {
+    use LengthAvailability::{Available, Unavailable, Unconfirmed};
+    use LengthReason::{NoDetection, NoPageSize};
+    // Detection not published: enabled, quietly unconfirmed. Match page size needs a page size.
+    let unknown = rich();
+    assert_eq!(
+        lengths(&unknown, false),
+        [
+            (PageLength::Driver, Available),
+            (PageLength::MatchSize, Unavailable(NoPageSize)),
+            (PageLength::Detect, Unconfirmed),
+            (PageLength::Infer, Available),
+        ]
+    );
+    assert_eq!(lengths(&unknown, true)[1], (PageLength::MatchSize, Available));
+    // The scanner published its answer: present is enabled and confirmed; absent is disabled with a reason.
+    let present = Choices { detect_length: presence(Some(true)), ..rich() };
+    assert_eq!(lengths(&present, true)[2], (PageLength::Detect, Available));
+    let absent = Choices { detect_length: presence(Some(false)), ..rich() };
+    assert_eq!(lengths(&absent, true)[2], (PageLength::Detect, Unavailable(NoDetection)));
+    // Image inference and the driver default never depend on anything.
+    for choices in [&unknown, &present, &absent, &Choices::default()] {
+        for chosen in [false, true] {
+            let all = lengths(choices, chosen);
+            assert_eq!(all[0].1, Available);
+            assert_eq!(all[3].1, Available);
+        }
+    }
+}
+
+#[test]
+fn an_option_that_became_unavailable_falls_back_to_the_driver_default() {
+    let absent = Choices { detect_length: presence(Some(false)), ..rich() };
+    assert_eq!(absent.length_or_default(PageLength::Detect, true), PageLength::Driver);
+    assert_eq!(absent.length_or_default(PageLength::MatchSize, false), PageLength::Driver);
+    assert_eq!(absent.length_or_default(PageLength::MatchSize, true), PageLength::MatchSize);
+    assert_eq!(absent.length_or_default(PageLength::Infer, false), PageLength::Infer);
+    let mut s = Settings { page_length: PageLength::MatchSize, page_size_chosen: false, ..Settings::default() };
+    s.clamp(&rich());
+    assert_eq!(s.page_length, PageLength::Driver, "the page size was cleared, so the match goes");
+    let mut s = Settings { page_length: PageLength::Detect, ..Settings::default() };
+    s.clamp(&absent);
+    assert_eq!(s.page_length, PageLength::Driver);
+    let mut s = Settings { page_length: PageLength::Infer, ..Settings::default() };
+    s.clamp(&absent);
+    assert_eq!(s.page_length, PageLength::Infer);
+}
+
+#[test]
+fn the_request_carries_the_page_length_only_for_the_feeder_and_marks_unconfirmed_ones_as_hints() {
+    let feeder =
+        |length: PageLength, chosen: bool| Settings { source: Source::Feeder, page_length: length, page_size_chosen: chosen, ..Settings::default() };
+    let unknown = rich();
+    assert_eq!(unknown.request(&feeder(PageLength::Driver, false)).page_length, Sent::Value(PageLength::Driver));
+    assert_eq!(unknown.request(&feeder(PageLength::Detect, false)).page_length, Sent::Hint(PageLength::Detect));
+    assert_eq!(unknown.request(&feeder(PageLength::Infer, false)).page_length, Sent::Value(PageLength::Infer));
+    assert_eq!(unknown.request(&feeder(PageLength::MatchSize, true)).page_length, Sent::Value(PageLength::MatchSize));
+    assert_eq!(unknown.request(&feeder(PageLength::MatchSize, false)).page_length, Sent::Omitted);
+    let present = Choices { detect_length: presence(Some(true)), ..rich() };
+    assert_eq!(present.request(&feeder(PageLength::Detect, false)).page_length, Sent::Value(PageLength::Detect));
+    let absent = Choices { detect_length: presence(Some(false)), ..rich() };
+    assert_eq!(absent.request(&feeder(PageLength::Detect, false)).page_length, Sent::Omitted);
+    let glass = Settings { source: Source::Glass, page_length: PageLength::Infer, ..Settings::default() };
+    assert_eq!(unknown.request(&glass).page_length, Sent::Omitted, "the bed has a fixed length");
+    assert_eq!(PageLength::default(), PageLength::Driver);
+}
+
+#[test]
+fn the_length_labels_name_reasons_and_notes() {
+    let l = labels().length;
+    assert_eq!(l.option(PageLength::MatchSize), "Wie Seitengroesse");
+    assert_eq!(l.reason(LengthReason::NoPageSize), "Zuerst eine Seitengroesse waehlen.");
+    assert_eq!(l.reason(LengthReason::NoDetection), "Dieser Scanner erkennt die Laenge nicht.");
+    // The image guess is always shown with its note; an unconfirmed detection with the quiet one.
+    assert_eq!(l.note_for(PageLength::Infer, LengthAvailability::Available, "Nicht bestaetigt."), "Aus dem Bild geschaetzt, kann falsch sein.");
+    assert_eq!(l.note_for(PageLength::Detect, LengthAvailability::Unconfirmed, "Nicht bestaetigt."), "Nicht bestaetigt.");
+    assert_eq!(l.note_for(PageLength::Detect, LengthAvailability::Available, "Nicht bestaetigt."), "");
+    assert_eq!(l.note_for(PageLength::Driver, LengthAvailability::Available, "Nicht bestaetigt."), "");
+}
+
+fn labelled(tree: &egui::accesskit::TreeUpdate, text: &str) -> bool {
+    tree.nodes.iter().any(|(_, node)| node.label() == Some(text) || node.value() == Some(text))
+}
+
+#[test]
+fn the_page_length_row_is_drawn_for_the_feeder_and_hidden_for_the_bed() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let (discover, load) = workers();
+    let mut state = State::default();
+    state.settings.page_size_chosen = true;
+    state.settings.source = Source::Feeder;
+    let mut tree = None;
+    for _ in 0..4 {
+        let (_, output) = frame(&ctx, &mut state, &discover, &load, Vec::new());
+        tree = output.platform_output.accesskit_update.or(tree);
+    }
+    let tree = tree.expect("a frame with a tree");
+    assert!(labelled(&tree, "Seitenlaenge"), "the caption");
+    assert!(labelled(&tree, "Treiberstandard"), "the current choice");
+    assert_eq!(state.settings.page_length, PageLength::Driver);
+
+    let mut bed = State::default();
+    bed.settings.source = Source::Glass;
+    let mut tree = None;
+    for _ in 0..4 {
+        let (_, output) = frame(&ctx, &mut bed, &discover, &load, Vec::new());
+        tree = output.platform_output.accesskit_update.or(tree);
+    }
+    assert!(!labelled(&tree.expect("tree"), "Seitenlaenge"), "no page-length row on the bed");
+}
+
+#[test]
+fn drawing_resets_a_choice_the_scanner_or_the_page_size_rules_out() {
+    let ctx = egui::Context::default();
+    let (discover, load) = workers();
+    let mut state = State::default();
+    state.settings.source = Source::Feeder;
+    state.settings.page_length = PageLength::MatchSize;
+    state.settings.page_size_chosen = false;
+    for _ in 0..4 {
+        frame(&ctx, &mut state, &discover, &load, Vec::new());
+    }
+    assert_eq!(state.settings.page_length, PageLength::Driver);
+    state.settings.page_size_chosen = true;
+    state.settings.page_length = PageLength::MatchSize;
+    for _ in 0..2 {
+        frame(&ctx, &mut state, &discover, &load, Vec::new());
+    }
+    assert_eq!(state.settings.page_length, PageLength::MatchSize, "kept while a page size is chosen");
 }

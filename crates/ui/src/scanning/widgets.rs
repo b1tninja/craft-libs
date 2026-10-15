@@ -178,6 +178,35 @@ impl State {
                     quiet(ui, note);
                 });
                 ui.end_row();
+
+                // The page-length choice; it belongs to the feeder, so it follows the same rule as the rows above.
+                if in_play {
+                    let caption = ui.label(labels.length.heading);
+                    let value = choices.length_or_default(settings.page_length, settings.page_size_chosen);
+                    settings.page_length = value;
+                    ui.vertical(|ui| {
+                        egui::ComboBox::from_id_salt("page-length")
+                            .width(width.max(220.0).min(ui.available_width().max(32.0)))
+                            .selected_text(labels.length.option(value))
+                            .show_ui(ui, |ui| {
+                                for choice in choices.length_choices(settings.page_size_chosen) {
+                                    let shown = ui
+                                        .add_enabled_ui(choice.availability.is_enabled(), |ui| {
+                                            ui.selectable_value(&mut settings.page_length, choice.value, labels.length.option(choice.value))
+                                        })
+                                        .inner;
+                                    if let LengthAvailability::Unavailable(reason) = choice.availability {
+                                        shown.on_disabled_hover_text(labels.length.reason(reason));
+                                    }
+                                }
+                            })
+                            .response
+                            .labelled_by(caption.id);
+                        let availability = choices.length_availability(settings.page_length, settings.page_size_chosen);
+                        quiet(ui, labels.length.note_for(settings.page_length, availability, labels.unconfirmed_note));
+                    });
+                    ui.end_row();
+                }
             }
         });
         ui.horizontal_wrapped(|ui| {

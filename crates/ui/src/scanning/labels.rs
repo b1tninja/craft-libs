@@ -46,6 +46,8 @@ pub struct Labels<'a> {
     pub unconfirmed_note: &'a str,
     /// Why a specific option is unsupported, e.g. "No document feeder."
     pub reasons: Reasons<'a>,
+    /// The page-length row (feeder only).
+    pub length: LengthLabels<'a>,
     /// Status warnings (see [`Warning`]); they never disable a control.
     pub warning_feeder_empty: &'a str,
     pub warning_cover_open: &'a str,

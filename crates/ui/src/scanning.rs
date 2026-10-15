@@ -709,3 +709,6 @@ mod labels;
 mod widgets;
 
 pub use labels::{Labels, Reasons};
+
+#[cfg(test)]
+mod tests;

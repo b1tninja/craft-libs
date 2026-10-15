@@ -318,6 +318,59 @@ verify the actual pixels as well as callback routing.
 
 `text::align_galley_rows` positions already shaped rows inside a fixed-width reading area without changing glyphs or logical text. Supply a per-row alignment, for example the paragraph direction from the application shaper. The helper uses stock egui APIs and keeps cached glyph meshes shared. Its logical rectangle is the requested width; ink may overflow, so clip the painter when drawing cards. Use it for read-only painting, keeping the original galley for editable hit testing.
 
+## Scanner selection and settings
+
+`scanning::State` holds the selected scanner and capture `Settings` (scanner id, source, colour,
+resolution, page count, hardware duplex, last preset) plus the scanner list and the selected
+scanner's details. It uses its own light types (`Scanner`, `Connection`, `Source`, `Color`,
+`Choices`) and depends on no scanning backend: apps map their engine's types to these.
+
+Every option in `scanning::Choices` is a three-state `capability::Capability<T>` (see "Device
+capabilities"): the feeder, the glass, colour modes, resolutions, the page-count range, "until
+empty" and the duplex unit. The dialog treats the states differently: **supported** (the device
+published a list or range) is enabled and restricted to it, device default first; **unsupported**
+(a published list without it, or the unit is absent: no feeder, no duplex unit) is shown disabled
+with an app-worded reason, never hidden, and nothing is sent for it; **unknown** (not published, or
+the details read failed) is enabled with a quiet "not confirmed" line and sent only as a hint.
+`Auto` source falls to the glass when the feeder is unsupported. `Choices::default()` is all unknown
+(what applies when the details cannot be read). Capability is static; the device's status (feeder
+empty, cover open, "feeder reported ready but empty") is separate: `State::set_warnings` takes
+`Warning`s that are drawn as warnings and never disable a control. `Choices::request(&settings)`
+returns what to send as `Sent<T>` per option (`Omitted`, `Hint`, `Value`).
+
+Host mapping (the names match the printing dialog's `unsupported_reason` / `unconfirmed_note`):
+
+| Backend knows | Set | Result |
+|---|---|---|
+| feeder / glass / duplex present, absent or not reported | `presence(Some(true / false) / None)` | supported / unsupported / unknown |
+| list of resolutions or colours, empty list, no list | `Capability::from_option_list(Some(list) / Some(&[]) / None)`, or `list_default_first(list, default)` | supported / unsupported / unknown |
+| page limit | `Capability::from_option_range(Some((1, max)))` | range `1..=max` |
+| details read failed | `Choices::default()` (the library does this itself) | all unknown |
+| status | `State::set_warnings(vec![Warning::..])` | warnings only |
+| wording | `Labels::unsupported_reason`, `unconfirmed_note`, `reasons` (per option, optional), `warning_*` | the app's language |
+
+`Choices`, `Request`, `Sent` and `Warning` are `#[non_exhaustive]`: start from `Choices::default()`
+and assign fields.
+
+Hosts supply two workers that return `mpsc` receivers. `Discover` lists scanners and must open
+nothing; `LoadChoices` reads what ONE scanner supports and is called only for the selected scanner.
+Results are matched by generation and scanner id, so a slow answer for a scanner the user has left
+is dropped. If the details cannot be read (busy, driver error, worker stopped) the scanner stays
+listed and selected, `State::choices` returns the conservative `Choices::default()` and
+`Feedback::DetailsFailed` carries the backend sentence, so scanning stays possible; `retry` reads
+it again. A refresh keeps a still-listed selection and forgets the old details. With nothing
+remembered, the USB entry of a device that is also listed over the network is selected (names are
+compared without a trailing ` [..]` and ignoring case), otherwise the first.
+
+`State::show` takes a stable `egui::Id`, app-translated `Labels` and both workers. It draws only
+the device row (with a connection tag and a hover note from the pure `same_printer_note`) and the
+settings with preset buttons, and returns `Response { changed, refresh, retry }`. Apps render
+`State::feedback()` in their own words and own the Scan action, preview, interruptions, manual
+duplex flows, document handling, commands, theme and any pill styling. Wrap `show` in
+`add_enabled_ui` while a scan runs. `Settings::apply_preset` and `Settings::clamp` are pure: a
+colour mode the scanner lacks falls back to the first one it lists (the device default when
+published), and unknown or unsupported options leave the matching field alone.
+
 ## Device capabilities
 
 `capability::Capability<T>` is plain data for what a device says about one option, in three states

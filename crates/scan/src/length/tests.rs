@@ -400,3 +400,21 @@ fn presence_has_stable_wire_strings() {
     assert_eq!(names, ["unknown", "absent", "present"]);
     assert_eq!(Presence::default(), Presence::Unknown);
 }
+
+#[test]
+fn the_page_builder_gives_a_jpeg_the_formats_tolerance_even_with_default_options() {
+    let (dpi, width, height) = (200u32, 320usize, 1200usize);
+    let mut rng = Lcg(5);
+    let mut pixels = vec![255u8; width * height];
+    for row in 8..900 {
+        for col in 8..width - 8 {
+            pixels[row * width + col] = 255 - 6 - (rng.next() % 40) as u8;
+        }
+    }
+    let bytes = jpeg_of(width, height, &pixels, 90);
+    let plan = bw::LengthPlan { source: LengthSource::Driver, infer: Some(InferOptions::default()) };
+    let (page, _) = bw::page_for(&bytes, bw::PageRule { dpi, bw_threshold: None, length: plan });
+    assert_eq!(page.length.source, LengthSource::Inferred, "{:?}", page.length);
+    assert!(page.length.approximate && page.height < 940 && page.height > 880, "{}", page.height);
+    assert_eq!((page.format, page.width), ("jpeg", 320));
+}

@@ -25,6 +25,7 @@ mod backend;
 pub mod bmp;
 pub mod bw;
 mod contract;
+pub mod density;
 pub mod trace;
 
 pub use backend::{
@@ -996,7 +997,16 @@ pub struct Page {
     pub format: &'static str,
     pub width: u32,
     pub height: u32,
+    /// Resolution the DELIVERED image has, horizontally, in dots per inch: read from the file (BMP pels per metre,
+    /// PNG `pHYs`, JFIF/EXIF density, TIFF `XResolution`), see [`density`]. Falls back to [`Self::requested_dpi`]
+    /// only when the file carries nothing usable (no density, unit "none", zero or absurd values). The PDF page
+    /// size of a scan is `width / dpi * 72`, so this is the number to size a page with. It differs from the request
+    /// when the device caps the image size (a 300 dpi request answered at 150) or snaps to a supported step.
     pub dpi: u32,
+    /// The delivered resolution vertically (equal to [`Self::dpi`] unless the device sends non-square pixels).
+    pub dpi_y: u32,
+    /// The dpi the job asked for (`ScanSettings::dpi`), kept so callers can tell when the device delivered less.
+    pub requested_dpi: u32,
     /// A black-and-white request got deeper data from the driver, so this page was thresholded in
     /// software to a real 1-bit BMP (see [`bw`]). `false` for pages delivered as they came.
     pub thresholded: bool,
@@ -1667,8 +1677,8 @@ mod tests {
         assert_eq!(token.bytes_expected(), Some(1_000));
         token.set_transfer(Some(80), 800, None);
         assert_eq!(token.page_percent(), Some(80));
-        token.push_page(Page { bytes: vec![1], format: "bmp", width: 1, height: 1, dpi: 200, thresholded: false });
-        token.push_page(Page { bytes: vec![2], format: "bmp", width: 1, height: 1, dpi: 200, thresholded: false });
+        token.push_page(Page { bytes: vec![1], format: "bmp", width: 1, height: 1, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false });
+        token.push_page(Page { bytes: vec![2], format: "bmp", width: 1, height: 1, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false });
         assert_eq!(token.pages_done(), 2);
         assert_eq!(token.page_percent(), None, "a finished page clears in-page fill");
         let taken = token.take_pages();
@@ -1711,8 +1721,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("craft-scan-write-pages-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let pages = [
-            Page { bytes: b"BM-a".to_vec(), format: "bmp", width: 1, height: 1, dpi: 200, thresholded: false },
-            Page { bytes: b"BM-b".to_vec(), format: "bmp", width: 1, height: 1, dpi: 200, thresholded: false },
+            Page { bytes: b"BM-a".to_vec(), format: "bmp", width: 1, height: 1, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false },
+            Page { bytes: b"BM-b".to_vec(), format: "bmp", width: 1, height: 1, dpi: 200, dpi_y: 200, requested_dpi: 200, thresholded: false },
         ];
         let paths = super::write_pages(&dir, &pages).expect("write");
         assert_eq!(paths.len(), 2);
@@ -1996,7 +2006,7 @@ mod tests {
             message: "the feeder reported no more paper.".into(),
             acquired: Acquired {
                 source: Source::Feeder,
-                pages: vec![Page { bytes: Vec::new(), format: "bmp", width: 1, height: 1, dpi: 1, thresholded: false }],
+                pages: vec![Page { bytes: Vec::new(), format: "bmp", width: 1, height: 1, dpi: 1, dpi_y: 1, requested_dpi: 1, thresholded: false }],
             },
             cause: None,
         };

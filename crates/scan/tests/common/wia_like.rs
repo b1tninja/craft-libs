@@ -386,7 +386,16 @@ impl Backend for WiaLike {
     fn acquire(&self, settings: &ScanSettings) -> Result<Acquired, ScanError> {
         if settings.source == Source::Feeder && settings.pages > 1 {
             // One sheet in the tray: the first page arrives, then the driver answers busy.
-            let page = Page { bytes: bmp_24(2, 2), format: "bmp", width: 2, height: 2, dpi: settings.dpi, thresholded: false };
+            let page = Page {
+                bytes: bmp_24(2, 2),
+                format: "bmp",
+                width: 2,
+                height: 2,
+                dpi: settings.dpi,
+                dpi_y: settings.dpi,
+                requested_dpi: settings.dpi,
+                thresholded: false,
+            };
             let busy = explain_transfer_failure(error_from_hresult(0x8021_0006, ""), status_from_bits(0x1), true, 1, settings.pages as usize);
             let stop = craft_scan::after_transfer_checked(settings.pages as usize, true, 1, false, Some(busy)).err();
             return Err(match stop {
@@ -398,7 +407,16 @@ impl Backend for WiaLike {
                 None => ScanError::Failed("unexpected".into()),
             });
         }
-        let page = Page { bytes: bmp_24(2, 2), format: "bmp", width: 2, height: 2, dpi: settings.dpi, thresholded: false };
+        let page = Page {
+            bytes: bmp_24(2, 2),
+            format: "bmp",
+            width: 2,
+            height: 2,
+            dpi: settings.dpi,
+            dpi_y: settings.dpi,
+            requested_dpi: settings.dpi,
+            thresholded: false,
+        };
         Ok(Acquired { source: Source::Glass, pages: vec![page] })
     }
 }

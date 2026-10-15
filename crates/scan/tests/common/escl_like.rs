@@ -107,7 +107,16 @@ impl Backend for EsclLike {
                     cause: Some(Cause { kind: InterruptKind::Jam, native: Some(SERVICE_UNAVAILABLE) }),
                 });
             }
-            let page = Page { bytes: jpeg_gray(16, 8), format: "jpeg", width: 16, height: 8, dpi: settings.dpi, thresholded: false };
+            let page = Page {
+                bytes: jpeg_gray(16, 8),
+                format: "jpeg",
+                width: 16,
+                height: 8,
+                dpi: settings.dpi,
+                dpi_y: settings.dpi,
+                requested_dpi: settings.dpi,
+                thresholded: false,
+            };
             if let Some(progress) = &settings.progress {
                 progress.push_page(page.clone());
             }

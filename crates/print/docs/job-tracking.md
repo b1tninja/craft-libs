@@ -261,7 +261,7 @@ adapters do in this change.
 | States | as for CUPS (RFC 8011 `job-state`). |
 | Cancel | `Cancel-Job` (idempotent for ended jobs: "not possible" is treated as success). |
 | Forgetting | device-dependent: many printers keep a short history, some none. `Create-Job-Subscription` (optional, RFC 3995) would push changes; not used. |
-| Today | no IPP adapter in this crate. The `testing` module's IPP-like fake exercises the contract (list with creation time, tag in a native attribute). |
+| Today | `ipp::IppBackend` (name `ipp`, cargo feature `ipp`): the tag is a `job-name` suffix (`TagPlacement::JobNameSuffix`, cut to 255 bytes), `Get-Jobs` runs twice (`not-completed`, `completed`; a printer that refuses the second gives the active jobs alone), `job_query_caps` is all true (`created_time` from `date-time-at-creation`, else `time-at-creation` against `printer-up-time`). Details in [ipp.md](ipp.md). The `testing` module's IPP-like `FakeBackend` still exercises the contract at the trait level. |
 
 **Windows spooler.**
 
@@ -295,7 +295,7 @@ adapters do in this change.
 * No persistence: a `PrintJob` lives in the process that made it. The types are plain data and do
   not implement `serde` traits; adding that behind a feature later does not change them.
 * No threads or timers: the caller advances the job (the staleness rules run inside `advance`).
-* No IPP client, no CUPS or Windows-spooler listing (section 7: not testable here).
+* No CUPS or Windows-spooler listing (section 7: not testable here). IPP listing is the `ipp` backend's.
 * No change to the older `Registry::submit` / `submit_job` / `JobWatch` behaviour; a `PrintJob` is
   built on them.
 
@@ -315,7 +315,7 @@ them is a failure and **none resends**: a device that goes quiet may still print
 | held, stopped | never | an explicit hold has no timeout; jams and paper-out arrive at once in the printer's own reasons |
 | `ceiling` | 3 h from acceptance without a terminal state | `Terminal(Abandoned)`, advice `CheckDeviceFirst`; `view()` has `JobState::Abandoned` and the reason `abandoned-no-outcome` |
 | `dismiss()` / `dismiss_and_cancel(&Registry)` | by a person | the same end as the ceiling, earlier; the second first asks the device to cancel the job if the print has one (the cancel error is returned, the row is dismissed anyway) |
-| `reconcile_after` | 65 s, or the backend's `Backend::open_job_timeout` (WS-Print 65 s; the IPP-like fake 240 s) | after a send whose outcome is unknown, `retry_advice()` stays `CheckDeviceFirst` until the device has had its own window to end the half-made job; `PrintJob::reconcile_wait()` says how long is left |
+| `reconcile_after` | 65 s, or the backend's `Backend::open_job_timeout` (WS-Print 65 s; IPP the printer's own `multiple-operation-time-out` plus 5 s, else 240 s; the IPP-like fake 240 s) | after a send whose outcome is unknown, `retry_advice()` stays `CheckDeviceFirst` until the device has had its own window to end the half-made job; `PrintJob::reconcile_wait()` says how long is left |
 
 `Staleness::disabled()` switches all of it off, including the wait after a lost send: a failed watch then
 leaves the print `Accepted` as before (`refresh` resumes it).

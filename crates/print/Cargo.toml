@@ -13,16 +13,21 @@ craft-job.workspace = true
 craft-winprint-gdi = { git = "https://github.com/storytold/winprint.rs", rev = "417ac3c4d14d3da5485a99c7d5ce8f05664ec312" }
 
 [features]
-default = ["wsd"]
+default = ["wsd", "ipp"]
 # A WS-Print backend (`craft_print::wsd::WsdBackend`) for the registry. Its extra dependencies are
 # `craft-wsd` (and through it `thiserror` and `ureq`, a plain-http client with no TLS) and
 # `roxmltree`; nothing else, and none of them is built without the feature (or on wasm32).
 # Nothing in it discovers or connects until an app adds a printer; every job needs consent.
 # Without it the crate is CUPS and Windows printing only.
 wsd = ["dep:craft-wsd", "dep:roxmltree"]
+# An IPP print backend (`craft_print::ipp::IppBackend`) for the registry: RFC 8010/8011 over the
+# plain-HTTP transport and URL policy of `craft-wsd` (the only extra dependency, shared with `wsd`;
+# the IPP codec is this crate's own). No TLS (`ipps` is refused), no discovery; every job needs
+# consent. Not built on wasm32. Without it the crate is whole.
+ipp = ["dep:craft-wsd"]
 # Test doubles for apps that print through this crate: `craft_print::testing` (registry-level fake
-# backends) and, with `wsd`, `craft_print::wsd::testing` (an in-memory WS-Print printer, built on
-# craft-wsd's `testing` feature). Off by default; enabling it adds no dependency to a build
+# backends), with `wsd`, `craft_print::wsd::testing` (an in-memory WS-Print printer) and with `ipp`,
+# `craft_print::ipp::testing` (an in-memory IPP printer), both built on craft-wsd's `testing` feature. Off by default; enabling it adds no dependency to a build
 # without `wsd`, and none beyond craft-wsd's own `testing` feature with it. Never enable it in a
 # shipped binary.
 testing = ["craft-wsd?/testing"]

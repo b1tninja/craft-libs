@@ -718,6 +718,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-scan"
+version = "0.1.0"
+dependencies = [
+ "craft-job",
+ "image",
+ "log",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-settings"
 version = "0.1.0"
 dependencies = [
@@ -1969,6 +1979,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -88,6 +88,8 @@ struct Recorded {
     script: Vec<Result<JobStatus, PrintError>>,
     submit_script: Vec<SubmitStep>,
     jobs: Vec<RemoteJob>,
+    wakers: Vec<crate::WakeSender>,
+    push_healthy: bool,
 }
 
 #[derive(Clone)]
@@ -114,6 +116,7 @@ struct Config {
     created_at: Arc<dyn Fn() -> SystemTime + Send + Sync>,
     title_max: Option<usize>,
     open_job_timeout: Option<Duration>,
+    push: bool,
 }
 
 /// A configurable [`Backend`] for tests; see the [module documentation](self). Build it with
@@ -164,6 +167,7 @@ impl FakeBackend {
             created_at: Arc::new(SystemTime::now),
             title_max: None,
             open_job_timeout: None,
+            push: false,
         };
         Self { config: Arc::new(config), recorded: Arc::default() }
     }
@@ -313,6 +317,33 @@ impl FakeBackend {
     #[must_use]
     pub fn with_watch(self, watch: WatchSupport) -> Self {
         self.configured(|c| c.watch = watch)
+    }
+
+    /// Give the fake a push channel ([`Backend::wake_source`]): every watch gets a receiver, woken by
+    /// [`Self::wake_watches`] and trusted according to [`Self::set_push_healthy`] (initially
+    /// healthy). Models a backend whose device can say "something changed".
+    #[must_use]
+    pub fn with_push(self) -> Self {
+        lock(&self.recorded).push_healthy = true;
+        self.configured(|c| c.push = true)
+    }
+
+    /// Wake every receiver handed out by [`Backend::wake_source`]; returns how many still exist.
+    pub fn wake_watches(&self) -> usize {
+        lock(&self.recorded).wakers.iter().filter(|w| w.wake()).count()
+    }
+
+    /// Say whether the push channel is currently trusted, for the receivers handed out so far and
+    /// the ones handed out later.
+    pub fn set_push_healthy(&self, healthy: bool) {
+        let mut recorded = lock(&self.recorded);
+        recorded.push_healthy = healthy;
+        recorded.wakers.iter().for_each(|w| w.set_healthy(healthy));
+    }
+
+    /// How many push receivers are still held by a watch.
+    pub fn push_watchers(&self) -> usize {
+        lock(&self.recorded).wakers.iter().filter(|w| w.is_connected()).count()
     }
 
     #[must_use]
@@ -553,6 +584,18 @@ impl Backend for FakeBackend {
 
     fn watch_support(&self) -> WatchSupport {
         self.config.watch
+    }
+
+    fn wake_source(&self, _job: &JobId) -> Option<crate::WakeReceiver> {
+        if !self.config.push {
+            return None;
+        }
+        let (tx, rx) = crate::wake_channel();
+        let mut recorded = lock(&self.recorded);
+        tx.set_healthy(recorded.push_healthy);
+        recorded.wakers.retain(crate::WakeSender::is_connected);
+        recorded.wakers.push(tx);
+        Some(rx)
     }
 
     fn recommended_poll_interval(&self) -> Option<Duration> {

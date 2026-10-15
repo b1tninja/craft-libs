@@ -134,8 +134,10 @@ pub enum WatchSupport {
     None,
     /// Ask again every [`crate::backends::Backend::recommended_poll_interval`].
     Poll,
-    /// The device can push changes. Callers still poll at the (longer) recommended interval as a
-    /// safety net; no backend listens for events yet.
+    /// The device can push changes and the backend currently trusts the channel. A push is only a
+    /// wake-up ([`crate::backends::Backend::wake_source`]): status always comes from polling, and
+    /// a [`crate::JobWatch`] polls at its (longer) safety interval in between. The WS-Print
+    /// backend reports it only when the app opted in (`WsdBackend::with_events`).
     Events,
 }
 

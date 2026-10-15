@@ -21,6 +21,7 @@ use crate::job::{ExpectedTotalsExt as _, JobStatus, Submitted, WatchSupport};
 use crate::remote::{JobFilter, JobQueryCaps, Reconciled, RemoteJob};
 use crate::retry::Phase;
 use crate::tag::TagSupportExt as _;
+use crate::wake::WakeReceiver;
 use crate::watch::{JobWatch, WaitPolicy};
 
 /// Why [`Registry::register`] refused a backend.
@@ -540,7 +541,20 @@ impl Registry {
     pub fn job_watch(&self, job: &JobId, policy: WaitPolicy) -> Result<JobWatch, PrintError> {
         let backends = self.snapshot();
         let backend = Self::backend_of(&backends, job)?;
-        Ok(JobWatch::new(job.clone(), policy).with_support(backend.watch_support()).with_recommended_interval(backend.recommended_poll_interval()))
+        let watch =
+            JobWatch::new(job.clone(), policy).with_support(backend.watch_support()).with_recommended_interval(backend.recommended_poll_interval());
+        Ok(match backend.wake_source(job) {
+            Some(wake) => watch.with_wake(wake),
+            None => watch,
+        })
+    }
+
+    /// A push channel for the job, when its backend has one (see
+    /// [`crate::backends::Backend::wake_source`]). `None` for a backend without one and for an id
+    /// that names no backend.
+    pub fn wake_source(&self, job: &JobId) -> Option<WakeReceiver> {
+        let backends = self.snapshot();
+        Self::backend_of(&backends, job).ok()?.wake_source(job)
     }
 }
 

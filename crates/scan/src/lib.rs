@@ -46,7 +46,7 @@ pub use contract::{
 pub use craft_job::{HRESULT_DOMAIN, NativeCode, namespaced_id, split_id};
 pub use length::{
     InferOptions, Inference, Inferred, LengthRecord, LengthSource, PageLength, PageLengthSupport, Refusal, assess_sheet_end, infer_and_crop,
-    infer_sheet_end,
+    infer_sheet_end, mils_of, rows_for_mils,
 };
 
 /// Where the page sits.

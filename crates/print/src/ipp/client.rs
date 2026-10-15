@@ -90,6 +90,8 @@ pub const PRINTER_ATTRIBUTES: &[&str] = &[
     "printer-resolution-supported",
     "print-quality-supported",
     "print-content-optimize-supported",
+    "print-scaling-supported",
+    "print-scaling-default",
     "orientation-requested-supported",
     "multiple-operation-time-out",
     "printer-up-time",

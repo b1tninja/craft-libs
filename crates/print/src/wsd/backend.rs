@@ -43,7 +43,8 @@ const FORMATS: &[DocumentFormat] = &DocumentFormat::ALL;
 /// The `Job` and `JobOptions` settings this backend applies: copies, duplex, colour (chosen when the
 /// picture is made), and the print ticket's media size, orientation, quality and resolution (each
 /// still subject to the printer's own capability list and the ticket shape). Collation and scaling
-/// have no WS-Print setting, and driver keywords are a CUPS notion.
+/// have no WS-Print setting (the PrintTicket schema has no scaling element; `JobHint::Scaling` is
+/// therefore never honoured here), and driver keywords are a CUPS notion.
 const HONOURED: &[JobHint] =
     &[JobHint::Copies, JobHint::Duplex, JobHint::Colour, JobHint::Media, JobHint::Orientation, JobHint::Quality, JobHint::Resolution];
 

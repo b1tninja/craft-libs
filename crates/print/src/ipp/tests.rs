@@ -450,6 +450,47 @@ fn unlisted_settings_are_dropped_with_a_warning_in_lenient_mode() {
     assert_eq!(script.last().group(GroupTag::Job).unwrap().first_i32("copies"), Some(99));
 }
 
+fn scaling_printer() -> Group {
+    printer_group()
+        .with(Attribute::keywords("print-scaling-supported", &["auto", "auto-fit", "fill", "fit", "none"]))
+        .with(Attribute::keyword("print-scaling-default", "auto"))
+}
+
+#[test]
+fn shrink_to_fit_travels_as_print_scaling_to_a_printer_that_lists_it() {
+    let script = Script::new();
+    let b = backend(&script);
+    let shrink = Job { scaling: crate::Scaling::ShrinkToFit, ..job() };
+    script.ok(vec![scaling_printer()]).ok(accepted(21));
+    let submitted = registry(&b).submit_job(request(shrink.clone())).unwrap();
+    assert!(submitted.warnings.is_empty(), "{:?}", submitted.warnings);
+    assert_eq!(script.last().group(GroupTag::Job).unwrap().first_str("print-scaling"), Some("auto-fit"));
+    // Actual size is asked for explicitly because this printer's default is `auto`.
+    script.ok(vec![scaling_printer()]).ok(accepted(22));
+    registry(&b).submit_job(request(job())).unwrap();
+    assert_eq!(script.last().group(GroupTag::Job).unwrap().first_str("print-scaling"), Some("none"));
+    // The printer that does not publish the list gets nothing and the caller is told.
+    script.ok(vec![printer_group()]).ok(accepted(23));
+    let plain = registry(&b).submit_job(request(shrink)).unwrap();
+    assert!(plain.warnings.iter().any(|w| w.contains("scaling is not applied")), "{:?}", plain.warnings);
+    assert!(script.last().group(GroupTag::Job).is_none_or(|g| g.get("print-scaling").is_none()));
+}
+
+#[test]
+fn scaling_is_honoured_only_by_a_printer_that_lists_auto_fit() {
+    let script = Script::new();
+    let b = backend(&script);
+    script.ok(vec![scaling_printer()]);
+    let with = registry(&b).printer_details(&id()).unwrap().honoured.unwrap();
+    assert!(with.contains(&crate::JobHint::Scaling));
+    script.ok(vec![printer_group()]);
+    let without = registry(&b).printer_details(&id()).unwrap().honoured.unwrap();
+    assert!(!without.contains(&crate::JobHint::Scaling));
+    script.ok(vec![printer_group().with(Attribute::keywords("print-scaling-supported", &["none", "fit"]))]);
+    let listed = registry(&b).printer_details(&id()).unwrap().honoured.unwrap();
+    assert!(!listed.contains(&crate::JobHint::Scaling), "fit enlarges, so it is not shrink-to-fit");
+}
+
 #[test]
 fn a_big_document_goes_through_create_job_and_send_document() {
     let script = Script::new();

@@ -96,7 +96,8 @@ refused with `ErrorKind::UnsupportedFormat` before it is sent.
 | `JobOptions::colour`, `Job::grayscale` | `print-color-mode` = `color`, `monochrome`; auto sends nothing | `print-color-mode-supported`, `color-supported` (a colour request to a monochrome printer prints grey with a warning; strict: refused) |
 | title and idempotency tag | `job-name` = title + ` [ref xxxxxxxx]`, cut to 255 bytes with the tag kept; control characters (C0, DEL and C1) are removed from the title first, and a title left empty is sent as `Craft` | |
 | (backend) | `requesting-user-name` | |
-| `Job::scaling` shrink-to-fit, collation, driver options | not applied (a warning for scaling and driver options) | |
+| `Job::scaling` | `print-scaling` (PWG 5100.13) = `auto-fit` for shrink-to-fit, `none` for actual size | `print-scaling-supported` / `print-scaling-default`. Sent only to a printer that lists the keyword. Shrink-to-fit to a printer that publishes no list, or a list without `auto-fit`, is not sent: warning "scaling is not applied: the document is sent as it is" (strict: refused when a list is published without the keyword; a printer that publishes nothing is still a warning). `fit` is not substituted (it also enlarges). Actual size is the neutral default and is sent as `none` only when the printer lists it and its `print-scaling-default` is something else. `JobHint::Scaling` is in `honoured` exactly when the printer lists `auto-fit`; otherwise scaling is reported as not honoured |
+| collation, driver options | not applied (a warning for driver options) | |
 
 The rule for "listed" is the WS-Print layer's: a setting is dropped (with a warning) or refused (strict)
 only when the printer **publishes** the list and the value is not in it. A list the printer does not publish
@@ -213,7 +214,7 @@ every prefix of a message and every single-byte corruption.
 * **IPP subscriptions** (`Create-Job-Subscription`, `Get-Notifications`): status is polled.
 * **Discovery** (mDNS, DNS-SD, SNMP): the app adds printers.
 * Compression of the document, `Send-Uri`, multi-document jobs, `Hold-Job` and the other operations.
-* Collation, scaling (`print-scaling`) and vendor job options.
+* Collation, the other `print-scaling` keywords (`auto`, `fit`, `fill`) and vendor job options.
 * Not verified against real printers or a CUPS server (the Windows development machines have none).
 
 ## Tests, and where the fake printer is

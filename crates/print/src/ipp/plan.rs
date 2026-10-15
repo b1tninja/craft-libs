@@ -51,6 +51,50 @@ pub fn quality_value(q: Quality) -> i32 {
     }
 }
 
+/// The `print-scaling` keyword (PWG 5100.13 section 5.2.7) of the neutral scaling: `auto-fit` for
+/// [`Scaling::ShrinkToFit`] (oversized pages are fitted, pages that already fit stay as they are,
+/// the meaning of the neutral setting; `fit` would also enlarge, so it is not substituted) and
+/// `none` for [`Scaling::Exact`] (the actual size).
+pub fn scaling_keyword(scaling: Scaling) -> &'static str {
+    match scaling {
+        Scaling::Exact => "none",
+        Scaling::ShrinkToFit => "auto-fit",
+    }
+}
+
+/// Whether the printer says it takes [`Scaling::ShrinkToFit`] (lists `auto-fit`).
+pub fn scaling_advertised(printer: &PrinterAttrs) -> bool {
+    printer.supports_scaling(scaling_keyword(Scaling::ShrinkToFit)) == Some(true)
+}
+
+/// The scaling attribute to send, if any. Nothing is sent to a printer that has not said it takes
+/// `print-scaling`: shrink-to-fit is then a warning (a refusal in strict mode when the printer
+/// publishes a list without the keyword, as for the other settings) and the document goes as it is.
+/// Actual size is the default of the neutral job; `none` is sent only to a printer that lists it
+/// and whose own default is something else.
+fn plan_scaling(scaling: Scaling, strict: bool, printer: &PrinterAttrs, warnings: &mut Vec<String>) -> Result<Option<&'static str>> {
+    let keyword = scaling_keyword(scaling);
+    match scaling {
+        Scaling::ShrinkToFit => match printer.supports_scaling(keyword) {
+            Some(true) => Ok(Some(keyword)),
+            Some(false) if strict => Err(IppError::Unsupported(format!("print-scaling {keyword}"))),
+            Some(false) => {
+                warnings.push(format!("scaling is not applied: the printer does not list print-scaling {keyword}; the document is sent as it is"));
+                Ok(None)
+            }
+            None => {
+                warnings
+                    .push("scaling is not applied: the document is sent as it is (the printer does not publish print-scaling-supported)".to_owned());
+                Ok(None)
+            }
+        },
+        Scaling::Exact => {
+            let differs = printer.scaling_default.as_deref().is_some_and(|d| d != keyword);
+            Ok((differs && printer.supports_scaling(keyword) == Some(true)).then_some(keyword))
+        }
+    }
+}
+
 fn keep(strict: bool, what: &str, supported: Option<bool>, warnings: &mut Vec<String>) -> Result<bool> {
     match supported {
         Some(false) if strict => Err(IppError::Unsupported(what.to_owned())),
@@ -71,9 +115,7 @@ pub fn plan(job_name: String, document_mime: &str, job: &Job, per_job: &JobOptio
     if printer.lists_format(document_mime) == Some(false) {
         return Err(IppError::UnsupportedFormat { document: document_mime.to_owned(), accepted: printer.formats.clone() });
     }
-    if job.scaling == Scaling::ShrinkToFit {
-        warnings.push("scaling is not applied: the document is sent as it is".to_owned());
-    }
+    let scaling = plan_scaling(job.scaling, strict, printer, &mut warnings)?;
     if !job.options.is_empty() {
         warnings.push("driver options are not applied by IPP".to_owned());
     }
@@ -169,6 +211,9 @@ pub fn plan(job_name: String, document_mime: &str, job: &Job, per_job: &JobOptio
         Some(true) => {}
         None => {}
     }
+    if let Some(keyword) = scaling {
+        attributes.push(Attribute::keyword("print-scaling", keyword));
+    }
     Ok(Plan {
         request: JobRequest { job_name, document_name: None, document_format: Some(document_mime.to_owned()), fidelity: strict, attributes },
         warnings,
@@ -230,6 +275,70 @@ mod tests {
         assert_eq!(get("printer-resolution"), [Value::Resolution { cross_feed: 600, feed: 600, units: 3 }]);
         assert_eq!(get("print-color-mode"), [Value::Keyword("color".into())]);
         assert!(planned.warnings.is_empty(), "{:?}", planned.warnings);
+    }
+
+    fn scaled(set: Option<&[&str]>, default: Option<&str>) -> PrinterAttrs {
+        PrinterAttrs { scaling: set.map(|s| s.iter().map(|k| (*k).to_owned()).collect()), scaling_default: default.map(str::to_owned), ..printer() }
+    }
+
+    fn scaling_of(plan: &Plan) -> Option<Vec<Value>> {
+        plan.request.attributes.iter().find(|a| a.name == "print-scaling").map(|a| a.values.clone())
+    }
+
+    #[test]
+    fn scaling_keywords_follow_pwg_5100_13() {
+        assert_eq!(scaling_keyword(Scaling::ShrinkToFit), "auto-fit");
+        assert_eq!(scaling_keyword(Scaling::Exact), "none");
+    }
+
+    #[test]
+    fn shrink_to_fit_is_sent_as_auto_fit_to_a_printer_that_lists_it() {
+        let shrink = Job { scaling: Scaling::ShrinkToFit, ..Job::default() };
+        for strict in [false, true] {
+            let p = run(&shrink, &JobOptions::new(), strict, &scaled(Some(&["auto", "auto-fit", "fit", "fill", "none"]), Some("auto"))).unwrap();
+            assert_eq!(scaling_of(&p), Some(vec![Value::Keyword("auto-fit".into())]));
+            assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        }
+        assert!(scaling_advertised(&scaled(Some(&["auto-fit"]), None)));
+        assert!(!scaling_advertised(&scaled(Some(&["none", "fit"]), None)));
+        assert!(!scaling_advertised(&scaled(None, None)));
+    }
+
+    #[test]
+    fn shrink_to_fit_without_the_keyword_is_dropped_with_a_warning_or_refused_when_strict() {
+        let shrink = Job { scaling: Scaling::ShrinkToFit, ..Job::default() };
+        // Published list without auto-fit; `fit` is not a substitute (it enlarges).
+        let listed = scaled(Some(&["none", "fit"]), Some("none"));
+        let p = run(&shrink, &JobOptions::new(), false, &listed).unwrap();
+        assert_eq!(scaling_of(&p), None);
+        assert!(p.warnings.iter().any(|w| w.contains("scaling is not applied") && w.contains("auto-fit")), "{:?}", p.warnings);
+        assert!(matches!(run(&shrink, &JobOptions::new(), true, &listed), Err(IppError::Unsupported(_))));
+    }
+
+    #[test]
+    fn shrink_to_fit_is_not_sent_to_a_printer_that_never_said_it_takes_it() {
+        let shrink = Job { scaling: Scaling::ShrinkToFit, ..Job::default() };
+        for strict in [false, true] {
+            let p = run(&shrink, &JobOptions::new(), strict, &scaled(None, None)).unwrap();
+            assert_eq!(scaling_of(&p), None);
+            assert_eq!(p.warnings.len(), 1);
+            assert!(p.warnings[0].starts_with("scaling is not applied: the document is sent as it is"), "{:?}", p.warnings);
+        }
+        let bare = run(&shrink, &JobOptions::new(), false, &PrinterAttrs::default()).unwrap();
+        assert_eq!((scaling_of(&bare), bare.warnings.len()), (None, 1));
+    }
+
+    #[test]
+    fn actual_size_sends_none_only_where_the_default_differs() {
+        let exact = Job::default();
+        let sent = |set: Option<&[&str]>, default: Option<&str>| scaling_of(&run(&exact, &JobOptions::new(), false, &scaled(set, default)).unwrap());
+        assert_eq!(sent(Some(&["auto", "none"]), Some("auto")), Some(vec![Value::Keyword("none".into())]));
+        assert_eq!(sent(Some(&["auto", "none"]), Some("none")), None, "already the default");
+        assert_eq!(sent(Some(&["auto", "none"]), None), None, "default unknown: nothing assumed");
+        assert_eq!(sent(Some(&["auto", "fit"]), Some("auto")), None, "none not listed");
+        assert_eq!(sent(None, Some("auto")), None);
+        let p = run(&exact, &JobOptions::new(), true, &scaled(Some(&["auto"]), Some("auto"))).unwrap();
+        assert!(p.warnings.is_empty());
     }
 
     #[test]

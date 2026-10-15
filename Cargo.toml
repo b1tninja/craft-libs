@@ -24,6 +24,7 @@ craft-cms = { path = "crates/cms" }
 craft-job = { path = "crates/job" }
 craft-print = { path = "crates/print" }
 craft-quit = { path = "crates/quit" }
+craft-scan = { path = "crates/scan" }
 craft-settings = { path = "crates/settings" }
 craft-ui = { path = "crates/ui" }
 craft-wsd = { path = "crates/wsd" }

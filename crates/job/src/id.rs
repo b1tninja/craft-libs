@@ -67,6 +67,8 @@ impl std::error::Error for ParseIdError {}
 
 /// A validated backend registry name: one or more of `a-z`, `0-9`, `-`, `_`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(into = "String", try_from = "String"))]
 pub struct BackendName(String);
 
 impl BackendName {
@@ -83,6 +85,22 @@ impl BackendName {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+#[cfg(feature = "serde")]
+impl From<BackendName> for String {
+    fn from(value: BackendName) -> String {
+        value.0
+    }
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<String> for BackendName {
+    type Error = ParseIdError;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::new(text)
     }
 }
 
@@ -117,6 +135,8 @@ macro_rules! namespaced_type {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
         #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        #[cfg_attr(feature = "serde", serde(into = "String", try_from = "String"))]
         pub struct $name {
             backend: String,
             native: String,
@@ -156,6 +176,22 @@ macro_rules! namespaced_type {
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(f, "{}:{}", self.backend, self.native)
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl From<$name> for String {
+            fn from(value: $name) -> String {
+                value.to_string()
+            }
+        }
+
+        #[cfg(feature = "serde")]
+        impl TryFrom<String> for $name {
+            type Error = ParseIdError;
+
+            fn try_from(text: String) -> Result<Self, Self::Error> {
+                text.parse()
             }
         }
 

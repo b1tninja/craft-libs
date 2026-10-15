@@ -6,6 +6,8 @@
 /// The domain a job belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum JobKind {
     Print,
     Scan,
@@ -24,6 +26,8 @@ impl JobKind {
 /// The overall state of a job, as one value a UI can show for either kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum JobState {
     /// Accepted or queued; nothing has happened yet.
     Pending,
@@ -46,6 +50,7 @@ pub enum JobState {
     NeedsAttention,
     /// The device did not say.
     #[default]
+    #[cfg_attr(feature = "serde", serde(other))]
     Unknown,
 }
 
@@ -81,6 +86,8 @@ impl JobState {
 /// there will be. A UI shows a determinate bar when `total` is `Some` and an indeterminate one
 /// otherwise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct Progress {
     pub done: u32,
     pub total: Option<u32>,
@@ -123,6 +130,8 @@ impl Progress {
 
 /// The totals a caller expects for a job, used only where the device reports none.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct ExpectedTotals {
     /// Pages of the document.
     pub pages: Option<u32>,

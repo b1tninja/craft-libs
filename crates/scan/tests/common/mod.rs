@@ -12,7 +12,7 @@ pub mod escl_like;
 pub mod sane_like;
 pub mod wia_like;
 
-use craft_scan::{Connection, HandlingStatus, ScanSettings, Scanner, Source};
+use craft_scan::{Connection, HandlingStatus, Reported, ScanSettings, Scanner, Source};
 
 /// A scanner row with nothing published but its identity; tests set what they need.
 pub fn scanner(id: &str, name: &str) -> Scanner {
@@ -34,6 +34,7 @@ pub fn scanner(id: &str, name: &str) -> Scanner {
         sheet: None,
         glass: None,
         feeder_choices: None,
+        reported: Reported::default(),
     }
 }
 

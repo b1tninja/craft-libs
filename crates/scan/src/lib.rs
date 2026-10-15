@@ -1,7 +1,7 @@
 //! Image acquisition from a scanner.
 //!
 //! A platform scanner backend (for example Windows WIA, which needs `unsafe` COM calls) is not in
-//! this crate: it lives in the app and is plugged in through `Backend` and `register`. This crate
+//! this crate: it lives in the app and is plugged in through [`Backend`] and [`register`]. This crate
 //! holds the shared types and rules and has no unsafe code. The backend's `scanners` connects and reads
 //! properties; a device that fails to open is left out, and the others are still returned. It does
 //! not feed paper. Its `acquire` does: it pulls sheets from the feeder, or reads the glass, and
@@ -21,11 +21,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod backend;
 pub mod bmp;
 pub mod bw;
 mod contract;
 pub mod trace;
 
+pub use backend::{
+    Backend, BackendError, Listing, RegisterError, Registry, acquire, backend_names, diagnostic_dump, global, register, scanner_details,
+    scanner_list, scanners, status, supported,
+};
 pub use contract::{
     Compression, ErrorContext, ImageFormat, ListDetails, NativeCodeExt, ParseWireError, Phase, Recovery, ScanErrorInfo, contract_json, recovery,
 };
@@ -382,7 +387,7 @@ impl Connection {
 
 /// What a backend can say about the paper path before a scan. Every flag is "set only when the
 /// backend reported it": a `false` is not a promise that nothing is wrong, and a backend that cannot
-/// preflight at all returns `None` from `Backend::status` instead of a status of `false`s.
+/// preflight at all returns `None` from [`Backend::status`] instead of a status of `false`s.
 ///
 /// The feeder is the one three-state flag, because it drives decisions: `Some(true)` paper is
 /// loaded, `Some(false)` the backend knows the feeder is empty (an eSCL `AdfState` of empty), and

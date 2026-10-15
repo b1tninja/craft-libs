@@ -26,11 +26,12 @@ pub mod bmp;
 pub mod bw;
 mod contract;
 pub mod density;
+pub mod job;
 pub mod trace;
 
 pub use backend::{
     Backend, BackendError, Listing, RegisterError, Registry, acquire, backend_names, diagnostic_dump, global, register, scanner_details,
-    scanner_list, scanners, status, supported,
+    scanner_list, scanners, status, supported, tag_support,
 };
 pub use contract::{
     Compression, ErrorContext, ImageFormat, ListDetails, NativeCodeExt, ParseWireError, Phase, Recovery, ScanErrorInfo, contract_json, recovery,
@@ -828,6 +829,110 @@ pub struct Scanner {
     pub sheet: Option<(u32, u32)>,
     pub glass: Option<ImageChoices>,
     pub feeder_choices: Option<ImageChoices>,
+    /// What the driver actually answered. `Reported::default()` (nothing answered) makes every plain
+    /// `bool` and empty list above read as "unknown" through the `*_presence` methods.
+    pub reported: Reported,
+}
+
+/// Whether a device has something. A plain `false` or empty list cannot say which of the last two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Presence {
+    /// The driver did not say (or the read failed).
+    #[default]
+    Unknown,
+    /// The driver answered and the device does not have it.
+    Absent,
+    /// The device has it.
+    Present,
+}
+
+/// One list or range option of an item ([`ImageChoices`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChoiceField {
+    Dpi,
+    Colors,
+    Brightness,
+    Contrast,
+    Threshold,
+    Rotation,
+    Formats,
+    Compression,
+    Intents,
+    PageSizes,
+}
+
+/// What a backend could actually read, so a consumer can tell "the driver published nothing for
+/// this" from "the driver was not asked or the read failed". All defaults mean "unknown".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Reported {
+    /// The document-handling capability bits were read, so `feeder`, `flatbed` and `duplex` being
+    /// `false` mean "absent" and not "not read". A `true` is always a positive answer.
+    pub units: bool,
+    /// Options of the glass item whose property storage was read and had no such property.
+    pub glass_absent: Vec<ChoiceField>,
+    /// The same for the feeder item.
+    pub feeder_absent: Vec<ChoiceField>,
+}
+
+impl ImageChoices {
+    fn has(&self, field: ChoiceField) -> bool {
+        match field {
+            ChoiceField::Dpi => !self.dpi.is_empty(),
+            ChoiceField::Colors => !self.colors.is_empty(),
+            ChoiceField::Brightness => self.brightness.is_some(),
+            ChoiceField::Contrast => self.contrast.is_some(),
+            ChoiceField::Threshold => self.threshold.is_some(),
+            ChoiceField::Rotation => !self.rotation.is_empty(),
+            ChoiceField::Formats => !self.formats.is_empty(),
+            ChoiceField::Compression => !self.compression.is_empty(),
+            ChoiceField::Intents => !self.intents.is_empty(),
+            ChoiceField::PageSizes => !self.page_sizes.is_empty(),
+        }
+    }
+}
+
+impl Scanner {
+    fn unit_presence(&self, present: bool) -> Presence {
+        match (present, self.reported.units) {
+            (true, _) => Presence::Present,
+            (false, true) => Presence::Absent,
+            (false, false) => Presence::Unknown,
+        }
+    }
+
+    /// Automatic document feeder: present, absent (the capability bits were read without it) or unknown.
+    pub fn feeder_presence(&self) -> Presence {
+        self.unit_presence(self.feeder)
+    }
+
+    pub fn flatbed_presence(&self) -> Presence {
+        self.unit_presence(self.flatbed)
+    }
+
+    /// Hardware duplex unit.
+    pub fn duplex_presence(&self) -> Presence {
+        self.unit_presence(self.duplex)
+    }
+
+    /// Whether the glass or feeder item lists `field`. `Present` when it has values; `Absent` when
+    /// the backend recorded that the item had no such property (or the unit itself is absent);
+    /// otherwise `Unknown`, including when the item was never read (`None`). `Source::Auto` asks
+    /// the glass.
+    pub fn choice_presence(&self, source: Source, field: ChoiceField) -> Presence {
+        let (item, absent, unit) = match source {
+            Source::Feeder => (&self.feeder_choices, &self.reported.feeder_absent, self.feeder_presence()),
+            Source::Glass | Source::Auto => (&self.glass, &self.reported.glass_absent, self.flatbed_presence()),
+        };
+        if item.as_ref().is_some_and(|choices| choices.has(field)) {
+            Presence::Present
+        } else if unit == Presence::Absent || absent.contains(&field) {
+            Presence::Absent
+        } else {
+            Presence::Unknown
+        }
+    }
 }
 
 /// A scanner as the device list shows it. Read without opening the device.
@@ -1949,5 +2054,74 @@ mod tests {
         // An error that carries its kind never goes through the sentence.
         let native = ScanError::native_error(K::Offline, NativeCode::new("x", 1, None), "the scanner has a paper jam");
         assert_eq!(native.interrupt_kind(), K::Offline);
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    #[test]
+    fn a_plain_false_is_unknown_until_the_backend_says_it_read_the_bits() {
+        let mut scanner = Scanner {
+            id: String::new(),
+            name: String::new(),
+            feeder: false,
+            flatbed: true,
+            duplex: false,
+            feeder_ready: None,
+            handling_status: HandlingStatus::default(),
+            feeder_capacity: None,
+            connection: Connection::Unknown,
+            port: None,
+            optical_x: None,
+            optical_y: None,
+            pages: None,
+            bed: None,
+            sheet: None,
+            glass: None,
+            feeder_choices: None,
+            reported: Reported::default(),
+        };
+        assert_eq!((scanner.feeder_presence(), scanner.duplex_presence()), (Presence::Unknown, Presence::Unknown));
+        assert_eq!(scanner.flatbed_presence(), Presence::Present, "a true is always an answer");
+        scanner.reported.units = true;
+        assert_eq!((scanner.feeder_presence(), scanner.duplex_presence()), (Presence::Absent, Presence::Absent));
+        scanner.feeder = true;
+        assert_eq!(scanner.feeder_presence(), Presence::Present);
+    }
+
+    #[test]
+    fn a_list_is_present_when_it_has_values_absent_when_recorded_missing_and_unknown_otherwise() {
+        let mut scanner = Scanner {
+            id: String::new(),
+            name: String::new(),
+            feeder: true,
+            flatbed: true,
+            duplex: false,
+            feeder_ready: None,
+            handling_status: HandlingStatus::default(),
+            feeder_capacity: None,
+            connection: Connection::Unknown,
+            port: None,
+            optical_x: None,
+            optical_y: None,
+            pages: None,
+            bed: None,
+            sheet: None,
+            glass: Some(ImageChoices { dpi: vec![300], ..ImageChoices::default() }),
+            feeder_choices: None,
+            reported: Reported::default(),
+        };
+        let glass = |s: &Scanner, f| s.choice_presence(Source::Glass, f);
+        assert_eq!(glass(&scanner, ChoiceField::Dpi), Presence::Present);
+        assert_eq!(glass(&scanner, ChoiceField::Formats), Presence::Unknown, "an empty list alone is not an answer");
+        assert_eq!(scanner.choice_presence(Source::Feeder, ChoiceField::Dpi), Presence::Unknown, "item never read");
+        scanner.reported.glass_absent.push(ChoiceField::Formats);
+        assert_eq!(glass(&scanner, ChoiceField::Formats), Presence::Absent);
+        assert_eq!(glass(&scanner, ChoiceField::Colors), Presence::Unknown);
+        scanner.feeder = false;
+        scanner.reported.units = true;
+        assert_eq!(scanner.choice_presence(Source::Feeder, ChoiceField::Dpi), Presence::Absent, "no feeder, nothing to list");
     }
 }

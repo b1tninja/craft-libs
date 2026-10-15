@@ -32,6 +32,8 @@ craft-<name> = { git = "https://github.com/storytold/craft-libs", rev = "<commit
 - [`craft-job`](crates/job/README.md): the small vocabulary printing and scanning share: `NativeCode`, `<backend>:<native>` job and device ids, and retry safety with one retry-advice function. No lifecycle, tracking or I/O.
 - [`craft-print`](crates/print/README.md): PDF submission to CUPS and Windows, printer discovery,
   duplex/copies/colour and driver preferences. PDF generation stays in each app.
+  A registry of print backends, with a WS-Print network backend (cargo feature `wsd`, on by default;
+  it lists only printers the app adds and needs consent per job).
 
 - [`craft-quit`](crates/quit/src/lib.rs): native macOS quit, egui close handling and an optional
   app menu. Unsaved-document decisions and save prompts stay in each app.

@@ -550,8 +550,9 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   size, and both are centred. Both are done by appending an incremental update to the PDF
   (new versions of the pages that need it, the original bytes untouched); the crate reads
   only cross-reference sections, object streams and the page tree for this, leniently and
-  with every size bounded. Encrypted PDFs can be turned but not reframed. Annotations on a
-  reframed page are dropped; print-ready PDFs have them flattened. Nondefault or invalid
+  with every size bounded. Encrypted PDFs can be turned but not reframed. Annotations that print
+  nothing (Link, Popup, Hidden, or without the Print flag) are dropped from a reframed page; a
+  printable one is refused, so print-ready PDFs have those flattened. Nondefault or invalid
   `/UserUnit` is refused because the native renderer does not reliably honor physical units.
   Parsing caps cumulative cross-reference/object-stream records at 500,000, decoded streams
   at 16 MiB each and 32 MiB per job, and parsed nodes/tokens at 250,000/16 MiB per job and
@@ -586,15 +587,20 @@ a driver paper-size mismatch. On Windows `command_preview` describes the in-proc
 (`xps-print`, then the printer and options as `key=value`) instead of a command line. The crate
 does not provide PostScript output, separations, trapping or colour-managed device rendering.
 
-Windows shrink-to-fit refuses pages with annotations when their geometry needs fitting.
-Callers must flatten annotation appearances into page content first. Exact-size printing and
-rotation retain the annotations. This avoids losing printed comments, forms or other marks.
-The Windows renderer uses viewer visibility. Native submission therefore accepts only plain
-visible printable annotation flags (`F=4`); annotations without Print, with NoView, or with
-other visibility/rotation flags require caller flattening. This prevents printing comments
-that were marked nonprinting or omitting print-only marks. A visible Square appearance with
-`F=4` was rendered in the Windows qualification fixture; other appearance types still need
-their own fidelity checks.
+Annotations are sorted into silent (they print nothing: Link or Popup, flagged Hidden, or
+without the Print flag) and printable. Windows shrink-to-fit drops the annotations of a page
+whose annotations are all silent (hyperlinks do not stop a document from being fitted) and
+refuses a page with a printable one, naming its subtype, because its appearance lives outside
+the page content and would stay at the old coordinates; callers flatten such annotations
+first. Exact-size printing and rotation retain the annotations. The Windows renderer uses
+viewer visibility (not Hidden, not NoView) and ignores the Print flag. Native submission
+therefore accepts annotations that print nothing and draw nothing (Link and Popup, Hidden,
+NoView without Print) and plain printable ones (`F=4` with the Print flag and no NoZoom or
+NoRotate); an annotation the file says not to print but a viewer shows (no Print flag), one
+with NoView and Print, or one with NoZoom/NoRotate is refused for caller flattening. This
+prevents printing comments that were marked nonprinting or omitting print-only marks. A
+visible Square appearance with `F=4` was rendered in the Windows qualification fixture; other
+appearance types still need their own fidelity checks.
 
 Native Windows PDF submission checks the driver's validated copy count and explicit
 simplex/duplex and grayscale requests before sending. Collation must be retained when both

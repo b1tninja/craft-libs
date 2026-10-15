@@ -3,11 +3,15 @@
 /// One document: what a print job sends or a scan job produced.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DocumentRef {
     pub name: String,
     /// A format label or media type (`"pdf"`, `"image/jpeg"`), as the domain crate names it.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub format: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub pages: Option<u32>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub bytes: Option<u64>,
 }
 
@@ -37,6 +41,7 @@ impl DocumentRef {
 
 /// The documents of one job: a small ordered list.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct JobDocuments(Vec<DocumentRef>);
 
 impl JobDocuments {

@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// A point in time as milliseconds since the Unix epoch. One type for every timestamp on a job.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Timestamp(u64);
 
 impl Timestamp {
@@ -44,6 +45,8 @@ impl Timestamp {
 /// When things happened to a job. Every field is optional: a device may not say.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default))]
 pub struct JobTimes {
     pub created: Option<Timestamp>,
     pub started: Option<Timestamp>,

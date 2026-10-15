@@ -46,6 +46,8 @@
 //! a noiseless scan cannot be told from paper; JPEG smooths small noise away, so JPEG pages are refused
 //! more often.
 
+#[cfg(doc)]
+use crate::ScanSettings;
 use crate::{Page, PageSize, Presence};
 
 /// What the caller asks for as the page length. See the [module documentation](self).

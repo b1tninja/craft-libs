@@ -27,6 +27,8 @@ impl std::error::Error for TagError {}
 /// A short token, 8 lowercase hex characters, shown in a job title as ` [ref abc123de]`. No random
 /// number generator is used: the caller supplies the seed ([`Self::from_seed`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(into = "String", try_from = "String"))]
 pub struct Tag([u8; HEX_LEN]);
 
 impl Tag {
@@ -84,6 +86,22 @@ impl Tag {
     }
 }
 
+#[cfg(feature = "serde")]
+impl From<Tag> for String {
+    fn from(value: Tag) -> String {
+        value.as_str().to_string()
+    }
+}
+
+#[cfg(feature = "serde")]
+impl TryFrom<String> for Tag {
+    type Error = TagError;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text)
+    }
+}
+
 impl fmt::Display for Tag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -101,6 +119,8 @@ impl FromStr for Tag {
 /// Where a backend can put a [`Tag`] so it comes back when jobs are listed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum TagPlacement {
     /// Appended to the job name (the title the queue shows).
     JobNameSuffix,
@@ -109,12 +129,15 @@ pub enum TagPlacement {
     /// In a native attribute the protocol has for it.
     NativeAttribute,
     /// Nowhere.
+    #[cfg_attr(feature = "serde", serde(other))]
     None,
 }
 
 /// Whether a backend can carry a [`Tag`] through to a job listing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum TagSupport {
     /// No: listings cannot show the tag (WIA has no job tag at all).
     None,
@@ -143,12 +166,16 @@ impl TagSupport {
 /// the user, when it was sent and the tag, if one was placed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Fingerprint {
     pub title: String,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub user: Option<String>,
     pub submitted: Timestamp,
     /// How far from `submitted` a device's creation time may be and still match (clock skew). On the wire: milliseconds.
+    #[cfg_attr(feature = "serde", serde(with = "crate::wire::duration_ms", default = "crate::wire::default_window"))]
     pub window: Duration,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub tag: Option<Tag>,
 }
 

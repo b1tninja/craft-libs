@@ -266,6 +266,17 @@ Host mapping (the names match the printing dialog's `unsupported_reason` / `unco
 `Choices`, `Request`, `Sent` and `Warning` are `#[non_exhaustive]`: start from `Choices::default()`
 and assign fields.
 
+**Page length.** On the feeder, `State::show` also draws a "Page length" row with four options
+(`scanning::PageLength`): *Driver default*, *Match page size* (enabled when the app sets
+`Settings::page_size_chosen`, i.e. it has a page size that names a length), *Detect (scanner)* and
+*Detect from image (approximate)*. "Detect" follows the three states through `Choices::detect_length`:
+published is enabled, a published "no" is disabled with `LengthLabels::no_detection`, not published (the
+default) is enabled with the quiet unconfirmed note and sent only as a hint. The image guess is always
+enabled and always shows `LengthLabels::infer_note`, because it is a heuristic. A choice the scanner or the
+page size rules out falls back to the driver default (`Choices::length_or_default`, also applied by
+`Settings::clamp`); the row is absent on the bed. `Choices::request` carries it as `Request::page_length`
+(omitted for the bed and for an unavailable option). The app maps the four values to its backend's request.
+
 Hosts supply two workers that return `mpsc` receivers. `Discover` lists scanners and must open
 nothing; `LoadChoices` reads what ONE scanner supports and is called only for the selected scanner.
 Results are matched by generation and scanner id, so a slow answer for a scanner the user has left

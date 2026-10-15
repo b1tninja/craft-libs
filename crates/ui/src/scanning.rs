@@ -125,6 +125,10 @@ pub struct Choices {
     pub all_pages: Capability<()>,
     /// Hardware duplex (both sides in one pass). Unsupported means no duplex unit.
     pub duplex: Capability<()>,
+    /// Whether the scanner detects the length of a sheet itself. Supported: it published the feature.
+    /// Unsupported: it answered without it, so "Detect (scanner)" is disabled with a reason. Unknown (the
+    /// default): not published, so the option stays enabled with the quiet note and is only a hint.
+    pub detect_length: Capability<()>,
 }
 
 /// Upper bound for an unknown page limit and for the page count control.
@@ -235,7 +239,16 @@ impl Choices {
             (true, false) if self.duplex.is_supported() => Sent::Value(false),
             _ => Sent::Omitted,
         };
-        Request { source, color: value_sent(&self.colors, &settings.color), dpi: value_sent(&self.dpi, &settings.dpi), pages, duplex }
+        let page_length = if !in_play {
+            Sent::Omitted
+        } else {
+            match self.length_availability(settings.page_length, settings.page_size_chosen) {
+                LengthAvailability::Available => Sent::Value(settings.page_length),
+                LengthAvailability::Unconfirmed => Sent::Hint(settings.page_length),
+                LengthAvailability::Unavailable(_) => Sent::Omitted,
+            }
+        };
+        Request { source, color: value_sent(&self.colors, &settings.color), dpi: value_sent(&self.dpi, &settings.dpi), pages, duplex, page_length }
     }
 }
 
@@ -291,6 +304,9 @@ pub struct Request {
     pub dpi: Sent<u32>,
     pub pages: Sent<Pages>,
     pub duplex: Sent<bool>,
+    /// Omitted off the feeder and for an option the scanner or the page size rules out; a hint for an
+    /// unconfirmed detection.
+    pub page_length: Sent<PageLength>,
 }
 
 /// The device's dynamic status. A warning is shown beside the controls and never disables one:
@@ -318,11 +334,26 @@ pub struct Settings {
     pub duplex: bool,
     /// The preset last applied, cleared when colour or resolution is changed by hand.
     pub preset: Option<Preset>,
+    /// How the page length is decided (feeder only). See [`PageLength`].
+    pub page_length: PageLength,
+    /// Set by the app each frame: whether it has a page size that names a length. The component cannot see the
+    /// app's page size; this is what enables "Match page size".
+    pub page_size_chosen: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { scanner: String::new(), source: Source::Auto, color: Color::Gray, dpi: 300, pages: Pages::All, duplex: false, preset: None }
+        Self {
+            scanner: String::new(),
+            source: Source::Auto,
+            color: Color::Gray,
+            dpi: 300,
+            pages: Pages::All,
+            duplex: false,
+            preset: None,
+            page_length: PageLength::Driver,
+            page_size_chosen: false,
+        }
     }
 }
 
@@ -372,6 +403,7 @@ impl Settings {
         if choices.duplex.is_unsupported() || !choices.feeder.is_enabled() {
             self.duplex = false;
         }
+        self.page_length = choices.length_or_default(self.page_length, self.page_size_chosen);
     }
 }
 
@@ -706,9 +738,11 @@ impl State {
 }
 
 mod labels;
+mod length;
 mod widgets;
 
 pub use labels::{Labels, Reasons};
+pub use length::{LengthAvailability, LengthChoice, LengthLabels, LengthReason, PageLength};
 
 #[cfg(test)]
 mod tests;

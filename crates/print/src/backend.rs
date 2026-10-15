@@ -50,20 +50,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crate::job::{JobId, JobState, JobStatus, Submitted, WatchSupport};
-use crate::options::{JobOptions, Resolution};
-use crate::retry::{Phase, RetrySafety};
-use crate::{Error, Job, PrinterOption};
+use craft_job::{Fingerprint, JobId, JobState, NativeCode, Progress, RetrySafety, Tag, TagSupport};
 
-/// A native error code and the domain that owns it. `domain` names the code space:
-/// `"win32"`, `"ipp"`, `"wsd-fault"`, `"cups"`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NativeCode {
-    pub domain: &'static str,
-    pub code: i64,
-    /// The code's symbolic name, when known.
-    pub name: Option<&'static str>,
-}
+use crate::job::{JobStatus, Submitted, WatchSupport};
+use crate::options::{JobOptions, Resolution};
+use crate::remote::{FingerprintExt as _, JobFilter, JobQueryCaps, Reconciled, RemoteJob, reconcile_jobs};
+use crate::retry::Phase;
+use crate::tag::TagSupportExt as _;
+use crate::{Error, Job, PrinterOption};
 
 /// What went wrong, independent of the backend. The kind and [`ErrorKind::is_retryable`] are the
 /// contract callers branch on; the message is for people.
@@ -99,6 +93,25 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    /// A stable lowercase name for logs, tool results and [`craft_job::ErrorSummary::kind_label`].
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::UnknownBackend => "unknown_backend",
+            Self::NotFound => "not_found",
+            Self::InvalidRequest => "invalid_request",
+            Self::UnsupportedFormat => "unsupported_format",
+            Self::ConsentRequired => "consent_required",
+            Self::Cancelled => "cancelled",
+            Self::Unavailable => "unavailable",
+            Self::Busy => "busy",
+            Self::Timeout => "timeout",
+            Self::Rejected => "rejected",
+            Self::Io => "io",
+            Self::Failed => "failed",
+        }
+    }
+
     /// Whether the condition is transient: trying the same request again later can succeed.
     /// This says nothing about whether a retry is *safe*; see [`PrintError::retry_safety`].
     pub const fn is_retryable(self) -> bool {
@@ -119,12 +132,29 @@ impl ErrorKind {
     }
 }
 
+/// What an [`ErrorKind::NotFound`] is about. A wrong printer address or queue path and a job the
+/// printer purged from its history look alike on the wire, and a follow-up must treat them
+/// differently: only a missing **job** can mean "it most likely finished".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NotFoundSubject {
+    /// The backend could not tell, or did not say. A [`crate::JobWatch`] keeps its long-standing
+    /// reading of this (the job was forgotten); a backend that can tell should say which.
+    #[default]
+    Unknown,
+    /// The printer (its address, queue path or endpoint) does not exist: a configuration error.
+    Printer,
+    /// The printer is there but no longer knows this job (finished jobs are forgotten).
+    Job,
+}
+
 /// A print failure: a neutral [`ErrorKind`], a message and optionally the backend's native code.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrintError {
     kind: ErrorKind,
     message: String,
     native: Option<NativeCode>,
+    subject: NotFoundSubject,
     phase: Option<Phase>,
     safety: Option<RetrySafety>,
     retry_after: Option<Duration>,
@@ -132,7 +162,7 @@ pub struct PrintError {
 
 impl PrintError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        Self { kind, message: message.into(), native: None, phase: None, safety: None, retry_after: None }
+        Self { kind, message: message.into(), native: None, subject: NotFoundSubject::Unknown, phase: None, safety: None, retry_after: None }
     }
 
     /// Where the failure happened ([`Phase`]).
@@ -161,6 +191,30 @@ impl PrintError {
     pub fn with_native(mut self, native: NativeCode) -> Self {
         self.native = Some(native);
         self
+    }
+
+    /// Say what a [`ErrorKind::NotFound`] is about (see [`NotFoundSubject`]). Ignored by every other
+    /// kind.
+    #[must_use]
+    pub fn with_subject(mut self, subject: NotFoundSubject) -> Self {
+        self.subject = subject;
+        self
+    }
+
+    /// What a not-found is about; [`NotFoundSubject::Unknown`] unless the backend said, and always
+    /// `Unknown` for other kinds.
+    pub fn subject(&self) -> NotFoundSubject {
+        if self.kind == ErrorKind::NotFound { self.subject } else { NotFoundSubject::Unknown }
+    }
+
+    /// An unknown printer: [`ErrorKind::NotFound`] about the printer, not about a job.
+    pub fn printer_not_found(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::NotFound, message).with_subject(NotFoundSubject::Printer)
+    }
+
+    /// A job the printer no longer knows: [`ErrorKind::NotFound`] about the job.
+    pub fn job_not_found(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::NotFound, message).with_subject(NotFoundSubject::Job)
     }
 
     pub fn kind(&self) -> ErrorKind {
@@ -252,6 +306,22 @@ pub enum DocumentFormat {
 }
 
 impl DocumentFormat {
+    /// A short lowercase name (`"pdf"`), as a [`craft_job::DocumentRef`] carries it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Pdf => "pdf",
+            Self::PwgRaster => "pwg-raster",
+            Self::PostScript => "postscript",
+            Self::OctetStream => "octet-stream",
+            Self::Jpeg => "jpeg",
+            Self::Png => "png",
+            Self::Tiff => "tiff",
+            Self::PlainText => "text",
+            Self::Xps => "xps",
+            Self::OpenXps => "oxps",
+        }
+    }
+
     /// Every format this crate names.
     pub const ALL: [DocumentFormat; 10] = [
         Self::Pdf,
@@ -579,52 +649,6 @@ pub struct Receipt {
     pub job_id: Option<String>,
 }
 
-/// One progress event: sheets processed so far and, **when anyone knows it**, how many there will
-/// be. A network printer typically reports sheets completed and no total; the registry then fills
-/// `total` from [`JobOptions::expected_pages`] (as an estimate of the sheets, see
-/// [`crate::ExpectedTotals`]) and a backend-reported total wins. A UI shows a determinate bar when
-/// `total` is `Some` and an indeterminate one ("3 sheets") otherwise.
-///
-/// The older [`crate::submit_with_progress`] keeps its `(processed, sheets)` closure.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Progress {
-    pub done: u32,
-    pub total: Option<u32>,
-}
-
-impl Progress {
-    pub const fn new(done: u32, total: Option<u32>) -> Self {
-        Self { done, total }
-    }
-
-    /// An event with a known total.
-    pub const fn of(done: u32, total: u32) -> Self {
-        Self { done, total: Some(total) }
-    }
-
-    /// An event whose total is not known.
-    pub const fn done_only(done: u32) -> Self {
-        Self { done, total: None }
-    }
-
-    /// `done / total` in `0.0..=1.0` when the total is known and not zero.
-    pub fn fraction(&self) -> Option<f32> {
-        match self.total {
-            Some(total) if total > 0 => Some((self.done.min(total) as f32) / (total as f32)),
-            _ => None,
-        }
-    }
-
-    /// Fill a missing (or zero) total from `expected`; a total that is present is kept.
-    #[must_use]
-    pub fn or_expected(self, expected: Option<u32>) -> Self {
-        match self.total {
-            Some(total) if total > 0 => self,
-            _ => Self { done: self.done, total: expected.filter(|t| *t > 0) },
-        }
-    }
-}
-
 /// The progress callback of a [`SubmitRequest`].
 pub type ProgressCallback<'a> = &'a mut dyn FnMut(Progress);
 
@@ -640,11 +664,22 @@ pub struct SubmitRequest<'a> {
     pub consent: Option<UserConfirmed>,
     pub cancel: CancelToken,
     pub progress: Option<ProgressCallback<'a>>,
+    /// The idempotency tag of the print this request belongs to ([`Tag`]); the same for every
+    /// attempt. A backend carries it where its protocol allows ([`Backend::tag_support`]); the
+    /// registry removes it for a backend that cannot.
+    pub tag: Option<Tag>,
 }
 
 impl<'a> SubmitRequest<'a> {
     pub fn new(document: Document<'a>, job: Job) -> Self {
-        Self { document, job, options: JobOptions::default(), consent: None, cancel: CancelToken::new(), progress: None }
+        Self { document, job, options: JobOptions::default(), consent: None, cancel: CancelToken::new(), progress: None, tag: None }
+    }
+
+    /// Put this idempotency tag on the job, where the backend can carry it. See [`Tag`].
+    #[must_use]
+    pub fn with_tag(mut self, tag: Tag) -> Self {
+        self.tag = Some(tag);
+        self
     }
 
     /// Per-job hints; see [`JobOptions`].
@@ -743,11 +778,56 @@ pub trait Backend: Send + Sync {
         Ok(JobStatus::new(JobState::Unknown))
     }
 
+    /// How long the device keeps a job open while it waits for the document of a request whose
+    /// reply was lost, plus a small margin: after this the device has given up on the half-made
+    /// job on its own (WS-Print aborts it with `DocumentTimeoutError`, IPP printers wait their
+    /// `multiple-operation-time-out`, 60 to 240 seconds, and then end it as
+    /// `submission-interrupted`). [`crate::PrintJob`] waits this long after a send whose outcome
+    /// is unknown before it advises resending. `None` (the default): the job uses
+    /// [`crate::Staleness::reconcile_after`].
+    fn open_job_timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// Ask the device to cancel an accepted job. Cancelling a job that already ended is not an
     /// error. The default is [`ErrorKind::Unsupported`].
     fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {
         let _ = job;
         Err(PrintError::new(ErrorKind::Unsupported, format!("the {} backend cannot cancel a job once it is accepted", self.name())))
+    }
+
+    /// Whether and where this backend carries a [`SubmitRequest::tag`], and whether
+    /// [`Backend::list_jobs`] gives it back. Defaults to [`TagSupport::None`]. A backend that
+    /// supports a placement applies the tag itself (a name suffix with [`crate::TagExt::apply_to`], within
+    /// its own length limit) and exactly once.
+    fn tag_support(&self) -> TagSupport {
+        TagSupport::None
+    }
+
+    /// What [`Backend::list_jobs`] can fill in. Defaults to [`JobQueryCaps::NONE`].
+    fn job_query_caps(&self) -> JobQueryCaps {
+        JobQueryCaps::NONE
+    }
+
+    /// The jobs of one printer (a native id): its active jobs and, when the source keeps them,
+    /// finished ones ([`JobQueryCaps::history`]). **One bounded, idempotent read.** Foreign jobs
+    /// are listed too; [`RemoteJob::ours`] is set from [`JobFilter::tag`] (use
+    /// [`crate::filter_jobs`]). The default is [`ErrorKind::Unsupported`]: a spooler that cannot
+    /// list keeps it, and says so in [`Backend::job_query_caps`].
+    fn list_jobs(&self, printer_native: &str, filter: &JobFilter) -> Result<Vec<RemoteJob>, PrintError> {
+        let _ = (printer_native, filter);
+        Err(PrintError::new(ErrorKind::Unsupported, format!("the {} backend cannot list jobs", self.name())).with_safety(RetrySafety::Safe))
+    }
+
+    /// After an attempt whose outcome is unknown: find the job it may have created. The default
+    /// lists jobs ([`Backend::list_jobs`]) and decides with [`reconcile_jobs`]: by tag when the
+    /// backend can match it, else by title, user and time, which may be
+    /// [`Reconciled::Ambiguous`]. A backend overrides it to fill in what only it knows (its own
+    /// user name).
+    fn find_job(&self, printer_native: &str, fingerprint: &Fingerprint) -> Result<Reconciled, PrintError> {
+        let support = self.tag_support();
+        let jobs = self.list_jobs(printer_native, &fingerprint.filter(support.matchable()))?;
+        Ok(reconcile_jobs(jobs, fingerprint, support))
     }
 }
 

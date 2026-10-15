@@ -19,10 +19,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::{CancelToken, ErrorKind, PrintError};
-use crate::job::{ExpectedTotals, JobId, JobState, JobStatus, Submitted, WatchSupport};
+use craft_job::{ExpectedTotals, Jitter, JobId, JobState, RetryAdvice, RetryPolicy};
+
+use crate::backend::{CancelToken, ErrorKind, NotFoundSubject, PrintError};
+use crate::job::{ExpectedTotalsExt as _, JobStatus, Submitted, WatchSupport};
 use crate::registry::Registry;
-use crate::retry::{CANCEL_SLICE, Clock, Jitter, RetryPolicy, SystemClock};
+use crate::retry::{CANCEL_SLICE, Clock, JitterExt as _, SystemClock, advise_error};
 
 /// Where a watch gets status from and sends cancels to. The [`Registry`] is one (by job id); a
 /// test can supply its own.
@@ -96,7 +98,9 @@ pub enum WatchOutcome {
     NoStatus,
     /// `max_wait` ran out with the job not finished; it carries on at the printer.
     TimedOut { last: Option<JobStatus> },
-    /// A failure that is not transient, or a transient one that outlasted the retry policy.
+    /// A failure that is not transient, or a transient one that outlasted the retry policy. A
+    /// not-found about the *printer* ([`NotFoundSubject::Printer`]) ends here at once: the address
+    /// or queue path is wrong, which is not a forgotten job.
     Failed(PrintError),
 }
 
@@ -383,6 +387,11 @@ impl JobWatch {
                 self.last = Some(status.clone());
                 WatchStep::Update(status)
             }
+            // The printer or its address is wrong: nothing about the job can be learned, and it is not
+            // "forgotten". A configuration error, never retried.
+            Err(error) if error.kind() == ErrorKind::NotFound && error.subject() == NotFoundSubject::Printer => {
+                self.finish(WatchOutcome::Failed(error))
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 if self.cancel_sent {
                     let mut status = JobStatus::new(JobState::Cancelled);
@@ -406,7 +415,12 @@ impl JobWatch {
     /// and cancels are idempotent), else end the watch.
     fn failed(&mut self, error: PrintError, now: Duration) -> WatchStep {
         self.failures = self.failures.saturating_add(1);
-        match self.policy.retry.next_delay(&error, self.failures, self.jitter.unit()) {
+        let wait = match advise_error(&error, self.failures, &self.policy.retry, &mut self.jitter) {
+            RetryAdvice::RetryNow => Some(Duration::ZERO),
+            RetryAdvice::RetryAfter(wait) => Some(wait),
+            _ => None,
+        };
+        match wait {
             Some(next_in) => {
                 self.next_at = now.saturating_add(next_in);
                 WatchStep::Retrying { error, attempt: self.failures, next_in }
@@ -538,7 +552,7 @@ mod tests {
             Ok(status(JobState::Processing)),
             Ok(status(JobState::Processing)),
             Ok(status(JobState::Processing)),
-            Ok(status(JobState::Stopped)),
+            Ok(status(JobState::NeedsAttention)),
             Ok(status(JobState::Completed)),
         ]);
         let policy =
@@ -629,6 +643,48 @@ mod tests {
     }
 
     #[test]
+    fn a_job_subject_not_found_is_forgotten_and_an_unsaid_subject_keeps_that_reading() {
+        let script = Script::new(vec![Ok(status(JobState::Processing)), Err(PrintError::job_not_found("the printer purged it"))]);
+        let (mut watch, _) = watch(WaitPolicy::every(Duration::from_secs(1)));
+        let outcome = watch.run(&script, &mut |_| {});
+        assert!(matches!(outcome, WatchOutcome::Forgotten { last: Some(_) }), "{outcome:?}");
+
+        // A backend that did not say what was missing: the long-standing reading, pinned.
+        let script = Script::new(vec![Err(PrintError::new(ErrorKind::NotFound, "?"))]);
+        let (mut watch, _) = self::watch(WaitPolicy::every(Duration::from_secs(1)));
+        assert!(matches!(watch.run(&script, &mut |_| {}), WatchOutcome::Forgotten { last: None }));
+    }
+
+    #[test]
+    fn a_printer_subject_not_found_is_a_configuration_error_not_a_forgotten_job() {
+        let script = Script::new(vec![Err(PrintError::printer_not_found("no such queue /ipp/bogus"))]);
+        let (mut watch, _) = watch(WaitPolicy::every(Duration::from_secs(1)));
+        let outcome = watch.run(&script, &mut |_| {});
+        assert!(
+            matches!(outcome, WatchOutcome::Failed(ref e) if e.kind() == ErrorKind::NotFound && e.subject() == NotFoundSubject::Printer),
+            "{outcome:?}"
+        );
+        assert_eq!(script.polls(), 1, "no retries");
+        assert!(!outcome.is_success());
+        assert!(outcome.error().is_some());
+
+        // Not mistaken for a job that vanished after a cancel, either.
+        let script = Script::new(vec![Err(PrintError::printer_not_found("no such queue"))]);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let (watch, _) = self::watch(WaitPolicy::default());
+        let outcome = watch.with_cancel(cancel).run(&script, &mut |_| {});
+        assert!(matches!(outcome, WatchOutcome::Failed(_)), "{outcome:?}");
+    }
+
+    #[test]
+    fn the_subject_only_means_something_for_not_found() {
+        assert_eq!(PrintError::new(ErrorKind::NotFound, "x").subject(), NotFoundSubject::Unknown);
+        assert_eq!(PrintError::new(ErrorKind::Failed, "x").with_subject(NotFoundSubject::Printer).subject(), NotFoundSubject::Unknown);
+        assert_eq!(PrintError::job_not_found("x").subject(), NotFoundSubject::Job);
+    }
+
+    #[test]
     fn cancel_is_sent_once_and_the_end_state_is_the_result() {
         let script = Script::new(vec![Ok(status(JobState::Processing)), Ok(status(JobState::Cancelled))]);
         let cancel = CancelToken::new();
@@ -699,7 +755,10 @@ mod tests {
         );
         assert_eq!(t(JobState::CompletedWithErrors, &[]).map(|e| e.kind()), Some(ErrorKind::Failed));
         assert_eq!(t(JobState::Completed, &[]), None);
-        assert_eq!(t(JobState::CompletedWithWarnings, &["w"]), None);
+        let mut warned = status(JobState::Completed);
+        warned.warnings.push("job completed with warnings".into());
+        let outcome = WatchOutcome::Terminal(warned);
+        assert!(outcome.error().is_none() && outcome.is_success(), "warnings are not a failure");
         assert!(WatchOutcome::Forgotten { last: None }.error().is_none() && WatchOutcome::NoStatus.error().is_none());
     }
 

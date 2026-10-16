@@ -31,6 +31,8 @@ mod remote;
 mod retry;
 #[cfg(any(test, windows))]
 mod sheets;
+#[cfg(any(test, windows, all(unix, not(target_arch = "wasm32"))))]
+mod spool_render;
 mod tag;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -38,6 +40,7 @@ pub mod testing;
 mod tests;
 #[cfg(any(test, windows))]
 mod ticket;
+mod trace;
 mod tracked;
 mod wake;
 mod watch;
@@ -85,6 +88,7 @@ pub use registry::{
 pub use remote::{FingerprintExt, JobFilter, JobQueryCaps, Reconciled, RemoteJob, filter_jobs, reconcile_jobs};
 pub use retry::{CANCEL_SLICE, Clock, JitterExt, ManualClock, Phase, SystemClock, advise_error, retry, retry_facts};
 pub use tag::{TagExt, TagPolicy, TagSupportExt};
+pub use trace::set_trace;
 pub use tracked::{
     Advance, Attempt, AttemptError, AttemptOutcome, BytesSource, DocumentInfo, DocumentSource, FnSource, JobProgress, LifecycleState, LocalJobId,
     Outcome, PrintJob, PrintJobConfig, RequestRecord, SimpleState, Snapshot, StaleReason, Staleness, TrailEntry, TrailEvent,

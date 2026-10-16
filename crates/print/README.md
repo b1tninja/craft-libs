@@ -535,13 +535,27 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
 - **Windows:** in this process, with no PowerShell, script or other program started, so
   printing works where App Control for Business or AppLocker enforce script rules. Printers
   come from `EnumPrinters` (local queues and `\\server\queue` connections) and the default from
-  `GetDefaultPrinter`. A job is drawn as vectors by the in-box `Windows.Data.Pdf` with Direct2D
+  `GetDefaultPrinter`. A job is drawn by the in-box `Windows.Data.Pdf` with Direct2D
   into the XPS print API (the `winprint` crate), and copies, collation, duplex, colour, paper,
   orientation and "no scaling" travel in a PrintTicket that the driver validates first; a
   driver that would change the paper, orientation or scaling is refused before anything is
   sent. Paper is the driver's own option for the sheet's size (to 0.25 mm), preferring the one
   named like the standard size ("ARCH D" over a custom 24 × 36 in entry). This backend comes
   from storytold/pdfcraft#599 and #1132.
+  **Resolution.** Vector content stays vector. `Windows.Data.Pdf` draws a page's images at the
+  page's destination size, by default 96 dpi whatever the images in the PDF are. The spooler
+  backend gives each page a destination at the printer's own resolution instead (read from its
+  device context with the ticket applied, else 300 dpi; no ceiling; a page whose bitmap would pass
+  256 MiB or 16384 px is drawn in bands at the same resolution, never lowered), so an image reaches the driver at
+  its own resolution, up to the renderer's limit of about 4 million pixels per image (an A4
+  page's image arrives at most at about 211 dpi; measured, and tiling does not lift it). A request's `JobOptions::resolution` is a requirement (the higher axis, at most 2400
+  dpi); `JobOptions::quality` is a wish that never goes above the printer's resolution (draft
+  150 dpi, normal 300, high 600, photo 1200); a resolution wins over a quality. Both are in
+  `honoured` on Windows. A difference between what was asked for and what was drawn, a hint
+  that was merged, lowered or ignored, and the media and orientation hints (the job's pages
+  decide those) are `Submitted::warnings`; CUPS also warns for the four hints it leaves to the
+  driver's own options. The driver may still re-encode the bitmap (the Microsoft class driver
+  stores JPEG q90): that is not controllable from here.
   A job has one ticket, so one paper and orientation. Sheets of the other orientation are
   turned back with `/Rotate`, so portrait and landscape sheets still print as one job. Exact
   size refuses sheets of different sizes and paper the driver lacks. Shrink-to-fit uses the
@@ -550,8 +564,9 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   size, and both are centred. Both are done by appending an incremental update to the PDF
   (new versions of the pages that need it, the original bytes untouched); the crate reads
   only cross-reference sections, object streams and the page tree for this, leniently and
-  with every size bounded. Encrypted PDFs can be turned but not reframed. Annotations on a
-  reframed page are dropped; print-ready PDFs have them flattened. Nondefault or invalid
+  with every size bounded. Encrypted PDFs can be turned but not reframed. Annotations that print
+  nothing (Link, Popup, Hidden, or without the Print flag) are dropped from a reframed page; a
+  printable one is refused, so print-ready PDFs have those flattened. Nondefault or invalid
   `/UserUnit` is refused because the native renderer does not reliably honor physical units.
   Parsing caps cumulative cross-reference/object-stream records at 500,000, decoded streams
   at 16 MiB each and 32 MiB per job, and parsed nodes/tokens at 250,000/16 MiB per job and
@@ -586,15 +601,20 @@ a driver paper-size mismatch. On Windows `command_preview` describes the in-proc
 (`xps-print`, then the printer and options as `key=value`) instead of a command line. The crate
 does not provide PostScript output, separations, trapping or colour-managed device rendering.
 
-Windows shrink-to-fit refuses pages with annotations when their geometry needs fitting.
-Callers must flatten annotation appearances into page content first. Exact-size printing and
-rotation retain the annotations. This avoids losing printed comments, forms or other marks.
-The Windows renderer uses viewer visibility. Native submission therefore accepts only plain
-visible printable annotation flags (`F=4`); annotations without Print, with NoView, or with
-other visibility/rotation flags require caller flattening. This prevents printing comments
-that were marked nonprinting or omitting print-only marks. A visible Square appearance with
-`F=4` was rendered in the Windows qualification fixture; other appearance types still need
-their own fidelity checks.
+Annotations are sorted into silent (they print nothing: Link or Popup, flagged Hidden, or
+without the Print flag) and printable. Windows shrink-to-fit drops the annotations of a page
+whose annotations are all silent (hyperlinks do not stop a document from being fitted) and
+refuses a page with a printable one, naming its subtype, because its appearance lives outside
+the page content and would stay at the old coordinates; callers flatten such annotations
+first. Exact-size printing and rotation retain the annotations. The Windows renderer uses
+viewer visibility (not Hidden, not NoView) and ignores the Print flag. Native submission
+therefore accepts annotations that print nothing and draw nothing (Link and Popup, Hidden,
+NoView without Print) and plain printable ones (`F=4` with the Print flag and no NoZoom or
+NoRotate); an annotation the file says not to print but a viewer shows (no Print flag), one
+with NoView and Print, or one with NoZoom/NoRotate is refused for caller flattening. This
+prevents printing comments that were marked nonprinting or omitting print-only marks. A
+visible Square appearance with `F=4` was rendered in the Windows qualification fixture; other
+appearance types still need their own fidelity checks.
 
 Native Windows PDF submission checks the driver's validated copy count and explicit
 simplex/duplex and grayscale requests before sending. Collation must be retained when both

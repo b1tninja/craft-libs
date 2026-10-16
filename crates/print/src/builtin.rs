@@ -27,7 +27,9 @@ pub(crate) fn register_builtin(registry: &Registry) {
 mod spooler {
     use crate::backend::{Backend, JobHint, PrintError, PrinterDetails, PrinterRef, SubmitRequest};
     use crate::job::Submitted;
-    use crate::{Printer, Progress, printers, submit_with_progress};
+    #[cfg(not(windows))]
+    use crate::submit_with_progress;
+    use crate::{Printer, Progress, printers, spool_render};
 
     /// The system spooler as a [`Backend`]: CUPS (`lp`, `lpstat`) on macOS and Linux, the Windows
     /// print spooler on Windows. Local class: no consent needed. PDF only.
@@ -44,7 +46,10 @@ mod spooler {
     /// What the spooler applies of a [`crate::Job`]. Driver keywords are CUPS only.
     pub(crate) fn honoured() -> Vec<JobHint> {
         let mut hints = vec![JobHint::Copies, JobHint::Collate, JobHint::Duplex, JobHint::Colour, JobHint::Scaling];
-        if !cfg!(windows) {
+        if cfg!(windows) {
+            // The resolution the PDF is drawn at; CUPS leaves both to the driver's own options.
+            hints.extend([JobHint::Quality, JobHint::Resolution]);
+        } else {
             hints.push(JobHint::DriverOptions);
         }
         hints
@@ -92,17 +97,29 @@ mod spooler {
         /// "accepted, outcome unknown" ([`crate::WatchSupport::None`]).
         fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
             let SubmitRequest { document, mut job, options, progress, .. } = request;
-            // The spooler honours the colour choice only; media, orientation, quality and
-            // resolution are the driver's (CUPS: `Job::options`), so they are ignored here.
+            // The spooler honours the colour choice; on Windows also the resolution and quality
+            // the pages are drawn at. Media and orientation (and, with CUPS, quality and
+            // resolution) are the driver's (CUPS: `Job::options`): ignored here, and said so.
             job.grayscale = options.colour.is_mono(job.grayscale);
+            #[allow(unused_mut)]
+            let mut warnings = spool_render::unhonoured(&options, cfg!(windows));
             let mut progress = progress;
-            let message = submit_with_progress(document.bytes, &job, &mut |done, total| {
+            let mut report_progress = |done: usize, total: usize| {
                 if let Some(report) = progress.as_deref_mut() {
                     let clamp = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
                     report(Progress::of(clamp(done), clamp(total)));
                 }
-            })?;
-            Ok(Submitted::new(NAME, message))
+            };
+            #[cfg(windows)]
+            let message = {
+                let choice = spool_render::choose(&options);
+                let spooled = crate::windows::submit_with_render(document.bytes, &job, &choice, &mut report_progress)?;
+                warnings.extend(spooled.warnings);
+                spooled.message
+            };
+            #[cfg(not(windows))]
+            let message = submit_with_progress(document.bytes, &job, &mut report_progress)?;
+            Ok(Submitted::new(NAME, message).with_warnings(warnings))
         }
     }
 }

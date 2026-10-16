@@ -12,8 +12,8 @@
 //!
 //! Vector content (paths, text) stays vector in the job. `Windows.Data.Pdf` draws the images of a
 //! page at the page's destination size, by default 96 dpi whatever the images in the PDF are.
-//! The pages are drawn with a destination at the printer's own resolution instead (at most 600
-//! dpi unless the job asks for more, and lower for a page whose bitmap would be too large); the
+//! The pages are drawn with a destination at the printer's own resolution instead (no ceiling; a page
+//! whose bitmap would be too large is drawn in bands at the same resolution); the
 //! job's resolution and quality hints choose the figure ([`crate::spool_render`]). The renderer
 //! hands over an image at the smaller of its own size and about 4 million pixels (measured: an
 //! A4 page's image arrives at about 211 dpi however large the source and the destination are);
@@ -201,12 +201,7 @@ pub(crate) fn submit_with_render(pdf: &[u8], job: &Job, choice: &RenderChoice, p
             format!("job file written ({count} sheet(s) read); starting the spool job (StartDoc equivalent: the document package target is created)")
         });
         let default_render = PdfRenderOptions::default();
-        let render = PdfRenderOptions {
-            dpi: choice.dpi,
-            max_dpi: choice.dpi.map_or(default_render.max_dpi, |d| d.max(default_render.max_dpi)),
-            limit_to_device: choice.limit_to_device,
-            ..default_render
-        };
+        let render = PdfRenderOptions { dpi: choice.dpi, limit_to_device: choice.limit_to_device, ..default_render };
         let printed = WinPdfPrinter::new(device)
             .print_with_render_options(&path, ticket, &render, |processed, total| {
                 trace.line(|| format!("page {processed}/{total} accepted by Direct2D (the source PDF has {count} sheet(s))"));
@@ -231,10 +226,6 @@ pub(crate) fn submit_with_render(pdf: &[u8], job: &Job, choice: &RenderChoice, p
     let mut warnings = choice.notes.clone();
     let rendered: Vec<u32> = report.pages.iter().map(|p| p.dpi).collect();
     warnings.extend(spool_render::resolution_note(choice.dpi, &rendered, choice.limit_to_device, report.device_dpi));
-    // A reduction nobody asked about (the printer's own resolution did not fit) is still said.
-    if choice.dpi.is_none() {
-        warnings.extend(report.warnings());
-    }
     Ok(Spooled { message: format!("spooled {count} sheet(s)"), warnings })
 }
 

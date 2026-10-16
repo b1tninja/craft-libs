@@ -545,8 +545,8 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   **Resolution.** Vector content stays vector. `Windows.Data.Pdf` draws a page's images at the
   page's destination size, by default 96 dpi whatever the images in the PDF are. The spooler
   backend gives each page a destination at the printer's own resolution instead (read from its
-  device context with the ticket applied, else 300 dpi; at most 600 dpi; lower for a page whose
-  bitmap would pass 256 MiB or 16384 px, never below 96 dpi), so an image reaches the driver at
+  device context with the ticket applied, else 300 dpi; no ceiling; a page whose bitmap would pass
+  256 MiB or 16384 px is drawn in bands at the same resolution, never lowered), so an image reaches the driver at
   its own resolution, up to the renderer's limit of about 4 million pixels per image (an A4
   page's image arrives at most at about 211 dpi; measured, and tiling does not lift it). A request's `JobOptions::resolution` is a requirement (the higher axis, at most 2400
   dpi); `JobOptions::quality` is a wish that never goes above the printer's resolution (draft

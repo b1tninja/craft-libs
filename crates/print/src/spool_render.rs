@@ -3,14 +3,14 @@
 //!
 //! The in-box PDF renderer draws a page as a bitmap, by default at 96 dpi whatever the images in
 //! it are, and the driver gets that bitmap. The spooler backend draws at the printer's own
-//! resolution instead (capped, and lowered for a very large page: see `winprint`'s
+//! resolution instead (a very large page is drawn in bands, not at a lower resolution: see `winprint`'s
 //! `PdfRenderOptions`), and these functions turn a job's hints into the choice:
 //!
 //! * [`JobOptions::resolution`] is a requirement: draw at that resolution (the higher of the two
 //!   axes, one scale for the page), even above the printer's own.
 //! * [`JobOptions::quality`] is a wish: draft 150 dpi, normal 300, high 600, photo 1200, never
 //!   above what the printer prints. Ignored, with a note, when a resolution is given too.
-//! * Neither: the printer's resolution, at most 600 dpi.
+//! * Neither: the printer's resolution.
 //!
 //! Everything here is plain arithmetic and text, and runs on every platform.
 //!
@@ -83,7 +83,7 @@ pub(crate) fn resolution_note(requested: Option<u32>, rendered: &[u32], limit_to
     let used = if lowest == highest { format!("{lowest} dpi") } else { format!("{lowest} to {highest} dpi") };
     let why = match (limit_to_device, device_dpi) {
         (true, Some(device)) if highest <= device => format!("the printer prints at {device} dpi"),
-        _ => "the page bitmap would be too large, or the resolution is outside what the renderer draws".into(),
+        _ => "the renderer draws at 96 dpi at the least".into(),
     };
     Some(format!("{requested} dpi was asked for; the pages were drawn at {used} ({why})"))
 }
@@ -155,7 +155,7 @@ mod tests {
         let limited = resolution_note(Some(1200), &[600], true, Some(600)).unwrap_or_default();
         assert!(limited.contains("1200 dpi was asked for") && limited.contains("600 dpi") && limited.contains("prints at 600 dpi"), "{limited}");
         let reduced = resolution_note(Some(600), &[600, 250], false, Some(600)).unwrap_or_default();
-        assert!(reduced.contains("250 to 600 dpi") && reduced.contains("too large"), "{reduced}");
+        assert!(reduced.contains("250 to 600 dpi") && reduced.contains("96 dpi"), "{reduced}");
     }
 
     #[test]

@@ -16,7 +16,7 @@
 
 use super::*;
 
-/// How the page length is decided. See the [module documentation](self).
+/// How the page length is decided. See the notes at the top of the `length` module.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum PageLength {
     /// The scanner's own length.

@@ -555,13 +555,12 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   from storytold/pdfcraft#599 and #1132.
   **Resolution.** Vector content stays vector. `Windows.Data.Pdf` draws a page's images at the
   page's destination size, by default 96 dpi whatever the images in the PDF are. The spooler
-  backend gives each page a destination at the printer's own resolution instead (read from its
-  device context with the ticket applied, else 300 dpi; no ceiling; a page whose bitmap would pass
-  256 MiB or 16384 px is drawn in bands at the same resolution, never lowered), so an image reaches the driver at
+  backend gives each page a destination at the job's resolution instead (the one in the PrintTicket's
+  DEVMODE: the printer's default, else 300 dpi; no ceiling, and a page is drawn whole), so an image reaches the driver at
   its own resolution, up to the renderer's limit of about 4 million pixels per image (an A4
-  page's image arrives at most at about 211 dpi; measured, and tiling does not lift it). A request's `JobOptions::resolution` is a requirement (the higher axis, at most 2400
-  dpi); `JobOptions::quality` is a wish that never goes above the printer's resolution (draft
-  150 dpi, normal 300, high 600, photo 1200); a resolution wins over a quality. Both are in
+  page's image arrives at most at about 211 dpi; measured, and tiling does not lift it). A request's `JobOptions::resolution` is a requirement: the ticket asks for the
+  page resolution the printer offers at or above it (the higher axis), else its highest; `JobOptions::quality` is a wish: the ticket asks for the
+  offered resolution at or below draft 150 dpi, normal 300, high 600, photo 1200; a resolution wins over a quality. Both are in
   `honoured` on Windows. A difference between what was asked for and what was drawn, a hint
   that was merged, lowered or ignored, and the media and orientation hints (the job's pages
   decide those) are `Submitted::warnings`; CUPS also warns for the four hints it leaves to the

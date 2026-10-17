@@ -12,16 +12,16 @@
 //!
 //! Vector content (paths, text) stays vector in the job. `Windows.Data.Pdf` draws the images of a
 //! page at the page's destination size, by default 96 dpi whatever the images in the PDF are.
-//! The pages are drawn with a destination at the printer's own resolution instead (no ceiling; a page
-//! whose bitmap would be too large is drawn in bands at the same resolution); the
-//! job's resolution and quality hints choose the figure ([`crate::spool_render`]). The renderer
+//! The pages are drawn with a destination at the job's resolution instead (the one in the ticket,
+//! no ceiling, a page is always drawn whole); the job's resolution and quality hints choose the
+//! page resolution the ticket asks for ([`crate::spool_render`]). The renderer
 //! hands over an image at the smaller of its own size and about 4 million pixels (measured: an
 //! A4 page's image arrives at about 211 dpi however large the source and the destination are);
 //! tiling the page does not get past that, since every tile gets the whole image at that size.
 
 use std::io::Write as _;
 
-use winprint::printer::{PdfRenderOptions, PrinterDevice, WinPdfPrinter};
+use winprint::printer::{PrinterDevice, WinPdfPrinter};
 use winprint::ticket::document::{NS_PSK, OwnedName, PrintFeature, PrintTicketDocument, reader::ParsableXmlDocument as _};
 use winprint::ticket::{FeatureOptionPack as _, PageMediaSize, PrintCapabilities, PrintTicket, PrintTicketBuilder};
 
@@ -84,7 +84,17 @@ fn select_device(devices: Vec<PrinterDevice>, requested: Option<&str>, default: 
 /// its default paper is used. Returns the ticket and its paper in micrometres. Refused when the
 /// driver changed the paper, the orientation or the scaling: then nothing is sent, rather than a
 /// job at the wrong size.
-fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape: bool) -> Result<(PrintTicket, (u32, u32)), Error> {
+///
+/// `choice` picks the page resolution among the driver's; the returned note says when the one
+/// used is not the one asked for.
+#[allow(clippy::type_complexity)]
+fn driver_ticket(
+    device: &PrinterDevice,
+    job: &Job,
+    sheet: (f64, f64),
+    landscape: bool,
+    choice: &RenderChoice,
+) -> Result<(PrintTicket, (u32, u32), Option<String>), Error> {
     let capabilities = PrintCapabilities::fetch(device).map_err(spool_error)?;
     let medias: Vec<PageMediaSize> = capabilities.page_media_sizes().collect();
     let papers: Vec<Paper<'_>> = medias
@@ -125,10 +135,19 @@ fn driver_ticket(device: &PrinterDevice, job: &Job, sheet: (f64, f64), landscape
     }
     let mut builder = PrintTicketBuilder::new(device).map_err(spool_error)?;
     builder.merge(PrintTicket::from(document)).map_err(spool_error)?;
+    let mut resolutions: Vec<_> = capabilities.page_resolutions().collect();
+    let offered: Vec<(u32, u32)> = resolutions.iter().map(|r| r.dpi()).collect();
+    let mut note = None;
+    if let Some(pick) = spool_render::pick_resolution(&offered, choice) {
+        note = pick.note;
+        if let Some(index) = pick.index {
+            builder.merge(resolutions.swap_remove(index)).map_err(spool_error)?;
+        }
+    }
     let validated = builder.build().map_err(spool_error)?;
     let xml = std::str::from_utf8(validated.get_xml()).map_err(spool_error)?;
     let paper = ticket::verify_ticket(xml, wanted, landscape)?;
-    Ok((validated, paper))
+    Ok((validated, paper, note))
 }
 
 /// The widest unprintable margin of the ticket's paper, in points; 0 when the driver doesn't say.
@@ -181,7 +200,7 @@ pub(crate) fn submit_with_render(pdf: &[u8], job: &Job, choice: &RenderChoice, p
     let trace = &trace;
     // The worker is joined before `dir` is dropped: the spooler reads the file.
     let result = crate::progress::run(progress, move |sender| {
-        let (ticket, paper) = driver_ticket(&device, job, first, landscape)?;
+        let (ticket, paper, resolution_note) = driver_ticket(&device, job, first, landscape, choice)?;
         trace.line(|| format!("ticket accepted by {}: paper {}x{} um, landscape {landscape}", device.name(), paper.0, paper.1));
         let xml = std::str::from_utf8(ticket.get_xml()).map_err(spool_error)?;
         ticket::verify_job_options(xml, job, count)?;
@@ -200,10 +219,8 @@ pub(crate) fn submit_with_render(pdf: &[u8], job: &Job, choice: &RenderChoice, p
         trace.line(|| {
             format!("job file written ({count} sheet(s) read); starting the spool job (StartDoc equivalent: the document package target is created)")
         });
-        let default_render = PdfRenderOptions::default();
-        let render = PdfRenderOptions { dpi: choice.dpi, limit_to_device: choice.limit_to_device, ..default_render };
         let printed = WinPdfPrinter::new(device)
-            .print_with_render_options(&path, ticket, &render, |processed, total| {
+            .print_with_progress(&path, ticket, |processed, total| {
                 trace.line(|| format!("page {processed}/{total} accepted by Direct2D (the source PDF has {count} sheet(s))"));
                 // Page acceptance is distinct from terminal job success. The callback
                 // drains on the submitter's thread, so it can retain non-Send UI state.
@@ -211,21 +228,20 @@ pub(crate) fn submit_with_render(pdf: &[u8], job: &Job, choice: &RenderChoice, p
             })
             .map_err(|e| spool_error(chain(&e)));
         match &printed {
-            Ok(_) => trace
+            Ok(()) => trace
                 .line(|| "the spooler reported the package complete (EndDoc equivalent: the job is in the queue, not necessarily printed)".into()),
             Err(e) => trace.line(|| format!("the job failed and was cancelled by winprint (AbortDoc equivalent): {e}")),
         }
-        printed
+        printed.map(|()| resolution_note)
     });
     drop(dir);
     if let Err(e) = &result {
         trace.line(|| format!("submit failed: {e}"));
     }
-    let report = result?;
+    let resolution_note = result?;
     trace.line(|| "submit finished".into());
     let mut warnings = choice.notes.clone();
-    let rendered: Vec<u32> = report.pages.iter().map(|p| p.dpi).collect();
-    warnings.extend(spool_render::resolution_note(choice.dpi, &rendered, choice.limit_to_device, report.device_dpi));
+    warnings.extend(resolution_note);
     Ok(Spooled { message: format!("spooled {count} sheet(s)"), warnings })
 }
 
@@ -249,7 +265,7 @@ mod tests {
         let name = std::env::var("CRAFT_PRINT_TEST_PRINTER").unwrap();
         let device = select_device(PrinterDevice::all().unwrap(), Some(&name), None).unwrap();
         let job = Job { copies: 2, ..Job::default() };
-        let (ticket, paper) = driver_ticket(&device, &job, (612.0, 792.0), false).unwrap();
+        let (ticket, paper, _) = driver_ticket(&device, &job, (612.0, 792.0), false, &RenderChoice::default()).unwrap();
         ticket::verify_job_options(std::str::from_utf8(ticket.get_xml()).unwrap(), &job, 1).unwrap();
         assert_eq!(paper, (215_900, 279_400));
         eprintln!("unprintable margin: {} pt", imageable_margin(&device, &ticket));
@@ -262,7 +278,7 @@ mod tests {
             ("JobDuplexAllDocumentsContiguously", "TwoSidedLongEdge", Job { duplex: Some(crate::Duplex::LongEdge), ..Job::default() }),
             ("DocumentCollate", "Collated", Job { copies: 2, ..Job::default() }),
         ] {
-            let (ticket, _) = driver_ticket(&device, &requested, (612.0, 792.0), false).unwrap();
+            let (ticket, _, _) = driver_ticket(&device, &requested, (612.0, 792.0), false, &RenderChoice::default()).unwrap();
             let retained = ticket::verify_job_options(std::str::from_utf8(ticket.get_xml()).unwrap(), &requested, 3);
             eprintln!("{feature}={wanted}: {retained:?}");
             let offered = capabilities

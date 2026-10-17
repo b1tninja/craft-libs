@@ -2,15 +2,16 @@
 //! the system spooler does not apply.
 //!
 //! The in-box PDF renderer draws a page as a bitmap, by default at 96 dpi whatever the images in
-//! it are, and the driver gets that bitmap. The spooler backend draws at the printer's own
-//! resolution instead (a very large page is drawn in bands, not at a lower resolution: see `winprint`'s
-//! `PdfRenderOptions`), and these functions turn a job's hints into the choice:
+//! it are, and the driver gets that bitmap. `winprint` draws at the job's own resolution instead:
+//! the one in the PrintTicket's DEVMODE (the printer's default, or the page resolution the ticket
+//! asks for). These functions turn a job's hints into the page resolution the ticket asks for:
 //!
-//! * [`JobOptions::resolution`] is a requirement: draw at that resolution (the higher of the two
-//!   axes, one scale for the page), even above the printer's own.
+//! * [`JobOptions::resolution`] is a requirement: the printer's resolution at or above it (the
+//!   higher of the two axes), else its highest.
 //! * [`JobOptions::quality`] is a wish: draft 150 dpi, normal 300, high 600, photo 1200, never
-//!   above what the printer prints. Ignored, with a note, when a resolution is given too.
-//! * Neither: the printer's resolution.
+//!   above what the printer offers when it offers a lower one. Ignored, with a note, when a
+//!   resolution is given too.
+//! * Neither: the printer's default resolution.
 //!
 //! Everything here is plain arithmetic and text, and runs on every platform.
 //!
@@ -70,22 +71,42 @@ pub(crate) fn choose(options: &JobOptions) -> RenderChoice {
     choice
 }
 
-/// What the pages were drawn at, against what was asked: a note when they differ.
+/// Which of the printer's page resolutions the ticket asks for, and what to say when it is not
+/// the one asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolutionPick {
+    /// Index into the offered resolutions; `None` when the printer offers none.
+    pub(crate) index: Option<usize>,
+    /// Text for people when the resolution used differs from the one asked for.
+    pub(crate) note: Option<String>,
+}
+
+/// Choose among the `offered` (x, y) resolutions of the printer, by the higher axis. `None` when
+/// the job asks for no resolution (the printer's default applies).
 ///
-/// `rendered` holds each page's resolution. With no request (`None`) nothing was asked, so
-/// nothing differs.
-pub(crate) fn resolution_note(requested: Option<u32>, rendered: &[u32], limit_to_device: bool, device_dpi: Option<u32>) -> Option<String> {
-    let requested = requested?;
-    let (lowest, highest) = (rendered.iter().copied().min()?, rendered.iter().copied().max()?);
-    if lowest == requested && highest == requested {
-        return None;
-    }
-    let used = if lowest == highest { format!("{lowest} dpi") } else { format!("{lowest} to {highest} dpi") };
-    let why = match (limit_to_device, device_dpi) {
-        (true, Some(device)) if highest <= device => format!("the printer prints at {device} dpi"),
-        _ => "the renderer draws at 96 dpi at the least".into(),
+/// A requirement takes the lowest offered resolution at or above the request, else the highest. A
+/// wish takes the highest at or below it, else the lowest.
+pub(crate) fn pick_resolution(offered: &[(u32, u32)], choice: &RenderChoice) -> Option<ResolutionPick> {
+    let wanted = choice.dpi?;
+    let dpi = |i: &usize| offered[*i].0.max(offered[*i].1);
+    let all = 0..offered.len();
+    let index = if choice.limit_to_device {
+        all.clone().filter(|i| dpi(i) <= wanted).max_by_key(dpi).or_else(|| all.min_by_key(dpi))
+    } else {
+        all.clone().filter(|i| dpi(i) >= wanted).min_by_key(dpi).or_else(|| all.max_by_key(dpi))
     };
-    Some(format!("{requested} dpi was asked for; the pages were drawn at {used} ({why})"))
+    let note = match index {
+        None => Some(format!("{wanted} dpi was asked for; the printer lists no resolutions, so its own was used")),
+        Some(i) if dpi(&i) != wanted => {
+            let mut list: Vec<u32> = (0..offered.len()).map(|j| dpi(&j)).collect();
+            list.sort_unstable();
+            list.dedup();
+            let list = list.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+            Some(format!("{wanted} dpi was asked for; the printer offers {list} dpi, so {} dpi was used", dpi(&i)))
+        }
+        Some(_) => None,
+    };
+    Some(ResolutionPick { index, note })
 }
 
 /// Job hints the system spooler does not apply, as warnings. `windows` is whether the spooler is
@@ -148,14 +169,29 @@ mod tests {
     }
 
     #[test]
-    fn a_difference_between_asked_and_drawn_is_worded() {
-        assert_eq!(resolution_note(None, &[300], false, None), None);
-        assert_eq!(resolution_note(Some(300), &[300, 300], false, Some(600)), None);
-        assert_eq!(resolution_note(Some(300), &[], false, None), None);
-        let limited = resolution_note(Some(1200), &[600], true, Some(600)).unwrap_or_default();
-        assert!(limited.contains("1200 dpi was asked for") && limited.contains("600 dpi") && limited.contains("prints at 600 dpi"), "{limited}");
-        let reduced = resolution_note(Some(600), &[600, 250], false, Some(600)).unwrap_or_default();
-        assert!(reduced.contains("250 to 600 dpi") && reduced.contains("96 dpi"), "{reduced}");
+    fn the_ticket_asks_for_the_offered_resolution_that_fits() {
+        let offered = [(300, 300), (600, 600), (1200, 1200)];
+        let pick = |dpi: Option<u32>, limit: bool| pick_resolution(&offered, &RenderChoice { dpi, limit_to_device: limit, notes: Vec::new() });
+        assert_eq!(pick(None, false), None, "no request leaves the printer's default");
+        let exact = pick(Some(600), false).unwrap();
+        assert_eq!((exact.index, exact.note), (Some(1), None));
+        // a requirement rounds up, and above the printer's best it takes the best
+        assert_eq!(pick(Some(400), false).unwrap().index, Some(1));
+        let too_high = pick(Some(2400), false).unwrap();
+        assert_eq!(too_high.index, Some(2));
+        assert!(too_high.note.unwrap_or_default().contains("2400 dpi was asked for"));
+        // a wish rounds down, and below the printer's lowest it takes the lowest
+        assert_eq!(pick(Some(1000), true).unwrap().index, Some(1));
+        assert_eq!(pick(Some(150), true).unwrap().index, Some(0));
+        let none = pick_resolution(&[], &RenderChoice { dpi: Some(300), ..RenderChoice::default() }).unwrap();
+        assert_eq!(none.index, None);
+        assert!(none.note.unwrap_or_default().contains("lists no resolutions"));
+    }
+
+    #[test]
+    fn an_uneven_resolution_is_compared_by_its_higher_axis() {
+        let pick = pick_resolution(&[(600, 300), (300, 300)], &RenderChoice { dpi: Some(600), ..RenderChoice::default() }).unwrap();
+        assert_eq!((pick.index, pick.note), (Some(0), None));
     }
 
     #[test]

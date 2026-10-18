@@ -584,6 +584,18 @@ impl ScanJobJournal {
     /// The journal format version this crate writes.
     pub const VERSION: u32 = 1;
 
+    /// The state to act on. A journal that says `acquiring` (or `preparing`, with attempts made) was left by a
+    /// process that ended mid-scan, for example one that was killed after writing the journal from
+    /// [`ScanJob::record_progress`]: the scanner may have moved since, so the outcome is unknown and this is
+    /// [`ScanJobState::NeedsAttention`].
+    pub fn effective_state(&self) -> ScanJobState {
+        match self.state {
+            ScanJobState::Acquiring => ScanJobState::NeedsAttention,
+            ScanJobState::Preparing if self.attempts_total > 0 => ScanJobState::NeedsAttention,
+            state => state,
+        }
+    }
+
     #[cfg(feature = "serde")]
     fn current_version() -> u32 {
         Self::VERSION
@@ -765,18 +777,20 @@ impl ScanJob {
     }
 
     /// [`Self::continuing`] from a [`ScanJobJournal`]. The job starts `NeedsAttention` if the journal says the
-    /// outcome was unknown (and stays `CheckDeviceFirst`), else `Interrupted`; the last error, the warnings and
-    /// the attempt count carry over. `settings` is the original request; when its `pages` is `0` and the journal
+    /// outcome was unknown, or was cut off mid-scan ([`ScanJobJournal::effective_state`]), and stays
+    /// `CheckDeviceFirst`, with or without kept pages; else `Interrupted`. The last error, the warnings and the
+    /// attempt count carry over. `settings` is the original request; when its `pages` is `0` and the journal
     /// knows the wanted count, that count is used, so `--continue DIR` needs no `--pages`.
     pub fn continuing_from(settings: ScanSettings, config: ScanJobConfig, journal: ScanJobJournal) -> Self {
         let mut settings = settings;
         if settings.pages == 0 && !settings.duplex {
             settings.pages = journal.expected_pages.unwrap_or(0);
         }
-        let unknown = journal.state == ScanJobState::NeedsAttention;
+        let unknown = journal.effective_state() == ScanJobState::NeedsAttention;
         let attempts = journal.attempts_total;
         let mut job = Self::continuing(settings, config, journal.pages);
-        if job.infos.is_empty() {
+        // An unknown outcome is never a fresh job, even with nothing kept: the scanner may have moved.
+        if job.infos.is_empty() && !unknown {
             return job;
         }
         job.attempts_total = job.attempts_total.max(attempts);

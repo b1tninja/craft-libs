@@ -21,11 +21,14 @@ loop {
     let plan = job.begin_attempt(now())?;               // or begin_attempt_with(now(), Continuation::Append)
     let worker = spawn(move || craft_scan::acquire(&plan.settings));   // plan.settings is Send
     while !worker.is_finished() {
-        job.record_progress(&plan.progress);            // pages so far, page in flight
+        let new = job.record_progress(&plan.progress);  // moves arrived pages into the job; returns how many
+        write(&job.pages()[written..]); written += new; // optional: the bytes are borrowed while the attempt runs
         publish(job.snapshot());                        // cheap: no page bytes
         if user_pressed_stop { job.cancel(now()); }     // requests plan.cancel
     }
-    job.finish_attempt(worker.join(), now())?;
+    // A worker that panicked returned nothing: record it as a failed attempt, then hand over acquire's result.
+    let result = worker.join().unwrap_or_else(|_| Err(ScanError::Failed("the scan worker stopped".into())));
+    job.finish_attempt(result, now())?;
 
     match job.retry_advice() {
         RetryAdvice::RetryNow => continue,                      // first attempt, glass fallback
@@ -42,8 +45,9 @@ gets only `plan.settings` (it is `Send`: settings plus the two tokens) and retur
 The controlling thread polls `record_progress`, forwards a stop request (the GUI's button, the CLI's Ctrl-C
 handler setting a flag the main loop turns into `job.cancel(now())`), and calls `finish_attempt` when the worker
 joins. The job itself is never shared across threads and needs no lock. A short-lived CLI run is exactly this loop:
-one process, one job, pages written to the job's output folder as `record_progress` returns them, a small journal
-the app writes, and an exit code from `exit_class()` (section 11).
+one process, one job, each page written to the job's output folder once `record_progress` has counted it (read
+from `job.pages()`; `take_pages()` refuses while the attempt runs, so a CLI that writes only at the end calls it
+after `finish_attempt`), a small journal the app writes, and an exit code from `exit_class()` (section 11).
 
 `begin_attempt_with` is only ever called on the person's say-so (or the app's, on their behalf). The job never
 decides, on its own, to scan on after pages were kept.
@@ -214,7 +218,8 @@ feeder gave no pages") while that attempt is the latest. This is not the job's o
 ## 10. Limits
 
 * No persistence. A `ScanJob` lives in the process that made it; page bytes are held in memory (the app may
-  `take_pages()` and spill to disk between attempts). Types are plain data; nothing implements `serde`.
+  `take_pages()` and spill to disk between attempts). Types are plain data; with the optional `serde` feature the snapshot and journal types also serialise
+(section 12).
 * No reconcile: see section 8.
 * `Resume` and a device-side job handle are not there (sections 5, 8).
 * The job id in `JobView` is `<backend>:local-<n>`, a process-unique number. There is no device job to name.
@@ -271,8 +276,9 @@ aliases). `ScanJob` itself is deliberately not serialisable: it holds tokens and
 `record_progress`, if it wants to survive a crash). A later `scan --continue DIR` reads it and calls
 `ScanJob::continuing_from(settings, config, journal)`:
 
-* the job is `NeedsAttention` (advice `CheckDeviceFirst`) if the journal's state was `NeedsAttention`, else
-  `Interrupted`; the last error, warnings and attempt count carry over;
+* the job is `NeedsAttention` (advice `CheckDeviceFirst`) if the journal's state was `NeedsAttention`, or if the
+  journal was cut off mid-scan (`acquiring`, or `preparing` with attempts made: `ScanJobJournal::effective_state`),
+  with or without kept pages; else `Interrupted`. The last error, warnings and attempt count carry over;
 * `settings` is the app's own request (device, resolution, colour, ...); the journal does not carry it. If its
   `pages` is `0` and the journal knows the wanted count, that count is used, so the continuation needs no `--pages`;
 * the app maps `Continuation::Append` to "the person put the remaining sheets in" and asks.

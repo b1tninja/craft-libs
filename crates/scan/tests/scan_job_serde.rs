@@ -125,6 +125,63 @@ fn an_unknown_outcome_survives_the_journal() {
     assert_eq!(again.page_count(), 3);
 }
 
+fn page() -> craft_scan::Page {
+    craft_scan::Page {
+        bytes: vec![0; 8],
+        format: "jpeg",
+        width: 16,
+        height: 8,
+        dpi: 200,
+        dpi_y: 200,
+        requested_dpi: 200,
+        thresholded: false,
+        length: Default::default(),
+    }
+}
+
+#[test]
+fn an_unknown_outcome_with_no_page_kept_is_not_a_fresh_job() {
+    // The documented case: an Offline failure before any page. The carriage may have moved.
+    let mut job = ScanJob::new(feeder(10), ScanJobConfig::default());
+    job.begin_attempt(t(1)).expect("attempt");
+    let offline = ScanError::native_error(InterruptKind::Offline, NativeCode::new("http", 503, None), InterruptKind::Offline.sentence());
+    job.finish_attempt(Err(offline), t(2)).expect("finish");
+    assert_eq!((job.state(), job.page_count()), (ScanJobState::NeedsAttention, 0));
+    let text = serde_json::to_string(&job.snapshot().into_journal()).expect("journal");
+    let again = ScanJob::continuing_from(feeder(10), ScanJobConfig::default(), serde_json::from_str(&text).expect("read"));
+    assert_eq!(again.state(), ScanJobState::NeedsAttention);
+    assert_eq!(again.retry_advice(), craft_job::RetryAdvice::CheckDeviceFirst, "never retried by itself");
+    assert_eq!((again.page_count(), again.view().attempts), (0, 1));
+    assert!(again.view().last_error.is_some());
+}
+
+#[test]
+fn a_journal_cut_off_mid_scan_is_an_unknown_outcome() {
+    // Written after record_progress, then the process was killed: the journal still says acquiring.
+    let mut job = ScanJob::new(feeder(10), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    plan.progress.push_page(page());
+    plan.progress.push_page(page());
+    assert_eq!(job.record_progress(&plan.progress), 2);
+    let journal = job.snapshot().into_journal();
+    assert_eq!((journal.state, journal.effective_state()), (ScanJobState::Acquiring, ScanJobState::NeedsAttention));
+    let text = serde_json::to_string(&journal).expect("journal");
+    let again = ScanJob::continuing_from(feeder(10), ScanJobConfig::default(), serde_json::from_str(&text).expect("read"));
+    assert_eq!((again.state(), again.retry_advice()), (ScanJobState::NeedsAttention, craft_job::RetryAdvice::CheckDeviceFirst));
+    assert_eq!(again.page_count(), 2);
+
+    // Killed before any page arrived, and a preparing journal with an attempt made: the same.
+    for text in [r#"{"title":"T","state":"acquiring","attempts_total":1}"#, r#"{"title":"T","state":"preparing","attempts_total":1}"#] {
+        let journal: ScanJobJournal = serde_json::from_str(text).expect("journal");
+        let again = ScanJob::continuing_from(feeder(10), ScanJobConfig::default(), journal);
+        assert_eq!((again.state(), again.retry_advice()), (ScanJobState::NeedsAttention, craft_job::RetryAdvice::CheckDeviceFirst), "{text}");
+    }
+    // A preparing journal with no attempt is a job that never started.
+    let journal: ScanJobJournal = serde_json::from_str(r#"{"title":"T","state":"preparing"}"#).expect("journal");
+    assert_eq!(journal.effective_state(), ScanJobState::Preparing);
+    assert_eq!(ScanJob::continuing_from(feeder(10), ScanJobConfig::default(), journal).state(), ScanJobState::Preparing);
+}
+
 #[test]
 fn a_journal_tolerates_unknown_and_missing_fields() {
     let text = r#"{"title":"T","state":"interrupted","future":[1,2],"pages":[

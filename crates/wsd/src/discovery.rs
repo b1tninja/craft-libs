@@ -609,7 +609,8 @@ pub struct DiscoveryReport {
 
 enum Expecting<'a> {
     Probe(&'a str),
-    Resolve(&'a str),
+    /// The message id and the endpoint address of the `Resolve` that was sent.
+    Resolve(&'a str, &'a str),
 }
 
 struct Collector<'a> {
@@ -668,7 +669,9 @@ impl Collector<'_> {
                     }
                 }
             }
-            (Body::ResolveMatches(Some(t)), Expecting::Resolve(id)) if correlated(id) => self.add(t, msg.header.app_sequence, d.from.ip()),
+            (Body::ResolveMatches(Some(t)), Expecting::Resolve(id, address)) if correlated(id) && t.address.eq_ignore_ascii_case(address) => {
+                self.add(t, msg.header.app_sequence, d.from.ip());
+            }
             (Body::Hello(t), _) if self.opts.accept_announcements => {
                 if self.opts.query.matches(&t) {
                     self.add(t, msg.header.app_sequence, d.from.ip());
@@ -677,7 +680,24 @@ impl Collector<'_> {
                 }
             }
             (Body::Bye(t), _) if self.opts.accept_announcements => {
-                self.report.devices.retain(|dev| !dev.target.address.eq_ignore_ascii_case(&t.address));
+                let seq = msg.header.app_sequence;
+                let mut stale = false;
+                self.report.devices.retain(|dev| {
+                    if !dev.target.address.eq_ignore_ascii_case(&t.address) {
+                        return true;
+                    }
+                    // A `Bye` older than what is known (a reordered datagram from before a restart)
+                    // must not remove the live device.
+                    let newer = match (&seq, &dev.app_sequence) {
+                        (Some(n), Some(o)) => n.supersedes(o),
+                        _ => true,
+                    };
+                    stale |= !newer;
+                    !newer
+                });
+                if stale {
+                    self.report.ignored.stale += 1;
+                }
             }
             _ => self.report.ignored.unrelated += 1,
         }
@@ -745,7 +765,7 @@ pub fn discover<S: DiscoverySocket + ?Sized>(socket: &S, opts: &DiscoverOptions)
             let rid = new_uuid();
             let Ok(dest) = Destination::unicast(to) else { continue };
             socket.send(&dest, resolve(&rid, &address).as_bytes())?;
-            listen(socket, Instant::now() + opts.resolve_window, &mut c, &Expecting::Resolve(&rid))?;
+            listen(socket, Instant::now() + opts.resolve_window, &mut c, &Expecting::Resolve(&rid, &address))?;
         }
     }
     Ok(c.report)
@@ -1171,6 +1191,43 @@ mod tests {
         let r2 = discover(&staged, &DiscoverOptions { probe_sends: 1, resolve_window: Duration::from_millis(10), ..Default::default() }).unwrap();
         assert_eq!(r2.devices.len(), 1, "{r2:?}");
         assert_eq!(r2.devices[0].urls.iter().map(DeviceUrl::as_url).collect::<Vec<_>>(), ["http://10.0.0.5:80/found"]);
+    }
+
+    #[test]
+    fn a_resolve_match_for_another_address_is_not_accepted() {
+        let bare = FakeResponder::new(target("r", print_dev(), &[]), peer(5));
+        let evil = target("evil", print_dev(), &["http://10.0.0.99:80/x"]);
+        let staged = FakeSocket::new();
+        staged.add_responder(move |_, payload| match parse(payload) {
+            Ok(m) => match m.body {
+                Body::Probe(_) => bare.answer(payload),
+                Body::Resolve { .. } => {
+                    let id = m.header.message_id.as_deref().map(|m| m.strip_prefix("urn:uuid:").unwrap_or(m).to_owned()).unwrap();
+                    let p = resolve_matches(&new_uuid(), &id, &AppSequence::new(1, 1), &evil);
+                    vec![Datagram { from: peer(5), payload: p.into_bytes() }]
+                }
+                _ => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        });
+        let opts = DiscoverOptions { probe_sends: 1, resolve_window: Duration::from_millis(10), ..Default::default() };
+        let r = discover(&staged, &opts).unwrap();
+        assert_eq!(r.devices.len(), 1, "no second device from the foreign match: {r:?}");
+        assert!(r.devices[0].urls.is_empty());
+        assert_eq!(r.ignored.unrelated, 1);
+    }
+
+    #[test]
+    fn a_bye_older_than_the_known_announcement_does_not_remove_the_device() {
+        let t = target("h", print_dev(), &["http://10.0.0.7/x"]);
+        let socket = FakeSocket::new();
+        // The restarted device's Hello (instance 2) arrives before the old instance's Bye.
+        socket.push(Datagram { from: peer(7), payload: hello("m1", &AppSequence::new(2, 1), &t).into_bytes() });
+        socket.push(Datagram { from: peer(7), payload: bye("m2", &AppSequence::new(1, 9), &t).into_bytes() });
+        let opts = DiscoverOptions { probe_sends: 1, accept_announcements: true, ..Default::default() };
+        let r = discover(&socket, &opts).unwrap();
+        assert_eq!(r.devices.len(), 1, "{r:?}");
+        assert_eq!(r.ignored.stale, 1);
     }
 
     #[test]

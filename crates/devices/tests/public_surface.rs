@@ -26,7 +26,9 @@ fn the_names_an_app_imports_exist_and_have_the_methods_it_calls() {
     assert_eq!(settings_from_request(&record.request).map(|s| s.pages), Ok(2));
     assert_eq!(record.effective_state(), ScanJobState::Preparing);
     let _ = (record.was_cut_off(), record.exit_class(), record.pages_kept(), record.summary_line(), record.last_error_kind());
-    let _ = (record.can_add_sheets(), record.can_turn(), record.to_json());
+    let _ = (record.can_add_sheets(), record.can_turn(), record.two_sided(), record.to_json());
+    let mut numbered = record.clone();
+    numbered.number_pages_by_file();
     assert!(JobRecord::from_json(&record.to_json()).is_ok());
     assert_eq!(exit_code(ExitClass::Completed), 0);
     let _ = (state_name(ScanJobState::Preparing), iso8601(0), JOB_FILE, JOB_FILE_VERSION);

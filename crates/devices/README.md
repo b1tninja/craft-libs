@@ -23,7 +23,9 @@ copying them.
   page file is written straight to its place in the document (`duplex_page_number`: the front of sheet `i` is
   `page-(2i-1)`, its back `page-2i`), so a backs pass can stop at any sheet and be continued, and nothing is
   rearranged at the end. `place_fronts_for_duplex` renumbers the fronts once when the job turns, highest first, and
-  is safe to run again after it was cut off.
+  is safe to run again after it was cut off. The journal keeps the pages in scan order, each numbered by its page
+  file (`JobRecord::number_pages_by_file`). A job scanned through the scanner's duplex unit (`request.duplex`) already
+  has its backs and never turns.
 
 ## Not in (deliberately)
 

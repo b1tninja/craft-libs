@@ -246,9 +246,24 @@ impl JobRecord {
     }
 
     /// A finished single-sided job whose backs can now be scanned: flip the whole stack and start the backs
-    /// pass from the last sheet.
+    /// pass from the last sheet. A job scanned through the scanner's duplex unit already has its backs.
     pub fn can_turn(&self) -> bool {
-        self.manual_duplex.is_none() && self.completed() && self.pages_kept() > 0
+        self.manual_duplex.is_none() && self.completed() && self.pages_kept() > 0 && !self.two_sided()
+    }
+
+    /// The request asked the scanner's duplex unit for both sides.
+    pub fn two_sided(&self) -> bool {
+        self.request.get("duplex").and_then(Value::as_bool).unwrap_or(false)
+    }
+
+    /// Number the kept pages by the page file each one is (for a manual-duplex job, its place in the document; the
+    /// list itself stays in scan order). Call before writing the record.
+    pub fn number_pages_by_file(&mut self) {
+        if let Some(duplex) = self.manual_duplex {
+            for (index, page) in self.journal.pages.iter_mut().enumerate() {
+                page.number = u32::try_from(duplex_page_number(duplex.sheets, index)).unwrap_or(u32::MAX);
+            }
+        }
     }
 
     /// `Title: state, 12 of 40 pages, 1 attempt, jam`, the same text as `ScanJobSnapshot::summary_line`
@@ -783,6 +798,22 @@ mod tests {
         let dir = temp("duplex-hints");
         assert!(detail_text("app", &dir, &whole).contains("--append --yes adds the next feeder load"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_two_sided_job_never_turns_and_duplex_pages_are_numbered_by_their_file() {
+        let mut two_sided = record(ScanSettings { pages: 0, duplex: true, ..ScanSettings::default() });
+        two_sided.journal.pages = (1..=4).map(page).collect();
+        two_sided.journal.state = ScanJobState::Terminal(scan::job::Outcome::Completed);
+        assert!(two_sided.two_sided() && !two_sided.can_turn(), "the duplex unit already scanned the backs");
+        assert!(two_sided.can_add_sheets(), "more sheets can still be added");
+
+        let mut turned = record(ScanSettings { pages: 6, ..ScanSettings::default() });
+        turned.journal.pages = (1..=5).map(page).collect();
+        turned.manual_duplex = Some(ManualDuplex::backs_of(3).after(5));
+        turned.number_pages_by_file();
+        let numbers: Vec<u32> = turned.journal.pages.iter().map(|p| p.number).collect();
+        assert_eq!(numbers, [1, 3, 5, 6, 4], "fronts on odd pages, backs from the last sheet down");
     }
 
     #[test]

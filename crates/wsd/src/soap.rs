@@ -30,6 +30,17 @@ use crate::mtom;
 use crate::ns;
 use crate::policy::{DeviceUrl, NetworkLimits};
 use crate::transport::{Request, Response, Transport};
+
+/// The slowest upload the time limit allows for, in bytes a second. The limit covers the whole
+/// request, body included, so a large document (`SendDocument`) over a slow link must not use up
+/// the budget meant for the printer's reply: that would end as an outcome-unknown timeout after the
+/// job was created.
+const UPLOAD_FLOOR_BYTES_PER_SEC: u64 = 64 * 1024;
+
+/// `timeout` for the exchange plus the time to send `body_len` bytes at the upload floor.
+fn with_upload_allowance(timeout: Duration, body_len: usize) -> Duration {
+    timeout.saturating_add(Duration::from_secs(body_len as u64 / UPLOAD_FLOOR_BYTES_PER_SEC))
+}
 use crate::xml;
 
 /// Produces message ids (without the `urn:uuid:` prefix).
@@ -207,12 +218,15 @@ impl<T: Transport> SoapClient<T> {
         }
     }
 
-    /// The time one request may take: the configured timeout, cut to the deadline.
-    fn budget(&self) -> Result<Duration> {
-        if self.cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
-            return Err(Error::Cancelled);
-        }
-        let mut timeout = self.limits.timeout;
+    fn check_cancel(&self) -> Result<()> {
+        if self.cancel.as_ref().is_some_and(CancelToken::is_cancelled) { Err(Error::Cancelled) } else { Ok(()) }
+    }
+
+    /// The time one request of `body_len` bytes may take: the configured timeout plus the upload
+    /// allowance, then cut to the deadline (the deadline is the last word).
+    fn budget(&self, body_len: usize) -> Result<Duration> {
+        self.check_cancel()?;
+        let mut timeout = with_upload_allowance(self.limits.timeout, body_len);
         if let Some(deadline) = self.deadline {
             let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or(Error::Timeout)?;
             timeout = timeout.min(left);
@@ -270,7 +284,7 @@ impl<T: Transport> SoapClient<T> {
 
     /// Post the call: its message id and the raw reply.
     fn post(&self, call: &Call<'_>) -> Result<(String, Response)> {
-        let timeout = self.budget()?;
+        self.check_cancel()?;
         let id = (self.ids)();
         let namespaces: Vec<(&str, &str)> = call.namespaces.iter().map(|(p, u)| (p.as_str(), u.as_str())).collect();
         let envelope = build_envelope_with_headers(&self.endpoint.as_url(), &call.action, &id, &namespaces, &call.headers, &call.body);
@@ -284,6 +298,7 @@ impl<T: Transport> SoapClient<T> {
         if body.len() > self.limits.max_request {
             return Err(Error::TooLarge("the request", self.limits.max_request));
         }
+        let timeout = self.budget(body.len())?;
         let request = Request { content_type, soap_action: call.action.clone(), body, timeout, max_response: self.limits.max_response };
         Ok((id, self.transport.post(&self.endpoint, request)?))
     }
@@ -536,6 +551,32 @@ mod tests {
         let far = SoapClient::new(&script, url()).with_budget(Duration::from_secs(3600));
         far.call(&call(), value).unwrap();
         assert_eq!(script.seen.lock().unwrap()[1].1.timeout, NetworkLimits::default().timeout);
+    }
+
+    #[test]
+    fn the_time_limit_grows_with_the_body_it_has_to_send() {
+        let base = Duration::from_secs(30);
+        assert_eq!(with_upload_allowance(base, 0), base, "a small request keeps its limit");
+        assert_eq!(with_upload_allowance(base, 10 * 1024), base);
+        // 6.4 MiB at 64 KiB/s needs 100 s more.
+        assert_eq!(with_upload_allowance(base, 6_553_600), base + Duration::from_secs(100));
+        assert_eq!(with_upload_allowance(Duration::MAX, usize::MAX), Duration::MAX, "no overflow");
+    }
+
+    #[test]
+    fn a_deadline_bounds_the_timeout_of_a_large_body() {
+        let script = Script::echo();
+        let data = vec![0u8; 10 * 1024 * 1024];
+        let big = || call().attachment(Attachment { cid: "doc@x", data: &data });
+        let bounded = SoapClient::new(&script, url()).with_budget(Duration::from_secs(60));
+        bounded.call(&big(), value).unwrap();
+        let t = script.seen.lock().unwrap()[0].1.timeout;
+        assert!(t <= Duration::from_secs(60), "the upload allowance must not outrun the deadline: {t:?}");
+        // Without a deadline the allowance applies in full.
+        let free = SoapClient::new(&script, url());
+        free.call(&big(), value).unwrap();
+        let t = script.seen.lock().unwrap()[1].1.timeout;
+        assert!(t > NetworkLimits::default().timeout + Duration::from_secs(150), "{t:?}");
     }
 
     #[test]

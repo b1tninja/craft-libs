@@ -336,7 +336,7 @@ printer) and the UI then says to check the printer before sending again. Cancel 
 phases and the host is told once. Everything arrives over `mpsc` receivers drained once per frame, so
 the UI thread never blocks; a worker built on `craft-print` maps `Submitted` to `Accepted`, each
 `JobStatus` to `Status` (`JobState::name()` feeds `Stage::from_name`) and its `WatchOutcome` to the
-`Report`. Workers that send no updates behave exactly as before.
+`Report`. A worker that sends no updates shows only its result.
 
 **Sheet totals are optional.** Many printers report sheets done and never a total, so
 `Progress::sheets_total` is an `Option`: while it is unknown the accepted phase shows the count
@@ -346,13 +346,11 @@ determinate bar (`Labels::sheets_progress`). The app can supply one: set `Draft:
 `Request::expected_pages` (a `craft-print` worker passes it as `JobOptions::expected_pages`), and the
 model turns it into an estimated sheet total (`Draft::expected_sheets`: pages halved and rounded up
 for a two-sided job, times the copies, fixed when the job starts) that fills a missing or zero total
-of every `Accepted` and `Status` update. A total the printer reports always wins. Additive changes
-for hosts: `Request` gained `expected_pages` (build one with `..Default::default()` if you
-construct it yourself), `Draft` gained `expected_pages` and `expected_sheets()`, and `Progress` gained
-`fraction()` and `with_expected_total()`; `JobHandle`, `JobUpdate`, `State::start_job` and `Labels` are
-unchanged.
+of every `Accepted` and `Status` update. A total the printer reports always wins. A host that builds a
+`Request` itself sets `expected_pages` or uses `..Default::default()`; `Progress::fraction()` and
+`Progress::with_expected_total()` are the helpers the model uses.
 
-**Options are three-state** (`capability::Capability`, see below). For copies, sides, orientation,
+**Options are three-state** (`capability::Capability`, see [Device capabilities](#device-capabilities) above). For copies, sides, orientation,
 quality, colour mode and resolution (and the media size the app names in `Draft::request`), `Caps`
 holds a `Capability`: *supported* (the printer published a list or range: the control is enabled and
 offers only that), *unsupported* (it published its answer and the option is not in it: the control is
@@ -369,14 +367,12 @@ static; the printer's status (state and reasons) is only displayed and never dis
 A new query or a failed one replaces the states (a failed read leaves everything unknown and clears
 the choices); a choice the new answer rules out is cleared.
 
-Breaking changes to `Caps` (this module is unmerged): its option fields are `Capability` values
-instead of `Vec<String>` and `Option<(u32, u32)>` (`sides`, `orientations`, `qualities`,
-`media_sizes`: `Capability<String>`; `copies: Capability<u32>`, a range), and it gained `color_modes`
-and `resolutions`. An empty list used to mean "not said"; now `None`/empty is the host's call, see the
-table. `Request` gained `color` and `resolution`, `Draft` gained `color` and `resolution`, and `Labels`
-gained `color`, `color_color`, `color_monochrome`, `resolution`, `resolution_dpi` (`{dpi}`),
-`resolution_dpi_xy` (`{x}`, `{y}`), six `unsupported_*` reasons and `unconfirmed_note` (empty omits
-it); `ColorMode`, `Resolution`, `COMMON_RESOLUTIONS` and `UNKNOWN_MAX_COPIES` are new, and `Sides`,
+`Caps` holds its options as `Capability` values (`sides`, `orientations`, `qualities`, `media_sizes`,
+`color_modes`: `Capability<String>` or the enum; `copies: Capability<u32>`, a range; `resolutions`); how a host
+reads "not said" from `craft-print` is in the table. `Request` and `Draft` carry `color` and `resolution`.
+`Labels` has `color`, `color_color`, `color_monochrome`, `resolution`, `resolution_dpi` (`{dpi}`),
+`resolution_dpi_xy` (`{x}`, `{y}`), six `unsupported_*` reasons and `unconfirmed_note` (empty omits it).
+`ColorMode`, `Resolution`, `COMMON_RESOLUTIONS` and `UNKNOWN_MAX_COPIES` are public, and `Sides`,
 `Orientation` and `Quality` derive `Ord`.
 
 How a host fills `Caps` from `craft-print`'s `PrinterDetails`:

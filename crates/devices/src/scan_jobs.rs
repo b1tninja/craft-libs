@@ -364,16 +364,12 @@ pub fn place_fronts_for_duplex(dir: &Path, sheets: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Write `record` to `dir/scan-job.json` atomically: a temporary file in the same folder, then a rename.
+/// Write `record` to `dir/scan-job.json` atomically with `craft-atomic`: staged beside the file, flushed, then renamed
+/// over it, so a reader never sees half a journal and a failed write leaves the previous one.
 pub fn write_record(dir: &Path, record: &JobRecord) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&record.to_json()).map_err(|error| error.to_string())?;
     let path = dir.join(JOB_FILE);
-    let temp = dir.join(format!("{JOB_FILE}.tmp"));
-    std::fs::write(&temp, text.as_bytes()).map_err(|error| format!("{}: {error}", temp.display()))?;
-    std::fs::rename(&temp, &path).map_err(|error| {
-        let _ = std::fs::remove_file(&temp);
-        format!("{}: {error}", path.display())
-    })
+    craft_atomic::atomic_write(&path, text.as_bytes()).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// Read `dir/scan-job.json`.
@@ -857,7 +853,8 @@ mod tests {
         let settings = ScanSettings { device: "wia:x".into(), pages: 3, dpi: 300, ..ScanSettings::default() };
         let written = record(settings);
         write_record(&dir, &written).unwrap();
-        assert!(!dir.join("scan-job.json.tmp").exists(), "the temporary file is renamed away");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|entry| entry.file_name()).collect();
+        assert_eq!(names, [JOB_FILE], "the staging file is renamed away");
         let read = read_record(&dir).unwrap();
         assert_eq!(read.id, "scan-1");
         assert_eq!(read.journal, written.journal);

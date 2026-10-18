@@ -841,8 +841,11 @@ impl IppBackend {
         };
         let history = match client.get_jobs(Which::Completed, user, my_jobs, limit) {
             Ok(rows) => rows,
-            // A printer that keeps no history says so with a status; the active jobs are the answer.
-            Err(e) if e.status().is_some() => Vec::new(),
+            // A printer that keeps no history refuses the request itself (a client error such as
+            // attributes-or-values-not-supported, or operation-not-supported); the active jobs are the
+            // answer. A busy, unavailable, temporary or internal error says nothing about history, and
+            // an empty one here could let a finished job look lost, so it is the caller's error.
+            Err(e) if e.status().is_some_and(refuses_history) => Vec::new(),
             Err(e) => return Err(e.print_error(Op::Query)),
         };
         let now = SystemTime::now();
@@ -889,5 +892,36 @@ impl IppBackend {
             .collect();
         jobs.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
         Ok(jobs.into_iter().map(|(_, job)| job).collect())
+    }
+}
+
+/// Does this status mean "this printer will not list its history" (so the active jobs are all there
+/// is), as opposed to a transient failure that says nothing about it? The request itself is refused:
+/// a client error other than a timeout, or operation-not-supported.
+fn refuses_history(code: StatusCode) -> bool {
+    code == StatusCode::OPERATION_NOT_SUPPORTED || (code.is_client_error() && code != StatusCode::TIMEOUT)
+}
+
+#[cfg(test)]
+mod history_status_tests {
+    use super::{StatusCode, refuses_history};
+
+    #[test]
+    fn only_a_refusal_of_the_request_means_no_history() {
+        for refused in
+            [StatusCode::ATTRIBUTES_OR_VALUES_NOT_SUPPORTED, StatusCode::OPERATION_NOT_SUPPORTED, StatusCode::BAD_REQUEST, StatusCode::NOT_POSSIBLE]
+        {
+            assert!(refuses_history(refused), "{refused:?}");
+        }
+        for transient in [
+            StatusCode::BUSY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::TEMPORARY_ERROR,
+            StatusCode::INTERNAL_ERROR,
+            StatusCode::DEVICE_ERROR,
+            StatusCode::TIMEOUT,
+        ] {
+            assert!(!refuses_history(transient), "{transient:?}");
+        }
     }
 }

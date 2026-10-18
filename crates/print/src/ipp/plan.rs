@@ -89,8 +89,21 @@ fn plan_scaling(scaling: Scaling, strict: bool, printer: &PrinterAttrs, warnings
             }
         },
         Scaling::Exact => {
-            let differs = printer.scaling_default.as_deref().is_some_and(|d| d != keyword);
-            Ok((differs && printer.supports_scaling(keyword) == Some(true)).then_some(keyword))
+            let Some(default) = printer.scaling_default.as_deref().filter(|d| *d != keyword) else {
+                return Ok(None);
+            };
+            match printer.supports_scaling(keyword) {
+                Some(true) => Ok(Some(keyword)),
+                // The printer's own default would resize the page and actual size cannot be asked for.
+                // Actual size is the neutral job every request starts from, not a setting the person
+                // chose, so even strict mode warns instead of refusing.
+                Some(false) | None => {
+                    warnings.push(format!(
+                        "actual size is not guaranteed: the printer's print-scaling default is {default} and it does not list print-scaling {keyword}"
+                    ));
+                    Ok(None)
+                }
+            }
         }
     }
 }
@@ -337,7 +350,15 @@ mod tests {
         assert_eq!(sent(Some(&["auto", "none"]), None), None, "default unknown: nothing assumed");
         assert_eq!(sent(Some(&["auto", "fit"]), Some("auto")), None, "none not listed");
         assert_eq!(sent(None, Some("auto")), None);
-        let p = run(&exact, &JobOptions::new(), true, &scaled(Some(&["auto"]), Some("auto"))).unwrap();
+        // Not expressible on a printer whose default resizes: said, not silently assumed (strict or not).
+        for strict in [false, true] {
+            let p = run(&exact, &JobOptions::new(), strict, &scaled(Some(&["auto"]), Some("auto"))).unwrap();
+            assert!(p.warnings.iter().any(|w| w.contains("actual size is not guaranteed") && w.contains("auto")), "{:?}", p.warnings);
+        }
+        // Nothing to say when the default already is actual size, or when it is unknown.
+        let p = run(&exact, &JobOptions::new(), true, &scaled(Some(&["auto"]), Some("none"))).unwrap();
+        assert!(p.warnings.is_empty());
+        let p = run(&exact, &JobOptions::new(), true, &scaled(Some(&["auto"]), None)).unwrap();
         assert!(p.warnings.is_empty());
     }
 

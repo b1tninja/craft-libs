@@ -779,9 +779,19 @@ impl WsdBackend {
     /// was created but never received its document shows as pending: cancel it with the registry's
     /// `cancel_job`. Nothing is sent that changes a job.
     pub fn reconcile(&self, printer: &str, job_title: &str) -> Result<Reconciled, PrintError> {
+        self.reconcile_tagged(printer, job_title, None)
+    }
+
+    /// [`Self::reconcile`] for a request that carried a [`Tag`]: the job was named with the tag as a
+    /// suffix of the title (cut to fit), so that is the name to look for. Without the tag here, a
+    /// tagged job is never found and sending again would print it twice.
+    pub fn reconcile_tagged(&self, printer: &str, job_title: &str, tag: Option<&Tag>) -> Result<Reconciled, PrintError> {
         let entry = self.entry(printer)?;
         let client = self.client(&entry);
-        let name: String = job_title.chars().take(MAX_NAME).collect();
+        let name: String = match tag {
+            Some(tag) => tag.apply_to(job_title, Some(MAX_NAME)),
+            None => job_title.chars().take(MAX_NAME).collect(),
+        };
         let user = self.config.user_name.as_str();
         let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
         // History is best effort when the printer refuses it (a fault), not when the wire fails.

@@ -143,7 +143,7 @@ match watch.tick(registry) {
   (`watch: WatchSupport`, `poll_interval`). The job is `None` for a spooler that gives no handle.
 * `WatchSupport::None` means the backend cannot report (a fire-and-forget spooler): the status is
   `JobState::Unknown`, "accepted, outcome unknown", which is not terminal and not a failure. Do not
-  poll it. `Poll` means ask every `poll_interval`; `Events` is reserved (nothing listens yet).
+  poll it. `Poll` means ask every `poll_interval`; `Events` means a push listener is running and healthy (WS-Print, opt-in with `WsdBackend::with_events`; see "Push status" below), else the backend polls.
 * `JobStatus` has a `JobState` (Pending, Held, Processing, NeedsAttention, Completed,
   CompletedWithErrors, Cancelled, Aborted, Unknown), reasons, `warnings` (a completed job the printer
   qualified: "completed with warnings" is `Completed` plus this list), optional sheet and page counters
@@ -406,8 +406,8 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
 
 | Feature | Default | Adds | Notes |
 | --- | --- | --- | --- |
-| `ipp` | on | `craft-wsd` (the same git dependency as `wsd`; its plain-HTTP transport and URL policy) and nothing else: the IPP codec is this crate's own | Not built for `wasm32`. No TLS (`ipps://` is refused), no authentication, no discovery. See [docs/ipp.md](docs/ipp.md). |
-| `wsd` | on | `craft-wsd` (git, see below) and `roxmltree`; through `craft-wsd`: `thiserror` and `ureq` (plain HTTP, no TLS, no proxy, no redirects) | Not built for `wasm32`. `--no-default-features` is the CUPS/Windows crate with none of them. |
+| `ipp` | on | `craft-wsd` (the workspace crate `crates/wsd`, as for `wsd`; its plain-HTTP transport and URL policy) and nothing else: the IPP codec is this crate's own | Not built for `wasm32`. No TLS (`ipps://` is refused), no authentication, no discovery. See [docs/ipp.md](docs/ipp.md). |
+| `wsd` | on | `craft-wsd` (the workspace crate `crates/wsd`) and `roxmltree`; through `craft-wsd`: `thiserror` and `ureq` (plain HTTP, no TLS, no proxy, no redirects) | Not built for `wasm32`. `--no-default-features` is the CUPS/Windows crate with none of them. |
 
 * **Safety stance.** Nothing in this feature discovers or connects until the app adds a printer.
   The backend lists only printers the app added (`add`, `add_named`, `with_printers`); it does no

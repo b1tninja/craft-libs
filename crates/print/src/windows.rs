@@ -180,8 +180,6 @@ pub(crate) struct Spooled {
 pub(crate) fn submit_with_render(pdf: &[u8], job: &Job, choice: &RenderChoice, progress: &mut dyn FnMut(usize, usize)) -> Result<Spooled, Error> {
     let trace = JobTrace::begin();
     trace.line(|| format!("submit: {} bytes, printer {:?}, scaling {:?}, copies {}", pdf.len(), job.printer, job.scaling, job.copies));
-    let trace = JobTrace::begin();
-    trace.line(|| format!("submit: {} bytes, printer {:?}, scaling {:?}, copies {}", pdf.len(), job.printer, job.scaling, job.copies));
     let read = sheets::read(pdf)?;
     read.check_print_annotations()?;
     let count = read.sheets.len();

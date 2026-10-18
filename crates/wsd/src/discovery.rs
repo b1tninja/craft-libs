@@ -631,8 +631,11 @@ impl Collector<'_> {
                 self.report.ignored.stale += 1;
                 return;
             }
-            // Keep addresses we already had if the newer message carries none.
-            let keep = urls.is_empty() && !existing.urls.is_empty();
+            // Keep addresses we already had if the newer message carries none, but only within the
+            // same instance of the device: after a restart (a new instance id) the old addresses
+            // may be stale, and keeping them would also stop the directed Resolve that fills them in.
+            let same_instance = matches!((&seq, &existing.app_sequence), (Some(n), Some(o)) if n.instance_id == o.instance_id);
+            let keep = same_instance && urls.is_empty() && !existing.urls.is_empty();
             let (u, d, t) = if keep {
                 (existing.urls.clone(), existing.dropped_xaddrs, Target { xaddrs: existing.target.xaddrs.clone(), ..target })
             } else {
@@ -1228,6 +1231,27 @@ mod tests {
         let r = discover(&socket, &opts).unwrap();
         assert_eq!(r.devices.len(), 1, "{r:?}");
         assert_eq!(r.ignored.stale, 1);
+    }
+
+    #[test]
+    fn addresses_are_kept_only_within_the_same_instance_of_the_device() {
+        let with_url = target("h", print_dev(), &["http://10.0.0.7/x"]);
+        let without = target("h", print_dev(), &[]);
+        let opts = DiscoverOptions { probe_sends: 1, accept_announcements: true, ..Default::default() };
+        let run = |first: &AppSequence, second: &AppSequence| {
+            let socket = FakeSocket::new();
+            socket.push(Datagram { from: peer(7), payload: hello("m1", first, &with_url).into_bytes() });
+            socket.push(Datagram { from: peer(7), payload: hello("m2", second, &without).into_bytes() });
+            discover(&socket, &opts).unwrap()
+        };
+        // A later message of the same instance without addresses keeps the ones already known.
+        let same = run(&AppSequence::new(1, 1), &AppSequence::new(1, 2));
+        assert_eq!(same.devices.len(), 1, "{same:?}");
+        assert!(!same.devices[0].urls.is_empty(), "same instance: the known addresses stay");
+        // After a restart (a new instance id) they may be stale: they go.
+        let restarted = run(&AppSequence::new(1, 1), &AppSequence::new(2, 1));
+        assert_eq!(restarted.devices.len(), 1, "{restarted:?}");
+        assert!(restarted.devices[0].urls.is_empty(), "a new instance must not keep the old instance's addresses");
     }
 
     #[test]

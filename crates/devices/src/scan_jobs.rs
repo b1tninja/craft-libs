@@ -126,6 +126,9 @@ impl ManualDuplex {
         let direction = value.get("direction").and_then(Value::as_str).unwrap_or("");
         let direction = Direction::parse(direction).ok_or_else(|| format!("manual_duplex.direction {direction:?} is not fronts or backs"))?;
         let duplex = Self { sheets: number("sheets")?, direction, cursor: number("cursor")? };
+        if duplex.sheets == 0 {
+            return Err("manual_duplex.sheets is 0: a manual-duplex job has at least one sheet".to_string());
+        }
         if duplex.cursor > duplex.sheets {
             return Err(format!("manual_duplex.cursor {} is past the last sheet ({})", duplex.cursor, duplex.sheets));
         }
@@ -136,13 +139,19 @@ impl ManualDuplex {
 /// The page file number (1-based) of the job's page `index` (0-based, in scan order) in a manual-duplex job
 /// of `sheets`: fronts first (sheet `i` is `2i-1`), then the backs in feed order (sheets `n, n-1, ...`, the
 /// back of sheet `i` is `2i`).
+///
+/// Total for every input: a job of no sheets numbers its pages in scan order, and a page past the last back
+/// stays on page 2.
 pub fn duplex_page_number(sheets: u32, index: usize) -> usize {
     let sheets = usize::try_from(sheets).unwrap_or(usize::MAX);
+    if sheets == 0 {
+        return index.saturating_add(1);
+    }
     if index < sheets {
-        2 * index + 1
+        index.saturating_mul(2).saturating_add(1)
     } else {
-        let back = index - sheets; // 0 is the back of the last sheet
-        2 * (sheets - back.min(sheets - 1))
+        let back = (index - sheets).min(sheets - 1); // 0 is the back of the last sheet
+        (sheets - back).saturating_mul(2)
     }
 }
 
@@ -213,11 +222,7 @@ impl JobRecord {
     /// by a process that ended mid-scan, for example one that was killed: the scanner may have moved, so
     /// it is an unknown outcome.
     pub fn effective_state(&self) -> ScanJobState {
-        match self.journal.state {
-            ScanJobState::Acquiring => ScanJobState::NeedsAttention,
-            ScanJobState::Preparing if self.journal.attempts_total > 0 => ScanJobState::NeedsAttention,
-            state => state,
-        }
+        self.journal.effective_state()
     }
 
     /// True when [`Self::effective_state`] differs from what was written because the writer never finished.
@@ -249,6 +254,13 @@ impl JobRecord {
     /// pass from the last sheet. A job scanned through the scanner's duplex unit already has its backs.
     pub fn can_turn(&self) -> bool {
         self.manual_duplex.is_none() && self.completed() && self.pages_kept() > 0 && !self.two_sided()
+    }
+
+    /// A manual-duplex job in its backs pass with backs still to scan (the back of sheet `cursor` is next). A
+    /// backs pass that ran the feeder empty ends `Completed` like any whole-feeder scan, so this, not the state,
+    /// says whether the job is done.
+    pub fn backs_remaining(&self) -> bool {
+        self.manual_duplex.is_some_and(|duplex| duplex.direction == Direction::Backs && duplex.cursor > 0)
     }
 
     /// The request asked the scanner's duplex unit for both sides.
@@ -513,10 +525,15 @@ pub fn detail_text(program: &str, dir: &Path, record: &JobRecord) -> String {
             out.push_str(&format!("    {}\n", attempt_line(attempt)));
         }
     }
-    out.push_str(&format!("  next: {}\n", next_step(program, dir, state)));
     let d = dir.display();
+    if record.backs_remaining() && matches!(state, ScanJobState::Terminal(_)) {
+        // The backs pass ended (the feeder ran empty) with backs still missing: the job is not done.
+        out.push_str(&format!("  next: scan the rest of the backs: {program} scan --continue {d} --append --yes\n"));
+    } else {
+        out.push_str(&format!("  next: {}\n", next_step(program, dir, state)));
+    }
     match record.manual_duplex {
-        Some(duplex) if duplex.cursor > 0 && !matches!(state, ScanJobState::Terminal(_)) => out.push_str(&format!(
+        Some(duplex) if record.backs_remaining() => out.push_str(&format!(
             "  backs: put the next part of the flipped stack in the feeder (the back of sheet {} is next) and run {program} scan --continue {d} --append --yes; --restart scans the backs again and keeps the fronts\n",
             duplex.cursor
         )),

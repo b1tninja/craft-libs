@@ -1111,6 +1111,11 @@ impl State {
             }
         }
         if let Some(job) = &self.job {
+            // The result is read first and the updates after it: a worker sends its updates before it
+            // sends the result or drops its sender, so everything it said is already queued once its
+            // end is seen. Reading them the other way round could see the end of a worker that sent
+            // `Accepted` between the two reads, and report a document the printer has as a failure.
+            let received = job.result.try_recv();
             // What happened on the way first, in order, then the result; one frame drains them all.
             if let Some(updates) = &job.updates {
                 while let Ok(update) = updates.try_recv() {
@@ -1120,7 +1125,7 @@ impl State {
                     }
                 }
             }
-            let view = match job.result.try_recv() {
+            let view = match received {
                 Ok(Ok(report)) => Some(JobView::Finished(report)),
                 Ok(Err(failure)) => Some(JobView::Failed(failure)),
                 // A worker that ended after the printer accepted the document did not fail: it sent.

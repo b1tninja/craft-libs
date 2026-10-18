@@ -8,7 +8,7 @@
 //! * [`fault`]: SOAP faults as service-neutral values; the service maps the sub-code.
 //! * [`mtom`]: MTOM/XOP packaging and multipart reply reading.
 //! * [`policy`]: [`DeviceUrl`] (numeric private-network addresses only) and [`NetworkLimits`].
-//! * [`transport`]: the [`Transport`] seam; [`http`] (cargo feature `http`, not built for
+//! * [`transport`]: the [`Transport`] seam; [`http`] (built on every target except
 //!   `wasm32`) is a hardened blocking implementation on `ureq` with no proxy, no redirects, a
 //!   timeout and a body cap; it only connects to addresses that [`DeviceUrl`] admits.
 //! * [`error`]: the shared [`Error`], with typed transport failures ([`TransportKind`], [`Stage`]),

@@ -222,8 +222,9 @@ impl ValueSpan {
         if value < self.min || value > self.max {
             return false;
         }
-        let step = if self.step == 0 { 1 } else { self.step };
-        (value - self.min) % step == 0
+        // In i64: a driver can publish any bounds, and `value - min` can overflow i32.
+        let step = if self.step == 0 { 1 } else { i64::from(self.step) };
+        (i64::from(value) - i64::from(self.min)) % step == 0
     }
 }
 
@@ -1660,6 +1661,18 @@ mod tests {
         listed_values, page_path, pixels_for, planned_frame, preview_dpi, region_from_inches, region_from_preview, region_pixels, rescale_extent,
         spanned_values,
     };
+
+    #[test]
+    fn a_span_as_wide_as_i32_checks_its_step_without_overflow() {
+        // A driver can publish any bounds; `value - min` no longer overflows i32.
+        let wide = ValueSpan { min: i32::MIN, max: i32::MAX, step: 3 };
+        // Offsets from i32::MIN: 0 is 2^31 (not a multiple of 3), 1 is 2^31 + 1 (one), i32::MAX is 2^32 - 1 (one).
+        assert!(!wide.contains(0) && wide.contains(1));
+        assert!(wide.contains(i32::MAX) && !wide.contains(i32::MAX - 1));
+        let any = ValueSpan { min: -10, max: i32::MAX, step: 0 };
+        assert!(any.contains(i32::MAX) && !any.contains(-11));
+        assert_eq!(align_to_span(i32::MAX, wide, false).ok(), Some(i32::MAX));
+    }
 
     #[test]
     fn scan_trace_env_values_match_stderr_or_path() {

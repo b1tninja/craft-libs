@@ -896,10 +896,13 @@ impl IppBackend {
 }
 
 /// Does this status mean "this printer will not list its history" (so the active jobs are all there
-/// is), as opposed to a transient failure that says nothing about it? The request itself is refused:
-/// a client error other than a timeout, or operation-not-supported.
+/// is)? Only the statuses that establish a refusal of the history request itself: the request form
+/// (`which-jobs=completed`) is not supported, or the operation is not. Everything else says nothing
+/// about the history and is the caller's error: not-authorized, forbidden and not-found (RFC 8011
+/// defines them apart from "unsupported values"), a timeout, a bad request, busy, unavailable,
+/// temporary or internal errors. A wrong "no history" lets a finished job look lost and be sent twice.
 fn refuses_history(code: StatusCode) -> bool {
-    code == StatusCode::OPERATION_NOT_SUPPORTED || (code.is_client_error() && code != StatusCode::TIMEOUT)
+    matches!(code, StatusCode::ATTRIBUTES_OR_VALUES_NOT_SUPPORTED | StatusCode::OPERATION_NOT_SUPPORTED)
 }
 
 #[cfg(test)]
@@ -908,20 +911,24 @@ mod history_status_tests {
 
     #[test]
     fn only_a_refusal_of_the_request_means_no_history() {
-        for refused in
-            [StatusCode::ATTRIBUTES_OR_VALUES_NOT_SUPPORTED, StatusCode::OPERATION_NOT_SUPPORTED, StatusCode::BAD_REQUEST, StatusCode::NOT_POSSIBLE]
-        {
+        for refused in [StatusCode::ATTRIBUTES_OR_VALUES_NOT_SUPPORTED, StatusCode::OPERATION_NOT_SUPPORTED] {
             assert!(refuses_history(refused), "{refused:?}");
         }
-        for transient in [
+        for other in [
             StatusCode::BUSY,
             StatusCode::SERVICE_UNAVAILABLE,
             StatusCode::TEMPORARY_ERROR,
             StatusCode::INTERNAL_ERROR,
             StatusCode::DEVICE_ERROR,
             StatusCode::TIMEOUT,
+            StatusCode::NOT_AUTHORIZED,
+            StatusCode::NOT_AUTHENTICATED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::NOT_POSSIBLE,
+            StatusCode::BAD_REQUEST,
         ] {
-            assert!(!refuses_history(transient), "{transient:?}");
+            assert!(!refuses_history(other), "{other:?}");
         }
     }
 }

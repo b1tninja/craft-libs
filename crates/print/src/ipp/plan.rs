@@ -89,15 +89,21 @@ fn plan_scaling(scaling: Scaling, strict: bool, printer: &PrinterAttrs, warnings
             }
         },
         Scaling::Exact => {
-            let Some(default) = printer.scaling_default.as_deref().filter(|d| *d != keyword) else {
+            // Already actual size: nothing to ask for. An unknown default is not assumed to be it:
+            // when the printer lists `none`, `none` is sent, since an omitted attribute means "the
+            // printer's default", which may resize.
+            if printer.scaling_default.as_deref() == Some(keyword) {
                 return Ok(None);
-            };
+            }
             match printer.supports_scaling(keyword) {
                 Some(true) => Ok(Some(keyword)),
+                // Nothing known about the default and nothing to ask with: nothing to say either.
+                Some(false) | None if printer.scaling_default.is_none() => Ok(None),
                 // The printer's own default would resize the page and actual size cannot be asked for.
                 // Actual size is the neutral job every request starts from, not a setting the person
                 // chose, so even strict mode warns instead of refusing.
                 Some(false) | None => {
+                    let default = printer.scaling_default.as_deref().unwrap_or_default();
                     warnings.push(format!(
                         "actual size is not guaranteed: the printer's print-scaling default is {default} and it does not list print-scaling {keyword}"
                     ));
@@ -347,7 +353,12 @@ mod tests {
         let sent = |set: Option<&[&str]>, default: Option<&str>| scaling_of(&run(&exact, &JobOptions::new(), false, &scaled(set, default)).unwrap());
         assert_eq!(sent(Some(&["auto", "none"]), Some("auto")), Some(vec![Value::Keyword("none".into())]));
         assert_eq!(sent(Some(&["auto", "none"]), Some("none")), None, "already the default");
-        assert_eq!(sent(Some(&["auto", "none"]), None), None, "default unknown: nothing assumed");
+        assert_eq!(
+            sent(Some(&["auto", "none"]), None),
+            Some(vec![Value::Keyword("none".into())]),
+            "default unknown: none is listed, so it is asked for"
+        );
+        assert_eq!(sent(Some(&["auto", "fit"]), None), None, "default unknown and none not listed: nothing to ask with");
         assert_eq!(sent(Some(&["auto", "fit"]), Some("auto")), None, "none not listed");
         assert_eq!(sent(None, Some("auto")), None);
         // Not expressible on a printer whose default resizes: said, not silently assumed (strict or not).

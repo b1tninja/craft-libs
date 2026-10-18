@@ -13,7 +13,18 @@
 //! does not carry the settings. Times are milliseconds since the Unix epoch. A reader ignores fields it
 //! does not know, defaults the ones an older writer lacked, and refuses a `version` newer than its own.
 //! Whether the page files named by the journal are still on disk is not the journal's business; this
-//! module counts them ([`page_files_on_disk`]) so the commands can say when they differ.
+//! module counts them ([`page_files_for`]) so the commands can say when they differ.
+//!
+//! # Manual duplex
+//!
+//! A scanner without a duplex unit scans both sides as **one job** in two passes: the fronts, then the
+//! stack is flipped and the backs are scanned. The flipped stack feeds the last sheet first, so the backs
+//! arrive for sheets `n, n-1, ..., 1`. [`JobRecord::manual_duplex`] records the sheets, the direction and
+//! the cursor (the sheet whose back is next); the job itself keeps its pages in the order they were
+//! scanned. Every page file is written straight to its place in the document ([`duplex_page_number`]):
+//! the front of sheet `i` is `page-(2i-1)`, its back `page-2i`. When the backs pass starts, the fronts of
+//! the single-sided pass (`page-1..n`) are renumbered once ([`place_fronts_for_duplex`]), so there is no
+//! interleaving step at the end and a pass that stops part-way leaves every page already in its place.
 
 use std::path::{Path, PathBuf};
 
@@ -47,6 +58,94 @@ pub fn state_name(state: ScanJobState) -> &'static str {
     state.name()
 }
 
+/// Which way through the stack a manual-duplex job is going.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// Each scan adds a new sheet (the fronts).
+    Fronts,
+    /// The stack is flipped: each scan is the back of the sheet at the cursor, going down to sheet 1.
+    Backs,
+}
+
+impl Direction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fronts => "fronts",
+            Self::Backs => "backs",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "fronts" => Some(Self::Fronts),
+            "backs" => Some(Self::Backs),
+            _ => None,
+        }
+    }
+}
+
+/// Where a manual-duplex job is in the stack. See the module docs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ManualDuplex {
+    /// Sheets in the stack (the pages of the fronts pass).
+    pub sheets: u32,
+    pub direction: Direction,
+    /// The sheet whose back is scanned next (1-based); 0 once every back is in.
+    pub cursor: u32,
+}
+
+impl ManualDuplex {
+    /// The backs pass of a stack of `sheets`, before any back is scanned.
+    pub fn backs_of(sheets: u32) -> Self {
+        Self { sheets, direction: Direction::Backs, cursor: sheets }
+    }
+
+    /// Backs scanned so far.
+    pub fn backs_scanned(&self) -> u32 {
+        self.sheets.saturating_sub(self.cursor)
+    }
+
+    /// The position after `kept` pages of the job are in (fronts, then the backs scanned so far).
+    pub fn after(self, kept: usize) -> Self {
+        let backs = u32::try_from(kept).unwrap_or(u32::MAX).saturating_sub(self.sheets).min(self.sheets);
+        Self { cursor: self.sheets - backs, ..self }
+    }
+
+    fn to_json(self) -> Value {
+        json!({ "sheets": self.sheets, "direction": self.direction.as_str(), "cursor": self.cursor })
+    }
+
+    fn from_json(value: &Value) -> Result<Self, String> {
+        let number = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| format!("manual_duplex.{key} is not a whole number"))
+        };
+        let direction = value.get("direction").and_then(Value::as_str).unwrap_or("");
+        let direction = Direction::parse(direction).ok_or_else(|| format!("manual_duplex.direction {direction:?} is not fronts or backs"))?;
+        let duplex = Self { sheets: number("sheets")?, direction, cursor: number("cursor")? };
+        if duplex.cursor > duplex.sheets {
+            return Err(format!("manual_duplex.cursor {} is past the last sheet ({})", duplex.cursor, duplex.sheets));
+        }
+        Ok(duplex)
+    }
+}
+
+/// The page file number (1-based) of the job's page `index` (0-based, in scan order) in a manual-duplex job
+/// of `sheets`: fronts first (sheet `i` is `2i-1`), then the backs in feed order (sheets `n, n-1, ...`, the
+/// back of sheet `i` is `2i`).
+pub fn duplex_page_number(sheets: u32, index: usize) -> usize {
+    let sheets = usize::try_from(sheets).unwrap_or(usize::MAX);
+    if index < sheets {
+        2 * index + 1
+    } else {
+        let back = index - sheets; // 0 is the back of the last sheet
+        2 * (sheets - back.min(sheets - 1))
+    }
+}
+
 /// One journal file, as read or about to be written.
 #[derive(Clone, Debug)]
 pub struct JobRecord {
@@ -61,12 +160,14 @@ pub struct JobRecord {
     pub view: Value,
     /// The attempt timeline across runs (each entry is a `craft_scan::job::AttemptRecord`).
     pub attempts: Vec<Value>,
+    /// Set for a manual-duplex job once its backs pass has started; `None` for every other job.
+    pub manual_duplex: Option<ManualDuplex>,
 }
 
 impl JobRecord {
     /// The file's JSON.
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "version": JOB_FILE_VERSION,
             "id": self.id,
             "started": self.started,
@@ -75,7 +176,11 @@ impl JobRecord {
             "journal": serde_json::to_value(&self.journal).unwrap_or(Value::Null),
             "view": self.view,
             "attempts": self.attempts,
-        })
+        });
+        if let Some(duplex) = self.manual_duplex {
+            value["manual_duplex"] = duplex.to_json();
+        }
+        value
     }
 
     /// Parse the file's JSON. Unknown fields are ignored and missing optional ones defaulted; a `version`
@@ -100,6 +205,7 @@ impl JobRecord {
             journal,
             view: value.get("view").cloned().unwrap_or(Value::Null),
             attempts: value.get("attempts").and_then(Value::as_array).cloned().unwrap_or_default(),
+            manual_duplex: value.get("manual_duplex").filter(|v| !v.is_null()).map(ManualDuplex::from_json).transpose()?,
         })
     }
 
@@ -129,10 +235,20 @@ impl JobRecord {
         self.journal.pages.len()
     }
 
-    /// The request was a manual-duplex reverse pass: its pages are only written at the end, so the page
-    /// count on disk says nothing before then.
-    pub fn is_reverse(&self) -> bool {
-        self.request.get("reverse").and_then(Value::as_bool).unwrap_or(false)
+    fn completed(&self) -> bool {
+        self.effective_state() == ScanJobState::Terminal(scan::job::Outcome::Completed)
+    }
+
+    /// A single-sided job that scanned the whole feeder and finished: another feeder load can be added to it
+    /// as more sheets (a pile larger than the feeder, scanned in batches).
+    pub fn can_add_sheets(&self) -> bool {
+        self.manual_duplex.is_none() && self.completed() && self.journal.expected_pages.is_none() && self.pages_kept() > 0
+    }
+
+    /// A finished single-sided job whose backs can now be scanned: flip the whole stack and start the backs
+    /// pass from the last sheet.
+    pub fn can_turn(&self) -> bool {
+        self.manual_duplex.is_none() && self.completed() && self.pages_kept() > 0
     }
 
     /// `Title: state, 12 of 40 pages, 1 attempt, jam`, the same text as `ScanJobSnapshot::summary_line`
@@ -163,19 +279,89 @@ pub fn page_files_on_disk(dir: &Path) -> Result<usize, String> {
     scan::listed_page_files(dir).map(|files| files.len()).map_err(|error| error.to_string())
 }
 
-/// What to tell a person when the page files and the journal disagree; `None` when they agree (or when the
-/// job is a reverse pass that has not written its pages yet).
+/// The numbers of the `page-NNN.*` files in `dir`, sorted, gaps allowed (a manual-duplex backs pass leaves
+/// the even numbers of the sheets it has not reached yet free).
+pub fn page_numbers(dir: &Path) -> Result<Vec<usize>, String> {
+    Ok(numbered_page_files(dir)?.into_iter().map(|(number, _)| number).collect())
+}
+
+fn numbered_page_files(dir: &Path) -> Result<Vec<(usize, PathBuf)>, String> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))? {
+        let path = entry.map_err(|error| format!("{}: {error}", dir.display()))?.path();
+        if !path.is_file() {
+            continue;
+        }
+        let number =
+            path.file_stem().and_then(|stem| stem.to_str()).and_then(|stem| stem.strip_prefix("page-")).and_then(|n| n.parse::<usize>().ok());
+        if let Some(number) = number {
+            found.push((number, path));
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// The page files of `record`'s job: how many, or why they do not match the journal. A single-sided job
+/// expects `page-1..n` without gaps; a manual-duplex job expects exactly the places of the pages it keeps
+/// ([`duplex_page_number`]).
+pub fn page_files_for(dir: &Path, record: &JobRecord) -> Result<usize, String> {
+    let Some(duplex) = record.manual_duplex else { return page_files_on_disk(dir) };
+    let mut expected: Vec<usize> = (0..record.pages_kept()).map(|index| duplex_page_number(duplex.sheets, index)).collect();
+    expected.sort_unstable();
+    let found = page_numbers(dir)?;
+    if found == expected {
+        return Ok(found.len());
+    }
+    let missing: Vec<String> = expected.iter().filter(|n| !found.contains(n)).map(|n| format!("page-{n:03}")).collect();
+    let extra: Vec<String> = found.iter().filter(|n| !expected.contains(n)).map(|n| format!("page-{n:03}")).collect();
+    let mut why = Vec::new();
+    if !missing.is_empty() {
+        why.push(format!("missing {}", missing.join(", ")));
+    }
+    if !extra.is_empty() {
+        why.push(format!("not in the journal {}", extra.join(", ")));
+    }
+    Err(format!("the page files do not match the manual-duplex journal ({})", why.join("; ")))
+}
+
+/// What to tell a person when the page files and the journal disagree; `None` when they agree.
 pub fn page_mismatch(dir: &Path, record: &JobRecord) -> Option<String> {
     let kept = record.pages_kept();
-    match page_files_on_disk(dir) {
+    match page_files_for(dir, record) {
         Err(reason) => Some(format!("the page files cannot be checked against the journal: {reason}")),
-        // A reverse pass writes its pages (interleaved with the fronts) only at the end, so counts do not compare.
-        Ok(_) if record.is_reverse() => None,
         Ok(on_disk) if on_disk != kept => Some(format!(
             "the journal keeps {kept} page(s) but {on_disk} page file(s) are in the folder; the journal does not verify files, so check the folder before continuing"
         )),
         Ok(_) => None,
     }
+}
+
+/// Give the fronts of a single-sided pass (`page-1..n`) their places in a manual-duplex document (front `i`
+/// becomes `page-(2i-1)`). Highest first, so no rename lands on a file that has not moved yet. Safe to run
+/// again after it was cut off: a front whose place is already taken has moved (a page that has not moved
+/// never sits on an odd number above its own, and backs only ever take even numbers), so it is skipped.
+pub fn place_fronts_for_duplex(dir: &Path, sheets: u32) -> Result<(), String> {
+    // The folder as it is now, kept up to date with each move.
+    let mut files: std::collections::BTreeMap<usize, PathBuf> = numbered_page_files(dir)?.into_iter().collect();
+    let sheets = usize::try_from(sheets).unwrap_or(0);
+    for sheet in (2..=sheets).rev() {
+        let place = 2 * sheet - 1;
+        if files.contains_key(&place) {
+            continue;
+        }
+        let Some(from) = files.remove(&sheet) else {
+            return Err(format!("the front of sheet {sheet} (page-{sheet:03}) is not in {}", dir.display()));
+        };
+        let extension = from.extension().and_then(|ext| ext.to_str()).unwrap_or("bin");
+        let to = scan::page_path(dir, place, extension);
+        std::fs::rename(&from, &to).map_err(|error| format!("{}: {error}", from.display()))?;
+        files.insert(place, to);
+    }
+    if sheets >= 1 && !files.contains_key(&1) {
+        return Err(format!("the front of sheet 1 (page-001) is not in {}", dir.display()));
+    }
+    Ok(())
 }
 
 /// Write `record` to `dir/scan-job.json` atomically: a temporary file in the same folder, then a rename.
@@ -240,7 +426,7 @@ pub fn list_line(dir: &Path, record: &JobRecord) -> String {
         dir.display()
     );
     if page_mismatch(dir, record).is_some() {
-        let on_disk = page_files_on_disk(dir).map_or_else(|_| "?".to_string(), |n| n.to_string());
+        let on_disk = page_numbers(dir).map_or_else(|_| "?".to_string(), |n| n.len().to_string());
         line.push_str(&format!("  [{on_disk} page file(s) on disk, journal keeps {}]", record.pages_kept()));
     }
     if record.was_cut_off() {
@@ -258,7 +444,7 @@ pub fn job_json(dir: &Path, record: &JobRecord) -> Value {
     value["exit_class"] = json!(record.exit_class().name());
     value["exit_code"] = json!(exit_code(record.exit_class()));
     value["cut_off"] = json!(record.was_cut_off());
-    value["page_files"] = page_files_on_disk(dir).map_or(Value::Null, |n| json!(n));
+    value["page_files"] = page_numbers(dir).map_or(Value::Null, |n| json!(n.len()));
     value["page_mismatch"] = page_mismatch(dir, record).map_or(Value::Null, Value::String);
     value["updated_text"] = json!(iso8601(record.updated));
     value
@@ -287,6 +473,15 @@ pub fn detail_text(program: &str, dir: &Path, record: &JobRecord) -> String {
     }
     let expected = record.journal.expected_pages.map_or_else(|| "the whole feeder".to_string(), |n| n.to_string());
     out.push_str(&format!("  pages kept: {}   wanted: {}   attempts: {}\n", record.pages_kept(), expected, record.journal.attempts_total));
+    if let Some(duplex) = record.manual_duplex {
+        let next = if duplex.cursor == 0 { "every back is in".to_string() } else { format!("the back of sheet {} is next", duplex.cursor) };
+        out.push_str(&format!(
+            "  manual duplex: {} sheet(s), scanning {}, {} back(s) scanned, {next}\n",
+            duplex.sheets,
+            duplex.direction.as_str(),
+            duplex.backs_scanned()
+        ));
+    }
     if let Some(note) = page_mismatch(dir, record) {
         out.push_str(&format!("  WARNING: {note}\n"));
     }
@@ -308,6 +503,20 @@ pub fn detail_text(program: &str, dir: &Path, record: &JobRecord) -> String {
         }
     }
     out.push_str(&format!("  next: {}\n", next_step(program, dir, state)));
+    let d = dir.display();
+    match record.manual_duplex {
+        Some(duplex) if duplex.cursor > 0 && !matches!(state, ScanJobState::Terminal(_)) => out.push_str(&format!(
+            "  backs: put the next part of the flipped stack in the feeder (the back of sheet {} is next) and run {program} scan --continue {d} --append --yes; --restart scans the backs again and keeps the fronts\n",
+            duplex.cursor
+        )),
+        None if record.can_add_sheets() => out.push_str(&format!(
+            "  more sheets: {program} scan --continue {d} --append --yes adds the next feeder load; to scan the backs, flip the whole stack and run {program} scan --continue {d} --reverse --yes\n"
+        )),
+        None if record.can_turn() => {
+            out.push_str(&format!("  backs: flip the whole stack and run {program} scan --continue {d} --reverse --yes\n"))
+        }
+        _ => {}
+    }
     out
 }
 
@@ -348,7 +557,7 @@ pub fn next_step(program: &str, dir: &Path, state: ScanJobState) -> String {
 }
 
 /// The request fields of a scan: what `--continue` repeats. Never includes tokens.
-pub fn request_json(settings: &ScanSettings, reverse: bool) -> Value {
+pub fn request_json(settings: &ScanSettings) -> Value {
     let mut object = serde_json::Map::new();
     let mut put = |key: &str, value: Option<Value>| {
         if let Some(value) = value {
@@ -361,7 +570,6 @@ pub fn request_json(settings: &ScanSettings, reverse: bool) -> Value {
     put("color", Some(json!(settings.color.as_str())));
     put("pages", Some(json!(settings.pages)));
     put("duplex", Some(json!(settings.duplex)));
-    put("reverse", Some(json!(reverse)));
     put("dpi_y", settings.dpi_y.map(|v| json!(v)));
     put("brightness", settings.brightness.map(|v| json!(v)));
     put("contrast", settings.contrast.map(|v| json!(v)));
@@ -523,11 +731,116 @@ mod tests {
             id: "scan-1".into(),
             started: 1_760_000_000_000,
             updated: 1_760_000_012_000,
-            request: request_json(&state_settings, false),
+            request: request_json(&state_settings),
             journal: snapshot.into_journal(),
             view: Value::Null,
             attempts: Vec::new(),
+            manual_duplex: None,
         }
+    }
+
+    fn page(number: u32) -> scan::job::PageInfo {
+        serde_json::from_value(json!({ "number": number, "attempt": 1, "format": "bmp", "width": 2, "height": 2, "dpi": 200, "bytes": 8 })).unwrap()
+    }
+
+    #[test]
+    fn manual_duplex_places_fronts_on_odd_and_backs_on_even_pages() {
+        // Three sheets: fronts 1, 3, 5; the flipped stack gives the backs of sheets 3, 2, 1 -> pages 6, 4, 2.
+        let numbers: Vec<usize> = (0..6).map(|index| duplex_page_number(3, index)).collect();
+        assert_eq!(numbers, [1, 3, 5, 6, 4, 2]);
+        assert_eq!(duplex_page_number(1, 0), 1);
+        assert_eq!(duplex_page_number(1, 1), 2);
+        let start = ManualDuplex::backs_of(3);
+        assert_eq!((start.cursor, start.backs_scanned()), (3, 0));
+        assert_eq!(start.after(4), ManualDuplex { cursor: 2, ..start });
+        assert_eq!(start.after(6).cursor, 0);
+        assert_eq!(start.after(9).cursor, 0, "never past the first sheet");
+    }
+
+    #[test]
+    fn the_manual_duplex_position_round_trips_and_a_bad_one_is_refused() {
+        let dir = temp("duplex-json");
+        let mut written = record(ScanSettings { pages: 6, ..ScanSettings::default() });
+        written.manual_duplex = Some(ManualDuplex { sheets: 3, direction: Direction::Backs, cursor: 1 });
+        write_record(&dir, &written).unwrap();
+        assert_eq!(read_record(&dir).unwrap().manual_duplex, written.manual_duplex);
+        let mut value = written.to_json();
+        value["manual_duplex"]["cursor"] = json!(4);
+        assert!(JobRecord::from_json(&value).unwrap_err().contains("past the last sheet"));
+        value["manual_duplex"] = json!({ "sheets": 3, "direction": "sideways", "cursor": 1 });
+        assert!(JobRecord::from_json(&value).unwrap_err().contains("direction"));
+        // A file without the key is an ordinary job.
+        assert!(JobRecord::from_json(&record(ScanSettings::default()).to_json()).unwrap().manual_duplex.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_finished_whole_feeder_job_can_grow_and_turn_and_a_counted_one_only_turns() {
+        let mut whole = record(ScanSettings { pages: 0, ..ScanSettings::default() });
+        whole.journal.pages = (1..=3).map(page).collect();
+        assert!(!whole.can_add_sheets() && !whole.can_turn(), "not finished yet");
+        whole.journal.state = ScanJobState::Terminal(scan::job::Outcome::Completed);
+        assert!(whole.can_add_sheets() && whole.can_turn());
+        let mut counted = whole.clone();
+        counted.journal.expected_pages = Some(3);
+        assert!(!counted.can_add_sheets() && counted.can_turn());
+        let dir = temp("duplex-hints");
+        assert!(detail_text("app", &dir, &whole).contains("--append --yes adds the next feeder load"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn placing_the_fronts_is_safe_to_repeat_after_it_was_cut_off() {
+        let dir = temp("duplex-place");
+        let fronts = |dir: &Path| {
+            for n in 1..=4 {
+                std::fs::write(dir.join(format!("page-{n:03}.bmp")), format!("front {n}")).unwrap();
+            }
+        };
+        // One run on a fresh folder places every front.
+        fronts(&dir);
+        place_fronts_for_duplex(&dir, 4).unwrap();
+        assert_eq!(page_numbers(&dir).unwrap(), [1, 3, 5, 7]);
+        for n in [1, 3, 5, 7] {
+            std::fs::remove_file(dir.join(format!("page-{n:03}.bmp"))).unwrap();
+        }
+        fronts(&dir);
+        // Cut off after the first move: sheet 4 went to page-007.
+        std::fs::rename(dir.join("page-004.bmp"), dir.join("page-007.bmp")).unwrap();
+        place_fronts_for_duplex(&dir, 4).unwrap();
+        assert_eq!(page_numbers(&dir).unwrap(), [1, 3, 5, 7]);
+        place_fronts_for_duplex(&dir, 4).unwrap();
+        assert_eq!(page_numbers(&dir).unwrap(), [1, 3, 5, 7], "a second run changes nothing");
+        for (sheet, place) in [(1, 1), (2, 3), (3, 5), (4, 7)] {
+            assert_eq!(std::fs::read_to_string(dir.join(format!("page-{place:03}.bmp"))).unwrap(), format!("front {sheet}"));
+        }
+        // A missing front is an error, not a silent renumbering.
+        std::fs::remove_file(dir.join("page-001.bmp")).unwrap();
+        assert!(place_fronts_for_duplex(&dir, 4).unwrap_err().contains("sheet 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_manual_duplex_folder_is_checked_against_the_places_of_the_kept_pages() {
+        let dir = temp("duplex-check");
+        let mut record = record(ScanSettings { pages: 6, ..ScanSettings::default() });
+        record.manual_duplex = Some(ManualDuplex::backs_of(3).after(4));
+        record.journal.pages = (1..=4).map(page).collect();
+        for n in [1, 3, 5, 6] {
+            std::fs::write(dir.join(format!("page-{n:03}.bmp")), b"x").unwrap();
+        }
+        assert_eq!(page_files_for(&dir, &record), Ok(4));
+        assert!(page_mismatch(&dir, &record).is_none());
+        std::fs::remove_file(dir.join("page-006.bmp")).unwrap();
+        std::fs::write(dir.join("page-002.bmp"), b"x").unwrap();
+        let why = page_files_for(&dir, &record).unwrap_err();
+        assert!(why.contains("missing page-006") && why.contains("not in the journal page-002"), "{why}");
+        assert!(page_mismatch(&dir, &record).is_some());
+        let text = detail_text("app", &dir, &record);
+        assert!(text.contains("manual duplex: 3 sheet(s), scanning backs, 1 back(s) scanned, the back of sheet 2 is next"), "{text}");
+        assert!(text.contains("the back of sheet 2 is next) and run app scan --continue"), "{text}");
+        assert!(!record.can_add_sheets() && !record.can_turn(), "a duplex job neither grows nor turns again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -655,7 +968,7 @@ mod tests {
             duplex: true,
             ..ScanSettings::default()
         };
-        let again = settings_from_request(&request_json(&settings, false)).unwrap();
+        let again = settings_from_request(&request_json(&settings)).unwrap();
         assert_eq!(again, settings);
         let bad = json!({ "color": "purple" });
         assert!(settings_from_request(&bad).unwrap_err().contains("color"));
@@ -664,11 +977,11 @@ mod tests {
     #[test]
     fn the_page_length_request_survives_and_the_default_leaves_the_journal_unchanged() {
         let plain = ScanSettings::default();
-        assert!(request_json(&plain, false).get("page_length").is_none(), "a driver length writes nothing, so old journals are unchanged");
-        assert_eq!(settings_from_request(&request_json(&plain, false)).unwrap().page_length, PageLength::Driver);
+        assert!(request_json(&plain).get("page_length").is_none(), "a driver length writes nothing, so old journals are unchanged");
+        assert_eq!(settings_from_request(&request_json(&plain)).unwrap().page_length, PageLength::Driver);
         for mode in [PageLength::Auto, PageLength::AutoInfer] {
             let settings = ScanSettings { page_length: mode, page_size: Some(PageSize::Legal), ..ScanSettings::default() };
-            let json = request_json(&settings, false);
+            let json = request_json(&settings);
             assert_eq!(json["page_length"], mode.as_str());
             assert_eq!(settings_from_request(&json).unwrap(), settings);
         }

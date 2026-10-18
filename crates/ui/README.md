@@ -454,7 +454,7 @@ A new query or a failed one replaces the states (a failed read leaves everything
 the choices); a choice the new answer rules out is cleared.
 
 `Caps` holds its options as `Capability` values (`sides`, `orientations`, `qualities`, `media_sizes`,
-`color_modes`: `Capability<String>` or the enum; `copies: Capability<u32>`, a range; `resolutions`); how a host
+`color_modes`: `Capability<String>`; `copies: Capability<u32>`, a range; `resolutions: Capability<Resolution>`); how a host
 reads "not said" from `craft-print` is in the table. `Request` and `Draft` carry `color` and `resolution`.
 `Labels` has `color`, `color_color`, `color_monochrome`, `resolution`, `resolution_dpi` (`{dpi}`),
 `resolution_dpi_xy` (`{x}`, `{y}`), six `unsupported_*` reasons and `unconfirmed_note` (empty omits it).

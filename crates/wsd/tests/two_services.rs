@@ -112,6 +112,9 @@ fn exercise(kind: ServiceKind, other: ServiceKind) {
     let mut public = SubscribeRequest::new(EndpointRef::new("http://8.8.8.8/events"));
     assert!(matches!(eventing::subscribe(&svc, &public), Err(Error::Invalid(_))));
     public.notify_to = EndpointRef::new("http://127.0.0.1:9100/events");
+    // An allowed sink is not enough: where the device sends the end-of-subscription message is checked too.
+    public.end_to = Some(EndpointRef::new("http://8.8.8.8/end"));
+    assert!(matches!(eventing::subscribe(&svc, &public), Err(Error::Invalid(_))));
     let hijacked = eventing::Subscription { manager: EndpointRef::new("http://8.8.8.8/mgr"), expires: None };
     assert!(matches!(eventing::renew(&svc, &hijacked, None), Err(Error::Policy(_))));
     assert_eq!(device.log().len(), before);

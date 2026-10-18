@@ -678,8 +678,16 @@ impl Draft {
     }
 
     /// File a query's answer; one for an older query, or for an address no longer typed, is dropped.
+    ///
+    /// The latest query's answer for an address no longer typed ends that query too: nothing is
+    /// learned for the address now typed, and leaving the query "running" would keep the Query
+    /// button disabled and printing blocked until the dialog was closed and opened again.
     pub fn finish_query(&mut self, generation: u64, url: &str, result: Result<PrinterSummary, Failure>) {
-        if generation != self.generation || url != self.normalized_url() {
+        if generation != self.generation {
+            return;
+        }
+        if url != self.normalized_url() {
+            self.query = Query::Idle;
             return;
         }
         match result {

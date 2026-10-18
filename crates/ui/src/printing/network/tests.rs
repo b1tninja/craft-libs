@@ -1091,3 +1091,24 @@ fn notes_and_option_labels_are_worded_by_the_app() {
     assert_eq!(l.resolution_label(Resolution::new(600, 300)), "600 x 300 dpi");
     assert_eq!((l.color_label(ColorMode::Color), l.color_label(ColorMode::Monochrome)), ("Farbig", "Schwarzweiss"));
 }
+
+#[test]
+fn the_answer_for_an_address_no_longer_typed_ends_the_query() {
+    let mut d = Draft { url: "192.0.2.5".into(), ..Default::default() };
+    let g = d.begin_query();
+    assert!(d.querying());
+    // The person edits the address while the query runs; the old answer arrives for the old address.
+    d.url = "192.0.2.6".into();
+    d.address_edited();
+    assert!(d.querying(), "still waiting: the answer has not come yet");
+    d.finish_query(g, "http://192.0.2.5", Ok(printer()));
+    assert!(!d.querying(), "the query button must not stay disabled");
+    assert!(d.printer().is_none(), "nothing was learned for the address now typed");
+    // An answer for an older query, while a newer one runs, is still dropped without ending it.
+    let old = d.begin_query();
+    let newer = d.begin_query();
+    d.finish_query(old, &d.normalized_url(), Ok(printer()));
+    assert!(d.querying());
+    d.finish_query(newer, &d.normalized_url(), Ok(printer()));
+    assert!(!d.querying());
+}

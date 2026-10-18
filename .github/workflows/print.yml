@@ -51,3 +51,4 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - run: cargo check -p craft-print --no-default-features --target wasm32-unknown-unknown --locked
+      - run: cargo check -p craft-print --target wasm32-unknown-unknown --locked

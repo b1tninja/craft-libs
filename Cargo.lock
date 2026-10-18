@@ -609,6 +609,7 @@ dependencies = [
 name = "craft-devices"
 version = "0.1.0"
 dependencies = [
+ "craft-atomic",
  "craft-job",
  "craft-scan",
  "serde_json",

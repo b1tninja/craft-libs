@@ -106,13 +106,24 @@ fn retry_after(headers: &ureq::http::HeaderMap, now: SystemTime) -> Option<Durat
     found
 }
 
+/// The slowest upload the time limit allows for, in bytes a second. The limit covers the whole
+/// request, body included, so a large document (`SendDocument`) over a slow link must not use up
+/// the budget meant for the printer's reply: that would end as an outcome-unknown timeout after the
+/// job was created.
+const UPLOAD_FLOOR_BYTES_PER_SEC: u64 = 64 * 1024;
+
+/// `timeout` for the exchange plus the time to send `body_len` bytes at the upload floor.
+fn budget(timeout: Duration, body_len: usize) -> Duration {
+    timeout.saturating_add(Duration::from_secs(body_len as u64 / UPLOAD_FLOOR_BYTES_PER_SEC))
+}
+
 impl Transport for HttpTransport {
     fn post(&self, url: &DeviceUrl, request: Request) -> Result<Response, Error> {
         let mut builder = self
             .agent
             .post(url.as_url())
             .config()
-            .timeout_global(Some(request.timeout))
+            .timeout_global(Some(budget(request.timeout, request.body.len())))
             .build()
             .header("Content-Type", &request.content_type)
             .header("SOAPAction", format!("\"{}\"", request.soap_action));
@@ -147,6 +158,16 @@ mod tests {
 
     fn kind_stage(e: &Error) -> (Option<TransportKind>, Stage) {
         (e.transport_kind(), e.stage())
+    }
+
+    #[test]
+    fn the_time_limit_grows_with_the_body_it_has_to_send() {
+        let base = Duration::from_secs(30);
+        assert_eq!(budget(base, 0), base, "a small request keeps its limit");
+        assert_eq!(budget(base, 10 * 1024), base);
+        // 6.4 MiB at 64 KiB/s needs 100 s more.
+        assert_eq!(budget(base, 6_553_600), base + Duration::from_secs(100));
+        assert_eq!(budget(Duration::MAX, usize::MAX), Duration::MAX, "no overflow");
     }
 
     #[test]

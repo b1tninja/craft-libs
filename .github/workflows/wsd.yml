@@ -25,8 +25,10 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       - run: cargo fmt --check
-      - run: cargo clippy -p craft-wsd --all-targets -- -D warnings
+      - run: cargo clippy -p craft-wsd --all-targets --locked -- -D warnings
+      - run: cargo clippy -p craft-wsd --all-targets --all-features --locked -- -D warnings
       - run: cargo test -p craft-wsd --locked
+      - run: cargo test -p craft-wsd --all-features --locked
       - name: Message layer builds for the browser (no HTTP client there)
         if: runner.os == 'Linux'
-        run: cargo check --target wasm32-unknown-unknown -p craft-wsd
+        run: cargo check --target wasm32-unknown-unknown -p craft-wsd --locked

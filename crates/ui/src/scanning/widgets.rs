@@ -145,11 +145,12 @@ impl State {
                 ui.vertical(|ui| {
                     ui.add_enabled_ui(in_play, |ui| {
                         ui.horizontal_wrapped(|ui| {
-                            if choices.all_pages.is_enabled() {
-                                let mut all = settings.pages == Pages::All;
-                                if ui.checkbox(&mut all, labels.all_pages).changed() {
-                                    settings.pages = if all { Pages::All } else { Pages::Count(1) };
-                                }
+                            // Shown in every state like the other options: disabled (with the reason below) when the
+                            // device said it cannot scan until the feeder is empty.
+                            let mut all = settings.pages == Pages::All;
+                            let checkbox = egui::Checkbox::new(&mut all, labels.all_pages);
+                            if ui.add_enabled(choices.all_pages.is_enabled(), checkbox).changed() {
+                                settings.pages = if all { Pages::All } else { Pages::Count(1) };
                             }
                             if let Pages::Count(count) = &mut settings.pages {
                                 ui.add_enabled(choices.max_pages.is_enabled(), egui::DragValue::new(count).range(1..=choices.page_limit()))
@@ -159,7 +160,7 @@ impl State {
                     });
                     let note = if choices.feeder.is_unsupported() {
                         feeder_reason
-                    } else if choices.max_pages.is_unsupported() {
+                    } else if choices.max_pages.is_unsupported() || choices.all_pages.is_unsupported() {
                         labels.reason(labels.reasons.pages)
                     } else if !choices.max_pages.is_known() || !choices.all_pages.is_known() {
                         labels.unconfirmed_note

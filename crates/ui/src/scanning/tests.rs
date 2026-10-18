@@ -549,6 +549,28 @@ fn show_lists_selects_loads_details_and_exposes_labelled_controls() {
 }
 
 #[test]
+fn an_unsupported_until_empty_option_is_shown_disabled_not_hidden() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let (discover, _) = workers();
+    let load: LoadChoices = Box::new(|_| {
+        let (sender, receiver) = channel();
+        sender.send(Ok(Choices { all_pages: Capability::Unsupported, ..rich() })).unwrap();
+        receiver
+    });
+    let mut state = State::default();
+    let mut tree = None;
+    for _ in 0..3 {
+        let (_, output) = frame(&ctx, &mut state, &discover, &load, Vec::new());
+        tree = output.platform_output.accesskit_update.or(tree);
+    }
+    let tree = tree.expect("an accessibility tree");
+    let all = tree.nodes.iter().find(|(_, node)| node.label() == Some("Alle Seiten")).map(|(_, node)| node);
+    let all = all.expect("the until-empty checkbox is still there");
+    assert!(all.is_disabled(), "shown, but disabled");
+}
+
+#[test]
 fn show_never_loads_details_for_an_unselected_scanner() {
     let ctx = egui::Context::default();
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));

@@ -336,10 +336,10 @@ pub fn assess_luma(width: usize, height: usize, pixels: &[u8], dpi_y: u32, optio
 // ---- cropping ------------------------------------------------------------------------------------
 
 /// The bytes of an image cut to its top `rows` rows (width untouched). A BMP is cut exactly, whatever
-/// its depth and row order. PNG, TIFF and JPEG are decoded and re-encoded in the same format (JPEG at
-/// quality 92 keeps its density; PNG and TIFF lose any density tag, so the page's `dpi` fields stay the
-/// record). `None` when the image cannot be cut (compressed BMP, unreadable) or `rows` is not shorter
-/// than the image.
+/// its depth and row order. PNG, TIFF and JPEG are decoded and re-encoded in the same format with the
+/// resolution the original carried (PNG `pHYs`, TIFF `XResolution`/`YResolution`, JPEG JFIF at quality 92),
+/// so a cut page written to a folder still says how big it is. `None` when the image cannot be cut
+/// (compressed BMP, unreadable) or `rows` is not shorter than the image.
 pub fn crop_bottom_bytes(bytes: &[u8], rows: u32) -> Option<Vec<u8>> {
     if let Some(info) = crate::bmp::parse(bytes) {
         return crop_bmp(bytes, &info, rows);
@@ -384,10 +384,11 @@ fn crop_encoded(bytes: &[u8], rows: u32) -> Option<Vec<u8>> {
         return None;
     }
     let cropped = decoded.crop_imm(0, 0, decoded.width(), rows);
+    let density = crate::density::image_density(bytes);
     let mut out = std::io::Cursor::new(Vec::new());
     match format {
-        "png" => cropped.write_to(&mut out, image::ImageFormat::Png).ok()?,
-        "tiff" => cropped.write_to(&mut out, image::ImageFormat::Tiff).ok()?,
+        "png" => return write_png(&cropped, density),
+        "tiff" => return write_tiff(&cropped, density),
         "jpeg" => {
             let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92);
             if let Some((dx, dy)) = crate::density::image_density(bytes) {
@@ -401,6 +402,81 @@ fn crop_encoded(bytes: &[u8], rows: u32) -> Option<Vec<u8>> {
         _ => return None,
     }
     Some(out.into_inner())
+}
+
+/// Pixels per metre for a `pHYs` chunk.
+fn per_metre(dpi: f64) -> u32 {
+    (dpi / 0.0254).round().clamp(1.0, f64::from(u32::MAX)) as u32
+}
+
+/// A PNG of `image` with its resolution in `pHYs`. 8- and 16-bit gray and RGB stay as they are; anything else is
+/// written as 8-bit RGBA.
+fn write_png(image: &image::DynamicImage, density: Option<crate::density::Density>) -> Option<Vec<u8>> {
+    use image::DynamicImage as D;
+    let big_endian = |samples: &[u16]| samples.iter().flat_map(|s| s.to_be_bytes()).collect::<Vec<u8>>();
+    let (color, depth, data): (png::ColorType, png::BitDepth, Vec<u8>) = match image {
+        D::ImageLuma8(pixels) => (png::ColorType::Grayscale, png::BitDepth::Eight, pixels.as_raw().clone()),
+        D::ImageLumaA8(pixels) => (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight, pixels.as_raw().clone()),
+        D::ImageRgb8(pixels) => (png::ColorType::Rgb, png::BitDepth::Eight, pixels.as_raw().clone()),
+        D::ImageLuma16(pixels) => (png::ColorType::Grayscale, png::BitDepth::Sixteen, big_endian(pixels.as_raw())),
+        D::ImageRgb16(pixels) => (png::ColorType::Rgb, png::BitDepth::Sixteen, big_endian(pixels.as_raw())),
+        other => (png::ColorType::Rgba, png::BitDepth::Eight, other.to_rgba8().into_raw()),
+    };
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, image.width(), image.height());
+        encoder.set_color(color);
+        encoder.set_depth(depth);
+        if let Some((x, y)) = density {
+            encoder.set_pixel_dims(Some(png::PixelDimensions { xppu: per_metre(x), yppu: per_metre(y), unit: png::Unit::Meter }));
+        }
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(&data).ok()?;
+        writer.finish().ok()?;
+    }
+    Some(out)
+}
+
+/// A TIFF of `image` with its resolution in dots per inch. 8- and 16-bit gray and RGB stay as they are; anything
+/// else is written as 8-bit RGB.
+fn write_tiff(image: &image::DynamicImage, density: Option<crate::density::Density>) -> Option<Vec<u8>> {
+    use image::DynamicImage as D;
+    use tiff::encoder::colortype;
+    let mut out = std::io::Cursor::new(Vec::new());
+    let (width, height) = (image.width(), image.height());
+    match image {
+        D::ImageLuma8(pixels) => tiff_image::<colortype::Gray8>(&mut out, width, height, pixels.as_raw(), density)?,
+        D::ImageLuma16(pixels) => tiff_image::<colortype::Gray16>(&mut out, width, height, pixels.as_raw(), density)?,
+        D::ImageRgb8(pixels) => tiff_image::<colortype::RGB8>(&mut out, width, height, pixels.as_raw(), density)?,
+        D::ImageRgb16(pixels) => tiff_image::<colortype::RGB16>(&mut out, width, height, pixels.as_raw(), density)?,
+        other => tiff_image::<colortype::RGB8>(&mut out, width, height, other.to_rgb8().as_raw(), density)?,
+    }
+    Some(out.into_inner())
+}
+
+fn tiff_image<C>(
+    out: &mut std::io::Cursor<Vec<u8>>,
+    width: u32,
+    height: u32,
+    data: &[C::Inner],
+    density: Option<crate::density::Density>,
+) -> Option<()>
+where
+    C: tiff::encoder::colortype::ColorType,
+    [C::Inner]: tiff::encoder::TiffValue,
+{
+    use tiff::encoder::{Rational, TiffEncoder};
+    use tiff::tags::{ResolutionUnit, Tag};
+    let mut encoder = TiffEncoder::new(out).ok()?;
+    let mut page = encoder.new_image::<C>(width, height).ok()?;
+    if let Some((x, y)) = density {
+        let rational = |dpi: f64| Rational { n: (dpi * 100.0).round().clamp(1.0, f64::from(u32::MAX)) as u32, d: 100 };
+        let tags = page.encoder();
+        tags.write_tag(Tag::ResolutionUnit, ResolutionUnit::Inch.to_u16()).ok()?;
+        tags.write_tag(Tag::XResolution, rational(x)).ok()?;
+        tags.write_tag(Tag::YResolution, rational(y)).ok()?;
+    }
+    page.write_data(data).ok()
 }
 
 /// What [`infer_and_crop`] did.

@@ -12,6 +12,7 @@ use craft_scan::ScanSettings;
 use craft_scan::job::{Outcome, PageInfo, ScanJob, ScanJobConfig, ScanJobState};
 use serde_json::{Value, json};
 
+/// A fresh, empty temp folder for the test `name`.
 fn folder(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("craft-devices-duplex-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -19,6 +20,7 @@ fn folder(name: &str) -> PathBuf {
     dir
 }
 
+/// The journal entry of a 2x2 bmp page numbered `number`.
 fn info(number: u32) -> PageInfo {
     serde_json::from_value(json!({ "number": number, "attempt": 1, "format": "bmp", "width": 2, "height": 2, "dpi": 200, "bytes": 8 }))
         .expect("page info")
@@ -41,6 +43,7 @@ fn feed(dir: &Path, record: &mut JobRecord, labels: &[&str]) {
     write_record(dir, record).expect("journal");
 }
 
+/// The text of every page file in `dir`, in page-number order.
 fn contents(dir: &Path) -> Vec<String> {
     page_numbers(dir).expect("numbers").iter().map(|n| std::fs::read_to_string(dir.join(format!("page-{n:03}.bmp"))).expect("page")).collect()
 }

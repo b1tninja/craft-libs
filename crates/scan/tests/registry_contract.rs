@@ -10,9 +10,59 @@ use common::sane_like::{NO_DOCS, SANE_ID, SaneLike};
 use common::wia_like::{WIA_ID, WiaLike};
 use craft_scan::bw::{PageRule, page_for};
 use craft_scan::{
-    Color, ErrorContext, InterruptKind, Phase, ProgressToken, RegisterError, Registry, ScanError, ScanSettings, Source, auto_fallback_to_glass, bmp,
-    image_format, preflight,
+    Acquired, Backend, Color, ErrorContext, InterruptKind, Phase, ProgressToken, RegisterError, Registry, ScanError, ScanSettings, ScannerRef,
+    Source, auto_fallback_to_glass, bmp, image_format, preflight,
 };
+use std::sync::{Arc, Mutex};
+
+/// The one native id [`Recorder`] accepts.
+const RECORDER_ID: &str = "usb:001:7";
+
+/// A backend that records the device id `Registry::acquire` hands it and accepts only [`RECORDER_ID`], so a test can
+/// see what the registry stripped, kept or sent.
+struct Recorder {
+    /// Every `settings.device` this backend's `acquire` was called with, in order.
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl Recorder {
+    /// A recorder and the shared list of the ids it receives.
+    fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        (Self { seen: Arc::clone(&seen) }, seen)
+    }
+}
+
+impl Backend for Recorder {
+    fn name(&self) -> &'static str {
+        "rec"
+    }
+
+    fn scanner_list(&self) -> Result<Vec<ScannerRef>, ScanError> {
+        Ok(vec![ScannerRef::new(RECORDER_ID.into(), "Recorder".into(), None)])
+    }
+
+    fn scanner_details(&self, native_id: &str) -> Result<craft_scan::Scanner, ScanError> {
+        Err(ScanError::Failed(format!("rec: no details for {native_id}")))
+    }
+
+    fn scanners(&self) -> Result<Vec<craft_scan::Scanner>, ScanError> {
+        Ok(Vec::new())
+    }
+
+    fn diagnostic_dump(&self, _filter: &str) -> Result<String, ScanError> {
+        Ok(String::new())
+    }
+
+    fn acquire(&self, settings: &ScanSettings) -> Result<Acquired, ScanError> {
+        self.seen.lock().expect("seen").push(settings.device.clone());
+        if settings.device == RECORDER_ID || settings.device.is_empty() {
+            Ok(Acquired { source: Source::Glass, pages: Vec::new() })
+        } else {
+            Err(ScanError::Failed(format!("rec: unknown device {:?}", settings.device)))
+        }
+    }
+}
 
 /// A registry with the Windows-, SANE- and eSCL-like backends registered.
 fn all_three() -> Registry {
@@ -116,8 +166,38 @@ fn acquire_routes_by_prefix_and_strips_it() {
     assert_eq!((escl.pages.len(), escl.pages[0].format), (2, "jpeg"));
     let wia = registry.acquire(&request(&format!("wia:{WIA_ID}"), Source::Glass, 1)).expect("wia");
     assert_eq!(wia.pages[0].format, "bmp");
-    // The backend received its native id: a wrong native id under a right prefix is its own error.
-    assert!(registry.acquire(&request("sane:nope", Source::Glass, 1)).is_ok(), "SaneLike takes any device on acquire");
+}
+
+#[test]
+fn acquire_hands_the_backend_its_native_id() {
+    let (recorder, seen) = Recorder::new();
+    let registry = all_three();
+    registry.register(Box::new(recorder)).expect("rec");
+    let sent = || std::mem::take(&mut *seen.lock().expect("seen"));
+
+    // A registered prefix is removed, and only the first colon is the prefix: the native id keeps its own.
+    registry.acquire(&request(&format!("rec:{RECORDER_ID}"), Source::Glass, 1)).expect("prefixed");
+    assert_eq!(sent(), [RECORDER_ID]);
+    // A wrong native id under the right prefix reaches the backend and is its error, not the registry's.
+    let wrong = registry.acquire(&request("rec:nope", Source::Glass, 1)).expect_err("wrong native id").to_string();
+    assert!(wrong.contains("rec: unknown device \"nope\""), "{wrong}");
+    assert_eq!(sent(), ["nope"]);
+    // The prefix is the backend's name exactly: another backend's prefix never reaches it.
+    registry.acquire(&request(&format!("sane:{SANE_ID}"), Source::Glass, 1)).expect("sane");
+    assert!(sent().is_empty(), "the other backend's request never reached the recorder");
+    // A name fragment with several backends is the registry's error, and no backend is called.
+    assert!(registry.acquire(&request("Desk", Source::Glass, 1)).is_err());
+    assert!(sent().is_empty());
+
+    // With one backend: a device with no registered prefix goes through whole (its own colons are not a prefix), an
+    // empty device stays empty, and the backend's own prefix is still removed.
+    let (only, seen_only) = Recorder::new();
+    let single = Registry::new();
+    single.register(Box::new(only)).expect("rec");
+    single.acquire(&request(RECORDER_ID, Source::Glass, 1)).expect("passed on whole");
+    single.acquire(&request("", Source::Glass, 1)).expect("empty");
+    single.acquire(&request(&format!("rec:{RECORDER_ID}"), Source::Glass, 1)).expect("prefixed");
+    assert_eq!(*seen_only.lock().expect("seen"), [RECORDER_ID.to_string(), String::new(), RECORDER_ID.to_string()]);
 }
 
 #[test]

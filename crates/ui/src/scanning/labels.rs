@@ -68,6 +68,7 @@ pub struct Reasons<'a> {
 }
 
 impl<'a> Labels<'a> {
+    /// The tag for a known connection, `None` for an unknown one.
     pub(super) fn connection(&self, connection: Connection) -> Option<&'a str> {
         match connection {
             Connection::Usb => Some(self.usb),
@@ -76,6 +77,7 @@ impl<'a> Labels<'a> {
         }
     }
 
+    /// The caption of a source.
     pub(super) fn source(&self, source: Source) -> &'a str {
         match source {
             Source::Auto => self.source_auto,
@@ -84,6 +86,7 @@ impl<'a> Labels<'a> {
         }
     }
 
+    /// The caption of a colour mode.
     pub(super) fn color(&self, color: Color) -> &'a str {
         match color {
             Color::Gray => self.color_gray,
@@ -92,6 +95,7 @@ impl<'a> Labels<'a> {
         }
     }
 
+    /// The caption of a preset.
     pub(super) fn preset(&self, preset: Preset) -> &'a str {
         match preset {
             Preset::DocumentText => self.preset_text,
@@ -115,6 +119,7 @@ impl<'a> Labels<'a> {
         }
     }
 
+    /// The text of a device status warning.
     pub(super) fn warning(&self, warning: Warning) -> &'a str {
         match warning {
             Warning::FeederEmpty => self.warning_feeder_empty,
@@ -123,6 +128,7 @@ impl<'a> Labels<'a> {
         }
     }
 
+    /// The hover text for a device that is also listed over another connection.
     pub(super) fn note(&self, note: SamePrinter) -> &'a str {
         match note {
             SamePrinter::AlsoUsb => self.also_usb,

@@ -5,18 +5,22 @@ type Senders = std::rc::Rc<std::cell::RefCell<Vec<Sender<Result<Choices, String>
 
 const BUSY: &str = "The scanner is busy. Close any other program that is using it, then try again.";
 
+/// A scanner with the given id, name and connection.
 fn dev(id: &str, name: &str, connection: Connection) -> Scanner {
     Scanner { id: id.into(), name: name.into(), connection }
 }
 
+/// A scanner with the given id and an unknown connection.
 fn item(id: &str) -> Scanner {
     dev(id, &format!("Scanner {id}"), Connection::Unknown)
 }
 
+/// The same device listed twice: over the network (with an address tag) and over USB.
 fn pair() -> Vec<Scanner> {
     vec![dev("w", "Example MFC-100 [001122334455]", Connection::Network), dev("u", "Example MFC-100", Connection::Usb)]
 }
 
+/// Choices of a fully capable scanner: feeder, glass, duplex, every colour mode and a resolution list.
 fn rich() -> Choices {
     Choices {
         feeder: presence(Some(true)),
@@ -30,19 +34,23 @@ fn rich() -> Choices {
     }
 }
 
+/// A resolution capability listing exactly `list`.
 fn dpis(list: &[u32]) -> Capability<u32> {
     Capability::from_option_list(Some(list))
 }
 
+/// A colour capability listing exactly `list`.
 fn colors(list: &[Color]) -> Capability<Color> {
     Capability::from_option_list(Some(list))
 }
 
+/// Runs a complete listing on `state` with `result`.
 fn list(state: &mut State, result: Result<Vec<Scanner>, String>) {
     let generation = state.begin_list().unwrap();
     state.finish_list(generation, result.map_err(ListFailure::Backend));
 }
 
+/// Selects scanner `id` and finishes its choices read with `result`; true when a read was started.
 fn select(state: &mut State, id: &str, result: Result<Choices, String>) -> bool {
     state.settings.scanner = id.into();
     match state.want_details(id) {
@@ -443,6 +451,7 @@ fn feeder_controls_apply_unless_glass_is_chosen_or_the_feeder_is_unsupported() {
     assert!(!neither.offers(Source::Auto) && !neither.offers(Source::Glass));
 }
 
+/// The test wording.
 fn labels() -> Labels<'static> {
     Labels {
         scanner: "Scanner",
@@ -502,6 +511,7 @@ fn labels_build_tags_and_notes_without_changing_identity() {
     assert_eq!(labels.note(SamePrinter::AlsoNetwork), "auch Netzwerk");
 }
 
+/// Discovery and choices workers that answer at once: the pair of scanners, with choices only for the USB one.
 fn workers() -> (Discover, LoadChoices) {
     let discover: Discover = Box::new(|| {
         let (sender, receiver) = channel();
@@ -517,6 +527,7 @@ fn workers() -> (Discover, LoadChoices) {
     (discover, load)
 }
 
+/// Runs one frame of the widget with `events` and returns its response and output.
 fn frame(ctx: &egui::Context, state: &mut State, discover: &Discover, load: &LoadChoices, events: Vec<egui::Event>) -> (Response, egui::FullOutput) {
     let mut response = Response::default();
     let output = ctx.run_ui(
@@ -619,6 +630,7 @@ fn failed_details_offer_a_retry_button_and_report_it() {
 
 // ---- three-state options ------------------------------------------------------------------------
 
+/// The request for `choices` after clamping `settings` to them.
 fn request_of(choices: &Choices, mut settings: Settings) -> Request {
     settings.clamp(choices);
     choices.request(&settings)
@@ -688,6 +700,7 @@ fn auto_without_a_feeder_is_the_glass_and_never_asks_for_the_feeder() {
     assert_eq!(request_of(&Choices::default(), Settings::default()).source, Sent::Hint(Source::Auto));
 }
 
+/// Workers that list one scanner and answer its choices read with `choices`.
 fn workers_for(choices: Choices) -> (Discover, LoadChoices) {
     let discover: Discover = Box::new(|| {
         let (sender, receiver) = channel();
@@ -717,14 +730,17 @@ fn tree_of(choices: Choices, warnings: Vec<Warning>) -> egui::accesskit::TreeUpd
     last.unwrap()
 }
 
+/// The accessibility nodes whose label or value is `text`.
 fn text_nodes(tree: &egui::accesskit::TreeUpdate, text: &str) -> Vec<egui::accesskit::Node> {
     tree.nodes.iter().filter(|(_, node)| node.label() == Some(text) || node.value() == Some(text)).map(|(_, node)| node.clone()).collect()
 }
 
+/// Whether some node is labelled `text`.
 fn present(tree: &egui::accesskit::TreeUpdate, text: &str) -> bool {
     !text_nodes(tree, text).is_empty()
 }
 
+/// Whether the control named `text` is disabled; panics when there is no such control.
 fn disabled(tree: &egui::accesskit::TreeUpdate, text: &str) -> bool {
     let nodes = text_nodes(tree, text);
     assert!(!nodes.is_empty(), "no control named {text}");
@@ -790,6 +806,7 @@ fn status_warnings_are_drawn_and_never_disable_anything() {
 
 // ---- page length ---------------------------------------------------------------------------------
 
+/// Each page-length option with its availability.
 fn lengths(choices: &Choices, chosen: bool) -> Vec<(PageLength, LengthAvailability)> {
     choices.length_choices(chosen).iter().map(|c| (c.value, c.availability)).collect()
 }
@@ -875,6 +892,7 @@ fn the_length_labels_name_reasons_and_notes() {
     assert_eq!(l.note_for(PageLength::Driver, LengthAvailability::Available, "Nicht bestaetigt."), "");
 }
 
+/// Whether a node is labelled `text`.
 fn labelled(tree: &egui::accesskit::TreeUpdate, text: &str) -> bool {
     tree.nodes.iter().any(|(_, node)| node.label() == Some(text) || node.value() == Some(text))
 }

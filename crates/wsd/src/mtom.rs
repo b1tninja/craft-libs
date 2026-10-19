@@ -94,7 +94,7 @@ fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 /// The value of a parameter in a media-type header (`boundary`, `start`, ...), unquoted.
 pub fn param(content_type: &str, name: &str) -> Option<String> {
     for piece in split_params(content_type).into_iter().skip(1) {
-        let (k, v) = piece.split_once('=')?;
+        let Some((k, v)) = piece.split_once('=') else { continue };
         if k.trim().eq_ignore_ascii_case(name) {
             let v = v.trim();
             let v = v.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(v);
@@ -165,7 +165,9 @@ pub fn parts<'a>(content_type: &str, body: &'a [u8]) -> Result<Vec<Part<'a>>> {
         let part_start = line_end + 2;
         let next = find(body, format!("\r\n{delim}").as_bytes(), part_start).ok_or_else(|| Error::Protocol("unterminated multipart part".into()))?;
         let whole = body.get(part_start..next).unwrap_or(&[]);
+        // A part without headers starts with the blank line that ends the (empty) header block.
         let (headers, data) = match find(whole, b"\r\n\r\n", 0) {
+            _ if whole.starts_with(CRLF) => (&[][..], whole.get(2..).unwrap_or(&[])),
             Some(h) => (whole.get(..h).unwrap_or(&[]), whole.get(h + 4..).unwrap_or(&[])),
             None => (&[][..], whole),
         };
@@ -296,7 +298,18 @@ mod tests {
         assert_eq!(param("multipart/related; type=\"a;b\"; boundary=zz", "boundary").as_deref(), Some("zz"));
         assert_eq!(param("multipart/related; type=\"a;b\"; boundary=zz", "type").as_deref(), Some("a;b"));
         assert_eq!(param("text/xml", "boundary"), None);
+        assert_eq!(param("multipart/related; flag; boundary=zz", "boundary").as_deref(), Some("zz"), "a parameter without '=' is skipped");
         assert!(!is_multipart("text/xml") && !is_multipart("") && is_multipart("Multipart/Related; x=1"));
+    }
+
+    #[test]
+    fn a_part_without_headers_is_all_data() {
+        let ct = "multipart/related; boundary=B";
+        let body = b"--B\r\n\r\nfirst\r\n\r\nstill first\r\n--B\r\n\r\n\r\n--B--\r\n";
+        let all = parts(ct, body).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!((all[0].content_id.as_deref(), all[0].data), (None, &b"first\r\n\r\nstill first"[..]));
+        assert_eq!(all[1].data, b"");
     }
 
     #[test]

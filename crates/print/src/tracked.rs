@@ -55,12 +55,14 @@ use crate::watch::{JobWatch, WaitPolicy, WatchOutcome, WatchStep};
 pub struct LocalJobId(u64);
 
 impl LocalJobId {
+    /// The number behind the id; ids are handed out from 1 in creation order within the process.
     pub fn get(self) -> u64 {
         self.0
     }
 }
 
 impl std::fmt::Display for LocalJobId {
+    /// `print-{n}`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "print-{}", self.0)
     }
@@ -84,6 +86,7 @@ pub struct BytesSource {
 }
 
 impl BytesSource {
+    /// A source that hands out `bytes` as a document of `format`; nothing is checked until submit.
     pub fn new(format: DocumentFormat, bytes: Vec<u8>) -> Self {
         Self { format, bytes }
     }
@@ -94,6 +97,7 @@ impl DocumentSource for BytesSource {
         self.format
     }
 
+    /// The bytes, borrowed; never fails.
     fn read(&self) -> Result<Cow<'_, [u8]>, PrintError> {
         Ok(Cow::Borrowed(&self.bytes))
     }
@@ -106,6 +110,7 @@ pub struct FnSource<F> {
 }
 
 impl<F: Fn() -> Result<Vec<u8>, PrintError> + Send> FnSource<F> {
+    /// A source of `format` whose bytes come from calling `read` once per attempt.
     pub fn new(format: DocumentFormat, read: F) -> Self {
         Self { format, read }
     }
@@ -116,6 +121,7 @@ impl<F: Fn() -> Result<Vec<u8>, PrintError> + Send> DocumentSource for FnSource<
         self.format
     }
 
+    /// Call the closure; its error fails the attempt in the prepare phase.
     fn read(&self) -> Result<Cow<'_, [u8]>, PrintError> {
         (self.read)().map(Cow::Owned)
     }
@@ -142,6 +148,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// A stable snake_case name for logs and serialised snapshots.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Completed => "completed",
@@ -217,6 +224,7 @@ pub enum SimpleState {
 }
 
 impl SimpleState {
+    /// A stable snake_case name for logs and serialised snapshots.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Preparing => "preparing",
@@ -237,6 +245,8 @@ impl SimpleState {
     }
 }
 
+/// The coarse state a person is shown for a lifecycle state (`Submitting` reads as "sending",
+/// a printer-side `Processing` as "printing", and so on).
 fn simplify(state: LifecycleState) -> SimpleState {
     match state {
         LifecycleState::Preparing => SimpleState::Preparing,
@@ -279,6 +289,7 @@ impl AttemptError {
 }
 
 impl From<&PrintError> for AttemptError {
+    /// Copy the error's kind, retry safety, `Retry-After`, native code, phase and message.
     fn from(error: &PrintError) -> Self {
         Self {
             kind: error.kind(),
@@ -463,6 +474,8 @@ pub struct Staleness {
 }
 
 impl Default for Staleness {
+    /// On, polling from 2 s up to 15 s; silent after 3 minutes, probing every 30 s; stalled after 10
+    /// minutes processing or 30 pending; a 3-hour ceiling; reconcile after 65 s.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -514,6 +527,8 @@ pub struct PrintJobConfig {
 }
 
 impl Default for PrintJobConfig {
+    /// Three automatic attempts, tags on network backends only, a 10-minute watch, 64 trail entries,
+    /// 16 attempts kept, 2 minutes of reconcile slack and the default staleness rules.
     fn default() -> Self {
         Self {
             retry: Some(RetryPolicy { max_attempts: 3, ..RetryPolicy::default() }),
@@ -667,6 +682,8 @@ impl Snapshot {
         view
     }
 
+    /// This print as a [`JobState`] for the shared job view; a failure whose last remote job ended
+    /// `CompletedWithErrors` keeps that state, other failures read as aborted.
     fn job_state(&self) -> JobState {
         match self.state {
             LifecycleState::Preparing | LifecycleState::Submitting | LifecycleState::RetryScheduled { .. } => JobState::Pending,
@@ -687,6 +704,8 @@ impl Snapshot {
         }
     }
 
+    /// The document as it was sent (the converted one when a converter ran), with its size and the
+    /// expected page count when known; empty before the source was first read.
     fn documents(&self) -> JobDocuments {
         let mut documents = JobDocuments::new();
         if let Some(info) = self.document {
@@ -771,6 +790,7 @@ pub struct PrintJob {
 }
 
 impl std::fmt::Debug for PrintJob {
+    /// The id, state, attempt count and remote job id; the document and history are left out.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrintJob")
             .field("id", &self.id)
@@ -884,6 +904,7 @@ impl PrintJob {
         self
     }
 
+    /// Choose when the idempotency tag is sent; the default sends it to network backends only.
     #[must_use]
     pub fn with_tag_policy(mut self, tag: TagPolicy) -> Self {
         self.config.tag = tag;
@@ -904,6 +925,7 @@ impl PrintJob {
         self
     }
 
+    /// This print's process-local id, the same across every attempt.
     pub fn id(&self) -> LocalJobId {
         self.id
     }
@@ -913,6 +935,7 @@ impl PrintJob {
         &self.tag
     }
 
+    /// The current lifecycle state.
     pub fn state(&self) -> LifecycleState {
         self.state
     }
@@ -922,6 +945,7 @@ impl PrintJob {
         &self.request
     }
 
+    /// The attempts so far, oldest first; only the most recent `attempt_cap` are kept.
     pub fn attempts(&self) -> &[Attempt] {
         &self.attempts
     }
@@ -942,10 +966,12 @@ impl PrintJob {
         }
     }
 
+    /// The current time on the job's clock.
     fn now(&self) -> Duration {
         self.clock.now()
     }
 
+    /// Append a trail entry at the current time, dropping (and counting) the oldest entries past `trail_cap`.
     fn record(&mut self, event: TrailEvent) {
         let at = self.now();
         let cap = self.config.trail_cap.max(1);
@@ -958,10 +984,12 @@ impl PrintJob {
         }
     }
 
+    /// Record a free-text note in the trail.
     fn note(&mut self, text: impl Into<String>) {
         self.record(TrailEvent::Note(text.into()));
     }
 
+    /// Record a warning once: a repeat of the same text is neither noted nor listed again.
     fn warn(&mut self, text: impl Into<String>) {
         let text = text.into();
         if !self.warnings.contains(&text) {
@@ -970,6 +998,7 @@ impl PrintJob {
         }
     }
 
+    /// Move to `state`, record it, and stamp or clear the finish time. Returns whether the state changed.
     fn set_state(&mut self, state: LifecycleState) -> bool {
         if self.state == state {
             return false;
@@ -980,6 +1009,8 @@ impl PrintJob {
         true
     }
 
+    /// When [`PrintJob::advance`] should next be called: now while preparing or sending, at the retry
+    /// time, at the next poll or staleness deadline while following, and never once settled.
     fn next_in(&self) -> Option<Duration> {
         match self.state {
             LifecycleState::Terminal(_) => None,
@@ -1050,6 +1081,8 @@ impl PrintJob {
         }
     }
 
+    /// How long the printer may report `state` without change before the print counts as stalled;
+    /// only `Processing` and `Pending` have a threshold.
     fn stall_threshold(&self, printer: JobState) -> Option<Duration> {
         match printer {
             JobState::Processing => self.config.staleness.stall_after_processing,
@@ -1108,6 +1141,8 @@ impl PrintJob {
         false
     }
 
+    /// Stop the watch and put the print in `NeedsAttention` for `reason`, with probes every
+    /// `probe_interval` from `now`. Always reports a change.
     fn go_stale(&mut self, reason: StaleReason, now: Duration) -> bool {
         self.stale = Some(reason);
         self.watch = None;
@@ -1177,10 +1212,12 @@ impl PrintJob {
         (!left.is_zero()).then_some(left)
     }
 
+    /// An [`Advance`] reporting `changed` and the next wake-up.
     fn step(&self, changed: bool) -> Advance {
         Advance { changed, next_in: self.next_in() }
     }
 
+    /// Open a new in-flight attempt and return its number; the oldest attempts past `attempt_cap` are dropped.
     fn begin_attempt(&mut self) -> u32 {
         let started = self.now();
         self.attempt_counter = self.attempt_counter.saturating_add(1);
@@ -1195,6 +1232,7 @@ impl PrintJob {
         number
     }
 
+    /// The most recent attempt, for updating in place.
     fn latest_attempt(&mut self) -> Option<&mut Attempt> {
         Arc::make_mut(&mut self.attempts).last_mut()
     }
@@ -1227,6 +1265,8 @@ impl PrintJob {
         }
     }
 
+    /// Before the first send: honour an early cancel, pin the registry's default printer when none was
+    /// given, and decide whether the tag is sent. A lookup failure fails a first, retry-safe attempt.
     fn prepare(&mut self, registry: &Registry) -> Advance {
         if self.cancel.is_cancelled() {
             self.cancel_requested = true;
@@ -1288,6 +1328,8 @@ impl PrintJob {
         Sent { result, progress: latest, document: Some(document) }
     }
 
+    /// Run one attempt: read the document (warning if it changed since the last attempt), submit it,
+    /// and continue with [`Self::accepted`] or [`Self::fail_attempt`]. A cancel ends the print first.
     fn submit(&mut self, registry: &Registry) -> Advance {
         if self.cancel.is_cancelled() || self.cancel_requested {
             self.cancel_requested = true;
@@ -1317,6 +1359,8 @@ impl PrintJob {
         }
     }
 
+    /// The backend accepted the document: close the attempt, keep the remote job and what was sent,
+    /// start a watch when the job can be followed, and take any status that came with the reply.
     fn accepted(&mut self, registry: &Registry, submitted: Submitted) -> Advance {
         let now = self.now();
         let job = submitted.job.clone();
@@ -1370,6 +1414,9 @@ impl PrintJob {
         self.unknown_since = None;
     }
 
+    /// Close the attempt with `error` and decide what follows: a cancel ends the print, an unknown
+    /// outcome needs attention (never resent automatically), and anything else is retried under the
+    /// retry policy or fails the print.
     fn fail_attempt(&mut self, error: PrintError) -> Advance {
         let now = self.now();
         let failure = AttemptError::from(&error);
@@ -1404,6 +1451,8 @@ impl PrintJob {
         self.step(changed)
     }
 
+    /// One step of following an accepted job: check the staleness rules, then either probe or tick the
+    /// watch and take what it reports.
     fn follow(&mut self, registry: &Registry) -> Advance {
         let mut changed = self.check_staleness();
         if self.state.is_terminal() {
@@ -1457,6 +1506,8 @@ impl PrintJob {
         advance
     }
 
+    /// Apply one watch step: a status update is absorbed, a failed read is noted, and a finished watch
+    /// goes to [`Self::watch_done`].
     fn handle_step(&mut self, step: WatchStep) -> Advance {
         match step {
             WatchStep::Pending { next_in } => Advance { changed: false, next_in: Some(next_in) },
@@ -1472,6 +1523,9 @@ impl PrintJob {
         }
     }
 
+    /// The watch ended: settle the print from its outcome. A forgotten job most likely finished, a
+    /// missing printer fails the print, and a timeout or failing reads either hand over to probing or
+    /// leave the print accepted with a warning.
     fn watch_done(&mut self, outcome: WatchOutcome) -> Advance {
         self.watch = None;
         match outcome {
@@ -1642,6 +1696,9 @@ impl PrintJob {
         }
     }
 
+    /// Ask the backend to cancel the accepted remote job. With a watch, the status is read once so the
+    /// result shows; without one, the print ends cancelled with a warning. Fails if there is no remote
+    /// handle or the backend refuses.
     fn cancel_remote(&mut self, registry: &Registry) -> Result<(), PrintError> {
         let Some(remote) = self.remote.clone() else {
             return Err(PrintError::new(ErrorKind::Unsupported, "the backend gave no handle for the job, so it cannot be cancelled from here"));
@@ -1924,6 +1981,7 @@ fn gave_up_waiting(reasons: &[String]) -> bool {
     })
 }
 
+/// A short human name of an error kind, for trail notes.
 fn kind_name(kind: ErrorKind) -> &'static str {
     match kind {
         ErrorKind::Unsupported => "unsupported",
@@ -1947,10 +2005,12 @@ mod news_tests {
     use super::*;
     use crate::{BytesSource, DocumentFormat};
 
+    /// A print of a tiny PDF with default options and no printer chosen.
     fn job() -> PrintJob {
         PrintJob::new(Job::default(), BytesSource::new(DocumentFormat::Pdf, b"%PDF-1.7".to_vec()))
     }
 
+    /// `n` seconds.
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
     }

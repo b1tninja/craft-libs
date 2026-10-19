@@ -58,6 +58,7 @@ impl Quality {
 }
 
 impl Quality {
+    /// A stable lowercase name for logs and the UI.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Draft => "draft",
@@ -80,6 +81,7 @@ pub enum ColourMode {
 }
 
 impl ColourMode {
+    /// A stable lowercase name for logs and the UI.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -107,6 +109,7 @@ pub struct Resolution {
 }
 
 impl Resolution {
+    /// `x_dpi` by `y_dpi` dots per inch.
     pub const fn new(x_dpi: u32, y_dpi: u32) -> Self {
         Self { x_dpi, y_dpi }
     }
@@ -144,36 +147,44 @@ impl JobOptions {
         Self::default()
     }
 
+    /// Ask for this media (a PWG self-describing name such as `iso_a4_210x297mm`); a backend that
+    /// cannot use the token ignores it.
     #[must_use]
     pub fn with_media(mut self, media: impl Into<String>) -> Self {
         self.media = Some(media.into());
         self
     }
 
+    /// Ask for this orientation.
     #[must_use]
     pub fn with_orientation(mut self, orientation: Orientation) -> Self {
         self.orientation = Some(orientation);
         self
     }
 
+    /// Ask for this print quality.
     #[must_use]
     pub fn with_quality(mut self, quality: Quality) -> Self {
         self.quality = Some(quality);
         self
     }
 
+    /// Ask for this resolution.
     #[must_use]
     pub fn with_resolution(mut self, resolution: Resolution) -> Self {
         self.resolution = Some(resolution);
         self
     }
 
+    /// Ask for colour, monochrome or the printer's choice.
     #[must_use]
     pub fn with_colour(mut self, colour: ColourMode) -> Self {
         self.colour = colour;
         self
     }
 
+    /// The document's page count, used for progress when the backend reports no total; not sent to
+    /// the printer.
     #[must_use]
     pub fn with_expected_pages(mut self, pages: u32) -> Self {
         self.expected_pages = Some(pages);

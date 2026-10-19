@@ -18,6 +18,7 @@ pub enum JobState {
 }
 
 impl JobState {
+    /// The state a `JobState` value names; an unknown value is kept as [`Self::Other`].
     pub fn parse(s: &str) -> Self {
         match s.trim() {
             "Pending" => Self::Pending,
@@ -38,6 +39,7 @@ impl JobState {
         matches!(self, Self::Completed | Self::Canceled | Self::Aborted)
     }
 
+    /// The value as the protocol writes it.
     pub fn name(&self) -> &str {
         match self {
             Self::Pending => "Pending",
@@ -78,6 +80,7 @@ pub enum JobReason {
 }
 
 impl JobReason {
+    /// The reason a `JobStateReason` value names; an unknown value is kept as [`Self::Other`].
     pub fn parse(s: &str) -> Self {
         match s.trim() {
             "None" => Self::None,
@@ -210,31 +213,38 @@ impl Capabilities {
         self.compressions.is_empty() || self.compressions.iter().any(|c| c == Compression::None.token())
     }
 
+    /// Whether the printer lists `s`; `None` when it lists no sides at all.
     pub fn supports_sides(&self, s: Sides) -> Option<bool> {
         listed(&self.sides, s.token())
     }
 
+    /// Whether the printer lists `o`; `None` when it lists no orientations at all.
     pub fn supports_orientation(&self, o: Orientation) -> Option<bool> {
         listed(&self.orientations, o.token())
     }
 
+    /// Whether the printer lists `q`; `None` when it lists no qualities at all.
     pub fn supports_quality(&self, q: Quality) -> Option<bool> {
         listed(&self.qualities, q.token())
     }
 
+    /// Whether the printer lists the media size `name`; `None` when it lists none at all.
     pub fn supports_media(&self, name: &str) -> Option<bool> {
         listed(&self.media_sizes, name)
     }
 
+    /// Whether `n` copies are within the advertised range (at least 1); `None` without a range.
     pub fn supports_copies(&self, n: u32) -> Option<bool> {
         self.copies.map(|(lo, hi)| (lo.max(1)..=hi).contains(&n))
     }
 
+    /// Whether the printer lists the resolution (x, y); `None` when it lists none.
     pub fn supports_resolution(&self, r: (u32, u32)) -> Option<bool> {
         if self.resolutions.is_empty() { None } else { Some(self.resolutions.contains(&r)) }
     }
 }
 
+/// Whether `list` holds `token` exactly; `None` for an empty list, which says nothing.
 fn listed(list: &[String], token: &str) -> Option<bool> {
     if list.is_empty() { None } else { Some(list.iter().any(|v| v == token)) }
 }
@@ -260,6 +270,7 @@ pub enum Section {
 }
 
 impl Section {
+    /// The element name GetPrinterElements requests for this section.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Description => "PrinterDescription",

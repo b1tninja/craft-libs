@@ -171,6 +171,8 @@ impl IppBackend {
         self.add_entry(uri, Some(name.to_owned()))
     }
 
+    /// Add the printer at `uri` (or, if it is already added, update its name when one is given) and
+    /// return its native id, the canonical URI. No network.
     fn add_entry(&self, uri: &str, name: Option<String>) -> Result<String, PrintError> {
         let uri = PrinterUri::parse(uri).map_err(PrintError::from)?;
         let id = uri.canonical();
@@ -200,10 +202,12 @@ impl IppBackend {
         self.snapshot().iter().map(|e| e.uri.canonical()).collect()
     }
 
+    /// A copy of the added printers.
     fn snapshot(&self) -> Vec<Entry> {
         self.printers.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
+    /// Apply `change` to a copy of the configuration; clones made earlier keep the old one.
     fn configured(mut self, change: impl FnOnce(&mut Config)) -> Self {
         let mut config = (*self.config).clone();
         change(&mut config);
@@ -307,6 +311,8 @@ impl IppBackend {
             .ok_or_else(|| PrintError::printer_not_found(format!("{native_id} is not an IPP printer that was added to this backend")))
     }
 
+    /// An IPP client for `entry` with this backend's transport, limits, user name and version (2.0
+    /// unless set, falling back when allowed), sharing the remembered versions and request ids.
     fn client(&self, entry: &Entry) -> Client<SharedTransport> {
         Client::new(Arc::clone(&self.transport), entry.uri.clone())
             .with_limits(self.config.limits)
@@ -411,6 +417,7 @@ fn job_native(uri: &str, job_id: i64) -> String {
     format!("{uri}#{job_id}")
 }
 
+/// `n` as a `u32`, saturating.
 fn clamp(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
@@ -427,6 +434,8 @@ fn honoured_for(attrs: &PrinterAttrs) -> Vec<JobHint> {
     hints
 }
 
+/// Neutral printer details from Get-Printer-Attributes: the name (printer's, given, info, or the
+/// URI), formats, raster types, duplex, colour, media, copies, resolutions and state with reasons.
 fn details_of(entry: &Entry, attrs: &PrinterAttrs) -> PrinterDetails {
     let id = entry.uri.canonical();
     let name =
@@ -529,6 +538,7 @@ enum Probe {
     Unknown(IppError),
 }
 
+/// The native code of the IPP `client-error-not-found` status.
 fn not_found_native() -> NativeCode {
     NativeCode { domain: "ipp", code: i64::from(StatusCode::NOT_FOUND.0), name: StatusCode::NOT_FOUND.name() }
 }
@@ -732,6 +742,7 @@ impl Backend for IppBackend {
         WatchSupport::Poll
     }
 
+    /// The configured poll interval (2 s by default).
     fn recommended_poll_interval(&self) -> Option<Duration> {
         Some(self.config.poll_interval)
     }
@@ -824,6 +835,9 @@ impl Backend for IppBackend {
 }
 
 impl IppBackend {
+    /// The printer's jobs, active and finished, newest first and without duplicates; `user` narrows
+    /// the listing to that user's jobs. A printer that keeps no history lists only active jobs.
+    /// Creation times come from `printer-up-time` when a job only has a relative time.
     fn remote_jobs(&self, entry: &Entry, user: Option<&str>) -> Result<Vec<RemoteJob>, PrintError> {
         let client = self.client(entry);
         let limit = self.config.list_limit;

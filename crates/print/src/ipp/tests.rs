@@ -43,41 +43,51 @@ struct Script {
 }
 
 impl Script {
+    /// A script with no steps queued and nothing seen.
     fn new() -> Self {
         Self::default()
     }
 
+    /// Queue `step` as the answer to the next request.
     fn push(&self, step: Step) -> &Self {
         self.steps.lock().unwrap().push_back(step);
         self
     }
 
+    /// Queue a successful reply carrying `groups` after the operation group.
     fn ok(&self, groups: Vec<Group>) -> &Self {
         self.push(reply(0, groups))
     }
 
+    /// Queue a reply with status `code` and only the operation group.
     fn status(&self, code: u16) -> &Self {
         self.push(reply(code, vec![]))
     }
 
+    /// Every request decoded so far, in order.
     fn requests(&self) -> Vec<Message> {
         self.seen.lock().unwrap().clone()
     }
 
+    /// The operation ids of every request so far.
     fn ops(&self) -> Vec<u16> {
         self.requests().iter().map(|m| m.code).collect()
     }
 
+    /// The most recent request; panics if there was none.
     fn last(&self) -> Message {
         self.requests().last().cloned().unwrap()
     }
 
+    /// How many queued steps are still unused.
     fn pending(&self) -> usize {
         self.steps.lock().unwrap().len()
     }
 }
 
 impl Transport for Script {
+    /// Check that the request is well-formed IPP to the test printer, record it, and answer with the
+    /// next queued step. Panics when no step is queued.
     fn post(&self, url: &DeviceUrl, request: Request) -> Result<Response, WireError> {
         assert_eq!(request.content_type, "application/ipp");
         assert_eq!((url.port(), url.path()), (631, "/ipp/print"));
@@ -99,12 +109,14 @@ impl Transport for Script {
     }
 }
 
+/// The operation group every reply starts with: UTF-8 charset and English.
 fn op_group() -> Group {
     Group::new(GroupTag::Operation)
         .with(Attribute::new("attributes-charset", Value::Charset("utf-8".into())))
         .with(Attribute::new("attributes-natural-language", Value::NaturalLanguage("en".into())))
 }
 
+/// A step that answers with status `code` and `groups`, echoing the request's version and request id.
 fn reply(code: u16, groups: Vec<Group>) -> Step {
     Step::Reply(Box::new(move |request| {
         let mut message = Message::new(request.major, request.minor, code, request.request_id).with_group(op_group());
@@ -113,12 +125,15 @@ fn reply(code: u16, groups: Vec<Group>) -> Step {
     }))
 }
 
+/// An encoded successful IPP 1.1 reply carrying `groups`.
 fn reply_bytes(groups: Vec<Group>) -> Vec<u8> {
     let mut message = Message::new(1, 1, 0, 1).with_group(op_group());
     message.groups.extend(groups);
     message.encode().unwrap()
 }
 
+/// The attributes of an idle, accepting printer that takes PDF, PWG raster, JPEG and URF, prints
+/// duplex and colour, and supports up to 99 copies.
 fn printer_group() -> Group {
     Group::new(GroupTag::Printer)
         .with(Attribute::name_value("printer-name", "Front desk"))
@@ -142,12 +157,14 @@ fn printer_group() -> Group {
         .with(Attribute::new("printer-up-time", Value::Integer(5000)))
 }
 
+/// [`printer_group`] that takes only JPEG and URF documents.
 fn jpeg_only_printer() -> Group {
     let mut g = printer_group();
     g.attributes.retain(|a| a.name != "document-format-supported");
     g.with(Attribute::set("document-format-supported", vec![Value::MimeMediaType("image/jpeg".into()), Value::MimeMediaType("image/urf".into())]))
 }
 
+/// A job group with this id, `job-state` enum, reasons (`none` when empty) and name.
 fn job_group(id: i32, state: i32, reasons: &[&str], name: &str) -> Group {
     Group::new(GroupTag::Job)
         .with(Attribute::integer("job-id", id))
@@ -157,34 +174,41 @@ fn job_group(id: i32, state: i32, reasons: &[&str], name: &str) -> Group {
         .with(Attribute::name_value("job-originating-user-name", "craft"))
 }
 
+/// An unsupported-attributes group listing `names`.
 fn unsupported_group(names: &[&str]) -> Group {
     names.iter().fold(Group::new(GroupTag::Unsupported), |g, n| g.with(Attribute::new(*n, Value::Unsupported)))
 }
 
+/// A backend that sends through `script`, polls every millisecond and knows the printer at [`URI`].
 fn backend(script: &Script) -> IppBackend {
     let b = IppBackend::new().with_transport(script.clone()).with_poll_interval(Duration::from_millis(1));
     b.add(URI).unwrap();
     b
 }
 
+/// A registry holding a clone of `b`.
 fn registry(b: &IppBackend) -> Registry {
     let r = Registry::new();
     r.register(Box::new(b.clone())).unwrap();
     r
 }
 
+/// The registry's printer id of the test printer.
 fn id() -> String {
     format!("ipp:{URI}")
 }
 
+/// A job titled "Report" for the test printer.
 fn job() -> Job {
     Job { printer: Some(id()), title: "Report".into(), ..Job::default() }
 }
 
+/// A submit request for `job` with a small PDF and interactive consent.
 fn request<'a>(job: Job) -> SubmitRequest<'a> {
     SubmitRequest::new(Document::pdf(PDF), job).with_consent(UserConfirmed::interactive())
 }
 
+/// The groups of a Print-Job reply that accepted job `id` (pending, `job-incoming`).
 fn accepted(id: i32) -> Vec<Group> {
     vec![job_group(id, 3, &["job-incoming"], "Report")]
 }
@@ -450,6 +474,7 @@ fn unlisted_settings_are_dropped_with_a_warning_in_lenient_mode() {
     assert_eq!(script.last().group(GroupTag::Job).unwrap().first_i32("copies"), Some(99));
 }
 
+/// [`printer_group`] that also advertises every `print-scaling` value, defaulting to `auto`.
 fn scaling_printer() -> Group {
     printer_group()
         .with(Attribute::keywords("print-scaling-supported", &["auto", "auto-fit", "fill", "fit", "none"]))
@@ -589,10 +614,12 @@ fn a_cancelled_token_stops_before_anything_is_sent() {
 struct ToImage;
 
 impl DocumentConverter for ToImage {
+    /// JPEG and PWG raster from PDF; nothing from anything else.
     fn targets(&self, from: DocumentFormat) -> Vec<DocumentFormat> {
         if from == DocumentFormat::Pdf { vec![DocumentFormat::Jpeg, DocumentFormat::PwgRaster] } else { Vec::new() }
     }
 
+    /// The target's MIME type in angle brackets followed by the original bytes, so a test can see what ran.
     fn convert(&self, document: Document<'_>, target: DocumentFormat, _: &ConvertContext) -> Result<OwnedDocument, PrintError> {
         let mut bytes = format!("<{}>", target.mime()).into_bytes();
         bytes.extend_from_slice(document.bytes);
@@ -624,6 +651,8 @@ fn a_document_the_printer_cannot_take_is_converted_to_a_format_it_lists() {
 
 // ---- raster types ------------------------------------------------------------------------------------------
 
+/// [`printer_group`] that takes only PWG raster, advertising `types` as its raster document types
+/// when given.
 fn pwg_raster_printer(types: Option<&[&str]>) -> Group {
     let mut g = printer_group();
     g.attributes.retain(|a| a.name != "document-format-supported");
@@ -638,15 +667,18 @@ fn pwg_raster_printer(types: Option<&[&str]>) -> Group {
 struct Raster(std::sync::Mutex<Vec<crate::RasterType>>);
 
 impl DocumentConverter for Raster {
+    /// PWG raster from PDF only.
     fn targets(&self, from: DocumentFormat) -> Vec<DocumentFormat> {
         if from == DocumentFormat::Pdf { vec![DocumentFormat::PwgRaster] } else { Vec::new() }
     }
 
+    /// 16-bit before 8-bit, Adobe RGB before sRGB before grey.
     fn raster_types(&self) -> Vec<crate::RasterType> {
         use crate::RasterType::*;
         vec![AdobeRgb16, Srgb16, AdobeRgb8, Srgb8, Sgray16, Sgray8]
     }
 
+    /// Record the raster type it was asked for and return a placeholder document.
     fn convert(&self, _: Document<'_>, target: DocumentFormat, context: &ConvertContext) -> Result<OwnedDocument, PrintError> {
         self.0.lock().unwrap().push(context.raster);
         Ok(OwnedDocument::new(target, b"raster".to_vec()))
@@ -695,6 +727,7 @@ fn a_printer_that_lists_raster_types_has_them_in_its_details() {
 
 // ---- job status and cancel -----------------------------------------------------------------------------
 
+/// The job status the backend reads from a Get-Job-Attributes reply carrying `group`.
 fn status_of(group: Group) -> Result<crate::JobStatus, PrintError> {
     let script = Script::new();
     let b = backend(&script);
@@ -871,10 +904,12 @@ fn cancel_is_tolerant_of_jobs_that_already_ended() {
 
 // ---- IPP version negotiation ---------------------------------------------------------------------
 
+/// The IPP version of every request so far.
 fn versions_of(script: &Script) -> Vec<(u8, u8)> {
     script.requests().iter().map(|m| (m.major, m.minor)).collect()
 }
 
+/// [`printer_group`] with `ipp-versions-supported` set to `versions`.
 fn advertising(versions: &[&str]) -> Group {
     printer_group().with(Attribute::keywords("ipp-versions-supported", versions))
 }
@@ -1188,10 +1223,12 @@ fn job_ids_are_typed_and_round_trip() {
 
 // ---- listing and reconcile ------------------------------------------------------------------------------------
 
+/// `g` with a `date-time-at-creation` of `when`.
 fn dated(g: Group, when: SystemTime) -> Group {
     g.with(Attribute::new("date-time-at-creation", Value::DateTime(DateTime::from_system_time(when))))
 }
 
+/// `g` with `job-originating-user-name` replaced by `user`.
 fn by(mut g: Group, user: &str) -> Group {
     g.attributes.retain(|a| a.name != "job-originating-user-name");
     g.with(Attribute::name_value("job-originating-user-name", user))
@@ -1296,6 +1333,7 @@ fn find_job_matches_by_tag_and_otherwise_by_title_user_and_time() {
 
 // ---- tracked jobs end to end ---------------------------------------------------------------------------------------
 
+/// A registry over `script` and a print of the test PDF to it, on `clock`, with interactive consent.
 fn tracked(script: &Script, clock: &ManualClock) -> (Registry, PrintJob) {
     let b = backend(script);
     let r = registry(&b);
@@ -1305,6 +1343,7 @@ fn tracked(script: &Script, clock: &ManualClock) -> (Registry, PrintJob) {
     (r, job)
 }
 
+/// Advance `job` and the clock until it settles; panics after 200 steps.
 fn drive(job: &mut PrintJob, r: &Registry, clock: &ManualClock) {
     for _ in 0..200 {
         match job.advance(r).next_in {
@@ -1462,6 +1501,7 @@ fn control_characters_in_the_title_never_reach_the_job_name_and_the_tag_is_added
 
 #[test]
 fn printer_attributes_parse_from_a_static_reply_vector() {
+    /// Append one raw value: `tag`, then `name` and `value`, each with a two-byte length.
     fn attr(out: &mut Vec<u8>, tag: u8, name: &str, value: &[u8]) {
         out.push(tag);
         out.extend_from_slice(&(name.len() as u16).to_be_bytes());

@@ -25,6 +25,7 @@ pub enum IppVersion {
 }
 
 impl IppVersion {
+    /// The (major, minor) pair written in a request header.
     pub const fn parts(self) -> (u8, u8) {
         match self {
             Self::V1_1 => (1, 1),
@@ -123,6 +124,7 @@ pub enum Which {
 }
 
 impl Which {
+    /// The `which-jobs` keyword Get-Jobs sends.
     pub const fn keyword(self) -> &'static str {
         match self {
             Self::NotCompleted => "not-completed",
@@ -183,6 +185,8 @@ pub struct Client<T> {
 }
 
 impl<T: Transport> Client<T> {
+    /// A client for the printer at `uri`: IPP 1.1 without fallback, user `craft`, default limits.
+    /// Nothing is sent until an operation is called.
     pub fn new(transport: T, uri: PrinterUri) -> Self {
         Self {
             transport,
@@ -197,18 +201,21 @@ impl<T: Transport> Client<T> {
         }
     }
 
+    /// Use `limits` for the timeout and the request and reply size caps.
     #[must_use]
     pub fn with_limits(mut self, limits: NetworkLimits) -> Self {
         self.limits = limits;
         self
     }
 
+    /// Send `user` as `requesting-user-name`.
     #[must_use]
     pub fn with_user(mut self, user: &str) -> Self {
         self.user = user.to_owned();
         self
     }
 
+    /// Send requests as `version` first.
     #[must_use]
     pub fn with_version(mut self, version: IppVersion) -> Self {
         self.version = version;
@@ -247,10 +254,12 @@ impl<T: Transport> Client<T> {
         self
     }
 
+    /// The printer this client talks to.
     pub fn uri(&self) -> &PrinterUri {
         &self.uri
     }
 
+    /// The next request id from the shared counter; 0 is skipped, since the protocol reserves it.
     fn next_request_id(&self) -> u32 {
         loop {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -305,6 +314,9 @@ impl<T: Transport> Client<T> {
         }
     }
 
+    /// Send `message` once and read the reply. Fails on an oversized request, a non-200 HTTP status, a
+    /// reply that is not `application/ipp` or answers another request id, and an IPP error status;
+    /// attributes the printer marked unsupported become warnings.
     fn exchange_once(&self, message: &Message) -> Result<Reply> {
         let body = message.encode()?;
         if body.len() > self.limits.max_request {
@@ -340,6 +352,7 @@ impl<T: Transport> Client<T> {
         Ok(Reply { message: reply, status, warnings })
     }
 
+    /// The request's job attributes as a job group; `None` when there are none.
     fn job_group(request: &JobRequest) -> Option<Group> {
         if request.attributes.is_empty() {
             return None;
@@ -347,6 +360,8 @@ impl<T: Transport> Client<T> {
         Some(Group { tag: GroupTag::Job, attributes: request.attributes.clone() })
     }
 
+    /// The operation attributes that describe the job: its name, fidelity when asked, the document name,
+    /// and the document format when `with_format`.
     fn create_attributes(request: &JobRequest, with_format: bool) -> Vec<Attribute> {
         let mut extra = vec![Attribute::name_value("job-name", &request.job_name)];
         if request.fidelity {
@@ -406,6 +421,7 @@ impl<T: Transport> Client<T> {
         self.exchange(&self.validate_job_message(request))
     }
 
+    /// Read a Print-Job or Create-Job reply; it must carry a job group with a positive `job-id`.
     fn accepted(reply: Reply) -> Result<Accepted> {
         let group = reply.group(GroupTag::Job).ok_or_else(|| IppError::Protocol("the reply has no job attributes".into()))?;
         let job = JobAttrs::from_group(group);
@@ -466,6 +482,7 @@ impl<T: Transport> Client<T> {
     }
 }
 
+/// The names in the reply's unsupported-attributes groups, deduplicated, at most 32.
 fn unsupported_names(reply: &Message) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for group in reply.groups_of(GroupTag::Unsupported) {

@@ -26,6 +26,7 @@ pub enum JobSection {
 }
 
 impl JobSection {
+    /// The section's element name as GetJobElements requests it (`JobStatus`, `PrintTicket`, `Documents`).
     pub const fn name(self) -> &'static str {
         match self {
             Self::Status => "JobStatus",
@@ -35,11 +36,13 @@ impl JobSection {
     }
 }
 
+/// The `GetPrinterElementsRequest` body asking for `sections`, in the order given.
 pub fn get_printer_elements_body(sections: &[Section]) -> String {
     let names: String = sections.iter().map(|s| format!("<wprt:Name>wprt:{}</wprt:Name>", s.name())).collect();
     format!("<wprt:GetPrinterElementsRequest><wprt:RequestedElements>{names}</wprt:RequestedElements></wprt:GetPrinterElementsRequest>")
 }
 
+/// The `CreatePrintJobRequest` body carrying `ticket`; fails if the ticket cannot be written.
 pub fn create_print_job_body(ticket: &PrintTicket) -> Result<String> {
     Ok(format!("<wprt:CreatePrintJobRequest>{}</wprt:CreatePrintJobRequest>", ticket.to_xml()?))
 }
@@ -59,11 +62,14 @@ pub fn send_document_body(
     ))
 }
 
+/// The `CancelJobRequest` body for `job_id`; an id above `i32::MAX` is refused as invalid.
 pub fn cancel_job_body(job_id: u32) -> Result<String> {
     check_job_id(job_id)?;
     Ok(format!("<wprt:CancelJobRequest><wprt:JobId>{job_id}</wprt:JobId></wprt:CancelJobRequest>"))
 }
 
+/// The `GetJobElementsRequest` body asking for `sections` of job `job_id`; an id above `i32::MAX`
+/// is refused as invalid.
 pub fn get_job_elements_body(job_id: u32, sections: &[JobSection]) -> Result<String> {
     check_job_id(job_id)?;
     let names: String = sections.iter().map(|s| format!("<wprt:Name>wprt:{}</wprt:Name>", s.name())).collect();
@@ -72,18 +78,22 @@ pub fn get_job_elements_body(job_id: u32, sections: &[JobSection]) -> Result<Str
     ))
 }
 
+/// The (empty) `GetActiveJobsRequest` body.
 pub fn get_active_jobs_body() -> String {
     "<wprt:GetActiveJobsRequest/>".to_owned()
 }
 
+/// The (empty) `GetJobHistoryRequest` body.
 pub fn get_job_history_body() -> String {
     "<wprt:GetJobHistoryRequest/>".to_owned()
 }
 
+/// Refuse a job id the printer cannot have issued (above `i32::MAX`).
 fn check_job_id(id: u32) -> Result<()> {
     if id > i32::MAX as u32 { Err(WsdError::Invalid(format!("job id {id}: the printer issues 1 to {}", i32::MAX))) } else { Ok(()) }
 }
 
+/// A [`WsdError::Protocol`] error with `what` as its message.
 fn protocol<T>(what: impl Into<String>) -> Result<T> {
     Err(WsdError::Protocol(what.into()))
 }
@@ -94,12 +104,15 @@ fn number(node: Node<'_, '_>) -> Option<u64> {
     if t.is_empty() || t.len() > 18 || !t.bytes().all(|b| b.is_ascii_digit()) { None } else { t.parse().ok() }
 }
 
+/// [`number`], refused when it does not fit a `u32`.
 fn number32(node: Node<'_, '_>) -> Option<u32> {
     number(node).and_then(|n| u32::try_from(n).ok())
 }
 
 // ---- CreatePrintJob ----
 
+/// The `JobId` a `CreatePrintJobResponse` assigns; missing, non-numeric or above `i32::MAX` is a
+/// protocol error.
 pub fn parse_create_print_job(response: Node<'_, '_>) -> Result<u32> {
     let id = child(response, ns::WPRT, "JobId").ok_or_else(|| WsdError::Protocol("CreatePrintJobResponse has no JobId".into()))?;
     match number32(id) {
@@ -110,6 +123,8 @@ pub fn parse_create_print_job(response: Node<'_, '_>) -> Result<u32> {
 
 // ---- GetPrinterElements ----
 
+/// Read a `GetPrinterElementsResponse`: description, status and capabilities where present, and the
+/// names of sections the printer marked `Valid="false"`. Unknown sections are skipped.
 pub fn parse_printer_elements(response: Node<'_, '_>) -> Result<PrinterElements> {
     let list = child(response, ns::WPRT, "PrinterElements").ok_or_else(|| WsdError::Protocol("no PrinterElements in the reply".into()))?;
     let mut out = PrinterElements::default();
@@ -136,6 +151,7 @@ fn section_name(data: Node<'_, '_>) -> Option<String> {
     (uri.as_deref() == Some(ns::WPRT)).then_some(local)
 }
 
+/// Read `PrinterDescription`: the name (capped), colour and multi-document support, and pages per minute.
 fn read_description(n: Node<'_, '_>) -> PrinterDescription {
     PrinterDescription {
         name: child(n, ns::WPRT, "PrinterName").map(text).unwrap_or_default().chars().take(MAX_VALUE).collect(),
@@ -145,6 +161,8 @@ fn read_description(n: Node<'_, '_>) -> PrinterDescription {
     }
 }
 
+/// Read `PrinterStatus`: the state, queued job count, and the primary and listed state reasons,
+/// deduplicated and capped.
 fn read_status(n: Node<'_, '_>) -> PrinterStatus {
     let mut reasons: Vec<String> = Vec::new();
     // Schema names: PrinterPrimaryStateReason (one) and PrinterStateReasons (a list of PrinterStateReason).
@@ -182,6 +200,8 @@ fn allowed(parent: Node<'_, '_>, name: &str, tokens: bool) -> Vec<String> {
     out
 }
 
+/// Read `PrinterCapabilities`: the copies range (minimum 1 when unstated), media sizes and types,
+/// orientations, qualities, sides, resolutions, document formats and compressions.
 fn read_capabilities(n: Node<'_, '_>) -> Capabilities {
     let mut caps = Capabilities::default();
     if let Some(jobs) = child(n, ns::WPRT, "JobValues") {
@@ -229,6 +249,8 @@ fn read_resolutions(res: Node<'_, '_>) -> Vec<(u32, u32)> {
 
 // ---- jobs ----
 
+/// Read a job status or summary entry. A valid `JobId` and a non-empty `JobState` are required;
+/// missing counters read as zero.
 fn read_job_status(n: Node<'_, '_>) -> Result<JobStatus> {
     let job_id = child(n, ns::WPRT, "JobId").and_then(number32).filter(|id| *id <= i32::MAX as u32);
     let Some(job_id) = job_id else { return protocol("a job entry without a valid JobId") };
@@ -247,6 +269,8 @@ fn read_job_status(n: Node<'_, '_>) -> Result<JobStatus> {
     })
 }
 
+/// Read a `GetJobElementsResponse`: the job status and print ticket where present, and the sections
+/// the printer marked invalid. A malformed status fails the whole reply.
 pub fn parse_job_elements(response: Node<'_, '_>) -> Result<JobElements> {
     let list = child(response, ns::WPRT, "JobElements").ok_or_else(|| WsdError::Protocol("no JobElements in the reply".into()))?;
     let mut out = JobElements::default();
@@ -318,6 +342,7 @@ mod tests {
     use super::*;
     use crate::wsd::ticket::Compression;
 
+    /// Parse `body` inside a root element that declares `wprt` and a `q` prefix, and hand the root to `f`.
     fn with<T>(body: &str, f: impl FnOnce(Node<'_, '_>) -> Result<T>) -> Result<T> {
         let x = format!("<wprt:R xmlns:wprt=\"{}\" xmlns:q=\"urn:q\">{body}</wprt:R>", ns::WPRT);
         let doc = xml::parse(&x)?;
@@ -461,6 +486,7 @@ mod tests {
         assert!(j.has_ticket && j.ticket.unwrap().sides.is_none());
     }
 
+    /// The children of a job status entry with this id, state and reasons, and fixed counters.
     fn job(id: &str, state: &str, reasons: &[&str]) -> String {
         let r: String = reasons.iter().map(|r| format!("<wprt:JobStateReason>{r}</wprt:JobStateReason>")).collect();
         let r = if r.is_empty() { String::new() } else { format!("<wprt:JobStateReasons>{r}</wprt:JobStateReasons>") };

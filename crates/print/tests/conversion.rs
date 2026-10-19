@@ -31,6 +31,7 @@ struct Device {
 }
 
 impl Device {
+    /// A local device whose backend takes `backend_formats`, with default printer details.
     fn new(backend_formats: &'static [DocumentFormat]) -> Self {
         Self {
             backend_formats,
@@ -42,25 +43,30 @@ impl Device {
         }
     }
 
+    /// Report `details` (resolutions, colour, the per-printer format list) for the printer.
     fn with_details(mut self, details: PrinterDetails) -> Self {
         self.details = details;
         self
     }
 
+    /// Make the printer's own `details.formats`, not the backend list, decide what it takes.
     fn per_printer(mut self) -> Self {
         self.per_printer = true;
         self
     }
 
+    /// Report the backend as a network backend.
     fn network(mut self) -> Self {
         self.network = true;
         self
     }
 
+    /// What each submit received, in order.
     fn submitted(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
 
+    /// How many times the printer's details were asked for.
     fn detail_calls(&self) -> u32 {
         self.detail_calls.load(Ordering::SeqCst)
     }
@@ -79,13 +85,16 @@ impl Backend for Device {
     fn formats_per_printer(&self) -> bool {
         self.per_printer
     }
+    /// The one default printer, `p`.
     fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
         Ok(vec![PrinterRef { id: "p".into(), name: "P".into(), default: true, two_sided: None }])
     }
+    /// The configured details under the asked-for id; each call is counted.
     fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
         self.detail_calls.fetch_add(1, Ordering::SeqCst);
         Ok(PrinterDetails { id: native_id.into(), name: native_id.into(), ..self.details.clone() })
     }
+    /// Record the format, bytes and resolution that arrived, and accept.
     fn submit(&self, request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         self.seen.lock().unwrap().push(Seen {
             format: request.document.format,
@@ -106,19 +115,24 @@ struct Converter {
 }
 
 impl Converter {
+    /// A converter that makes `targets` from PDF and never fails.
     fn making(targets: &[DocumentFormat]) -> Arc<Self> {
         Arc::new(Self { targets: targets.to_vec(), fail: None, wrong_format: false, cancel_while_converting: false, calls: Mutex::default() })
     }
 
+    /// Every conversion asked for: source format, target and context.
     fn calls(&self) -> Vec<(DocumentFormat, DocumentFormat, ConvertContext)> {
         self.calls.lock().unwrap().clone()
     }
 }
 
 impl DocumentConverter for Converter {
+    /// The configured targets for PDF; nothing for any other format.
     fn targets(&self, from: DocumentFormat) -> Vec<DocumentFormat> {
         if from == DocumentFormat::Pdf { self.targets.clone() } else { Vec::new() }
     }
+    /// Record the call, then cancel the context's token, fail, or return the wrong format if so
+    /// configured; otherwise `converted:<mime>` in the target format.
     fn convert(&self, document: Document<'_>, target: DocumentFormat, context: &ConvertContext) -> Result<OwnedDocument, PrintError> {
         self.calls.lock().unwrap().push((document.format, target, context.clone()));
         if self.cancel_while_converting {
@@ -132,6 +146,7 @@ impl DocumentConverter for Converter {
     }
 }
 
+/// A registry holding a clone of `device` and, if given, `converter`.
 fn registry_with(device: &Device, converter: Option<Arc<Converter>>) -> Registry {
     let registry = Registry::new();
     registry.register(Box::new(device.clone())).unwrap();
@@ -141,12 +156,14 @@ fn registry_with(device: &Device, converter: Option<Arc<Converter>>) -> Registry
     registry
 }
 
+/// A PDF submit to `dev:p` with no consent attached.
 fn pdf_request<'a>() -> SubmitRequest<'a> {
     SubmitRequest::new(Document::pdf(b"%PDF-1.7"), Job { printer: Some("dev:p".into()), ..Job::default() })
 }
 
 use DocumentFormat::{Jpeg, Pdf, PwgRaster};
 
+/// Colour printer details advertising these square resolutions (dpi).
 fn res(details_resolutions: &[u32]) -> PrinterDetails {
     PrinterDetails {
         resolutions: details_resolutions.iter().map(|d| Resolution::square(*d)).collect(),
@@ -358,9 +375,12 @@ fn the_resolution_rule_is_public() {
 struct BlankPages;
 
 impl DocumentConverter for BlankPages {
+    /// PWG raster from PDF only.
     fn targets(&self, from: DocumentFormat) -> Vec<DocumentFormat> {
         if from == DocumentFormat::Pdf { vec![DocumentFormat::PwgRaster] } else { Vec::new() }
     }
+    /// One blank page a tenth of an inch square at the context's resolution, in colour or grey as asked,
+    /// packed with the public PWG encoder.
     fn convert(&self, _document: Document<'_>, target: DocumentFormat, context: &ConvertContext) -> Result<OwnedDocument, PrintError> {
         let (w, h) = (context.resolution.x_dpi / 10, context.resolution.y_dpi / 10);
         let page = craft_print::pwg::RasterPage {

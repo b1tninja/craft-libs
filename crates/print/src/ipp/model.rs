@@ -85,6 +85,7 @@ pub struct PrinterAttrs {
     pub versions: Vec<String>,
 }
 
+/// `v` cut to `MAX_LIST` entries.
 fn cap<T>(mut v: Vec<T>) -> Vec<T> {
     v.truncate(MAX_LIST);
     v
@@ -96,10 +97,13 @@ fn listed<'g>(group: &'g Group, name: &str) -> Option<&'g Attribute> {
     group.get(name).filter(|a| !a.values.iter().all(Value::is_out_of_band))
 }
 
+/// The string values of `name` (capped), unless it is absent or out-of-band only.
 fn strings(group: &Group, name: &str) -> Option<Vec<String>> {
     listed(group, name).map(|a| cap(a.strings().into_iter().map(str::to_owned).collect()))
 }
 
+/// A collection member `name` as (lower, upper): an integer gives the same value twice, a range its
+/// bounds; anything else is `None`.
 fn dimension(values: &[(String, Vec<Value>)], name: &str) -> Option<(i32, i32)> {
     let value = values.iter().find(|(n, _)| n == name)?.1.first()?;
     match value {
@@ -109,6 +113,8 @@ fn dimension(values: &[(String, Vec<Value>)], name: &str) -> Option<(i32, i32)> 
     }
 }
 
+/// A `resolution` value in dots per inch; dots per centimetre are converted and snapped to the
+/// nearest multiple of 25 dpi when within 1.27 dpi. Non-positive values or unknown units are `None`.
 fn resolution_dpi(value: &Value) -> Option<(u32, u32)> {
     let Value::Resolution { cross_feed, feed, units } = value else { return None };
     let scale = match units {
@@ -184,18 +190,22 @@ impl PrinterAttrs {
         self.copies.map(|(low, high)| (low..=high).contains(&n))
     }
 
+    /// Whether `sides-supported` lists `keyword`; `None` when the printer did not say.
     pub fn supports_sides(&self, keyword: &str) -> Option<bool> {
         self.sides.as_ref().map(|s| s.iter().any(|k| k == keyword))
     }
 
+    /// Whether `orientation-requested-supported` lists the enum `value`; `None` when the printer did not say.
     pub fn supports_orientation(&self, value: i32) -> Option<bool> {
         self.orientations.as_ref().map(|o| o.contains(&value))
     }
 
+    /// Whether `print-quality-supported` lists the enum `value`; `None` when the printer did not say.
     pub fn supports_quality(&self, value: i32) -> Option<bool> {
         self.qualities.as_ref().map(|q| q.contains(&value))
     }
 
+    /// Whether the printer lists the resolution (x, y) in dpi; `None` when it did not say.
     pub fn supports_resolution(&self, (x, y): (u32, u32)) -> Option<bool> {
         self.resolutions.as_ref().map(|r| r.contains(&(x, y)))
     }
@@ -215,6 +225,7 @@ impl PrinterAttrs {
         Some(by_size)
     }
 
+    /// Whether `print-color-mode-supported` lists `keyword`; `None` when the printer did not say.
     pub fn supports_colour_mode(&self, keyword: &str) -> Option<bool> {
         self.color_modes.as_ref().map(|m| m.iter().any(|k| k == keyword))
     }
@@ -225,6 +236,7 @@ impl PrinterAttrs {
         self.scaling.as_ref().map(|s| s.iter().any(|k| k == keyword))
     }
 
+    /// Whether `print-content-optimize-supported` lists `keyword` (false when absent).
     pub fn lists_content_optimize(&self, keyword: &str) -> bool {
         self.content_optimize.as_ref().is_some_and(|c| c.iter().any(|k| k == keyword))
     }
@@ -258,6 +270,8 @@ pub struct JobAttrs {
 }
 
 impl JobAttrs {
+    /// Read a job group; every attribute is optional, and `date-time-at-creation` is converted to a
+    /// wall-clock time when valid.
     pub fn from_group(group: &Group) -> Self {
         let created = group.get("date-time-at-creation").and_then(|a| a.first()).and_then(|v| match v {
             Value::DateTime(d) => d.to_system_time(),
@@ -279,6 +293,7 @@ impl JobAttrs {
         }
     }
 
+    /// Whether `job-state-reasons` includes `reason`.
     pub fn has_reason(&self, reason: &str) -> bool {
         self.reasons.iter().any(|r| r == reason)
     }
@@ -376,6 +391,7 @@ mod tests {
         assert_eq!(res(47), Some((119, 119)), "not near a usual value: rounded as it is");
     }
 
+    /// A stopped, offline printer group with copies, resolutions and media attributes for the readers.
     fn printer() -> Group {
         Group::new(GroupTag::Printer)
             .with(Attribute::name_value("printer-name", "Office"))

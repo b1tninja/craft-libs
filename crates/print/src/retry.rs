@@ -42,6 +42,7 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// A stable lowercase name for logs.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Prepare => "prepare",
@@ -68,11 +69,13 @@ pub trait Clock: Send + Sync {
 pub struct SystemClock;
 
 impl Clock for SystemClock {
+    /// Time since this clock was first read in the process (monotonic).
     fn now(&self) -> Duration {
         static START: OnceLock<Instant> = OnceLock::new();
         START.get_or_init(Instant::now).elapsed()
     }
 
+    /// Block the thread for `duration`.
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
     }
@@ -87,10 +90,12 @@ pub struct ManualClock {
 }
 
 impl ManualClock {
+    /// A clock at zero.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Move the clock forward by `by`; every clone sees it.
     pub fn advance(&self, by: Duration) {
         let mut now = self.now.lock().unwrap_or_else(PoisonError::into_inner);
         *now = now.saturating_add(by);
@@ -103,10 +108,12 @@ impl ManualClock {
 }
 
 impl Clock for ManualClock {
+    /// The time the clock has been advanced to.
     fn now(&self) -> Duration {
         *self.now.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Record `duration` and advance the clock by it instead of blocking.
     fn sleep(&self, duration: Duration) {
         self.slept.lock().unwrap_or_else(PoisonError::into_inner).push(duration);
         self.advance(duration);
@@ -199,6 +206,7 @@ mod tests {
     use crate::RetrySafety;
     use crate::backend::ErrorKind;
 
+    /// Five attempts, 100 ms doubling up to 1 s, without jitter.
     fn policy() -> RetryPolicy {
         RetryPolicy {
             max_attempts: 5,
@@ -209,10 +217,12 @@ mod tests {
         }
     }
 
+    /// An error of `kind` with the given retry safety.
     fn error(kind: ErrorKind, safety: RetrySafety) -> PrintError {
         PrintError::new(kind, "x").with_safety(safety)
     }
 
+    /// The advice for `error` on `attempt` under `p`, with fixed jitter.
     fn advice(p: &RetryPolicy, error: &PrintError, attempt: u32) -> RetryAdvice {
         advise_error(error, attempt, p, &mut Jitter::new(1))
     }

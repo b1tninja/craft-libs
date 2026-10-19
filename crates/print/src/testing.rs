@@ -132,11 +132,13 @@ pub struct FakeBackend {
 }
 
 impl std::fmt::Debug for FakeBackend {
+    /// Only the backend name; the configuration and recordings are left out.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FakeBackend").field("name", &self.config.name).finish_non_exhaustive()
     }
 }
 
+/// Lock `mutex`, taking the data even if a panicking test poisoned it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -192,6 +194,7 @@ impl FakeBackend {
             .with_open_job_timeout(Duration::from_secs(240))
     }
 
+    /// Apply `change` to this fake's configuration. Clones made earlier keep the old configuration.
     fn configured(mut self, change: impl FnOnce(&mut Config)) -> Self {
         // Configuration is set before the fake is cloned; if it was cloned, the clones keep the old one.
         change(Arc::make_mut(&mut self.config));
@@ -346,6 +349,7 @@ impl FakeBackend {
         lock(&self.recorded).wakers.iter().filter(|w| w.is_connected()).count()
     }
 
+    /// Recommend `interval` between status polls instead of the default for the watch support.
     #[must_use]
     pub fn with_poll_interval(self, interval: Duration) -> Self {
         self.configured(|c| c.poll_interval = Some(interval))
@@ -471,22 +475,27 @@ impl FakeBackend {
 }
 
 impl Backend for FakeBackend {
+    /// The name given to [`Self::new`].
     fn name(&self) -> &'static str {
         self.config.name
     }
 
+    /// As set with [`Self::with_class`].
     fn class(&self) -> BackendClass {
         self.config.class
     }
 
+    /// As set with [`Self::with_formats`].
     fn accepted_formats(&self) -> &[DocumentFormat] {
         &self.config.formats
     }
 
+    /// As set with [`Self::with_formats_per_printer`].
     fn formats_per_printer(&self) -> bool {
         self.config.formats_per_printer
     }
 
+    /// The configured printers, or the error from [`Self::failing_list`].
     fn list_printers(&self) -> Result<Vec<PrinterRef>, PrintError> {
         match &self.config.list_error {
             Some(error) => Err(error.clone()),
@@ -494,6 +503,8 @@ impl Backend for FakeBackend {
         }
     }
 
+    /// The configured details under the printer's id, name and default flag; a printer that was not
+    /// added is not found. Each call is counted, failing ones included.
     fn printer_details(&self, native_id: &str) -> Result<PrinterDetails, PrintError> {
         {
             let mut recorded = lock(&self.recorded);
@@ -511,6 +522,9 @@ impl Backend for FakeBackend {
         Ok(PrinterDetails { id: printer.id.clone(), name: printer.name.clone(), default: printer.default, ..self.config.details.clone() })
     }
 
+    /// Record the submission, carrying the tag where [`Self::with_tag_support`] says, report the
+    /// configured progress events, then play the next submit-script step (or the configured failure).
+    /// An accepted job, and a job whose reply was lost, is added to the remote job list.
     fn submit(&self, mut request: SubmitRequest<'_>) -> Result<Submitted, PrintError> {
         // The backend carries the tag where its support says, exactly once.
         let placement = self.config.tag_support.placement();
@@ -582,10 +596,13 @@ impl Backend for FakeBackend {
         Ok(submitted)
     }
 
+    /// As set with [`Self::with_watch`].
     fn watch_support(&self) -> WatchSupport {
         self.config.watch
     }
 
+    /// With [`Self::with_push`], a fresh wake receiver whose sender the fake keeps (see
+    /// [`Self::wake_watches`]); otherwise `None`.
     fn wake_source(&self, _job: &JobId) -> Option<crate::WakeReceiver> {
         if !self.config.push {
             return None;
@@ -598,6 +615,7 @@ impl Backend for FakeBackend {
         Some(rx)
     }
 
+    /// The interval from [`Self::with_poll_interval`], else 2 s when polled and 15 s with events.
     fn recommended_poll_interval(&self) -> Option<Duration> {
         self.config.poll_interval.or(match self.config.watch {
             WatchSupport::None => None,
@@ -606,10 +624,13 @@ impl Backend for FakeBackend {
         })
     }
 
+    /// As set with [`Self::with_open_job_timeout`].
     fn open_job_timeout(&self) -> Option<Duration> {
         self.config.open_job_timeout
     }
 
+    /// The next status-script entry (the last one repeats; `Unknown` with no script). Every job reads
+    /// the same script; each call is counted.
     fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
         let _ = job;
         let mut recorded = lock(&self.recorded);
@@ -621,6 +642,7 @@ impl Backend for FakeBackend {
         }
     }
 
+    /// Record the cancel, or refuse it as unsupported after `with_cancel_support(false)`.
     fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {
         if !self.config.can_cancel {
             return Err(PrintError::new(ErrorKind::Unsupported, format!("the {} backend cannot cancel a job once it is accepted", self.config.name)));
@@ -629,14 +651,18 @@ impl Backend for FakeBackend {
         Ok(())
     }
 
+    /// As set with [`Self::with_tag_support`].
     fn tag_support(&self) -> TagSupport {
         self.config.tag_support
     }
 
+    /// As set with [`Self::with_query_caps`].
     fn job_query_caps(&self) -> JobQueryCaps {
         self.config.query_caps
     }
 
+    /// The remote jobs, newest first and filtered; finished ones only with history in the query caps.
+    /// Unsupported unless the caps allow listing.
     fn list_jobs(&self, printer_native: &str, filter: &JobFilter) -> Result<Vec<RemoteJob>, PrintError> {
         let _ = printer_native;
         if !self.config.query_caps.list {

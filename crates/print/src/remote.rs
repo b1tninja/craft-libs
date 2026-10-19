@@ -50,24 +50,28 @@ impl RemoteJob {
         Self { id, title, user: None, created: None, state, reasons: Vec::new(), tag, ours: false, sheets_done: None, pages_done: None }
     }
 
+    /// Set the owner the listing reports.
     #[must_use]
     pub fn with_user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self
     }
 
+    /// Set the creation time the listing reports.
     #[must_use]
     pub fn with_created(mut self, created: SystemTime) -> Self {
         self.created = Some(created);
         self
     }
 
+    /// Set the idempotency tag the job carries in a native attribute.
     #[must_use]
     pub fn with_tag(mut self, tag: Tag) -> Self {
         self.tag = Some(tag);
         self
     }
 
+    /// Set the state reasons the listing reports, replacing any already set.
     #[must_use]
     pub fn with_reasons(mut self, reasons: Vec<String>) -> Self {
         self.reasons = reasons;
@@ -101,34 +105,40 @@ pub struct JobFilter {
 }
 
 impl JobFilter {
+    /// An empty filter, which lists everything.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Only jobs of `user` (jobs listed without a user still pass).
     #[must_use]
     pub fn for_user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self
     }
 
+    /// Only jobs titled `title`, ignoring tag suffixes and accepting a printer's cut-short title.
     #[must_use]
     pub fn titled(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self
     }
 
+    /// Only jobs created at or after `since` (jobs without a creation time still pass).
     #[must_use]
     pub fn since(mut self, since: SystemTime) -> Self {
         self.since = Some(since);
         self
     }
 
+    /// Mark jobs carrying `tag` as ours; this hides nothing.
     #[must_use]
     pub fn marking(mut self, tag: Tag) -> Self {
         self.tag = Some(tag);
         self
     }
 
+    /// Only jobs in one of `states`.
     #[must_use]
     pub fn in_states(mut self, states: Vec<JobState>) -> Self {
         self.states = Some(states);
@@ -182,11 +192,14 @@ pub trait FingerprintExt {
 }
 
 impl FingerprintExt for Fingerprint {
+    /// The submission time less the fingerprint's window, as wall-clock time.
     fn since(&self) -> SystemTime {
         let window = u64::try_from(self.window.as_millis()).unwrap_or(u64::MAX);
         system_time(Timestamp::from_millis(self.submitted.millis().saturating_sub(window)))
     }
 
+    /// With a matchable tag, an unrestricted listing that marks the tag; otherwise title, user and
+    /// creation time restrict it.
     fn filter(&self, tag_matchable: bool) -> JobFilter {
         match (&self.tag, tag_matchable) {
             (Some(tag), true) => JobFilter::new().marking(*tag),
@@ -282,14 +295,17 @@ mod tests {
     use super::*;
     use craft_job::TagPlacement;
 
+    /// A pending job `p#{n}` of a test backend titled `title`.
     fn job(n: u32, title: &str) -> RemoteJob {
         RemoteJob::new(JobId::new("t", format!("p#{n}")), title, JobState::Pending)
     }
 
+    /// `text` as a tag, or a random one if it does not parse.
     fn tag(text: &str) -> Tag {
         Tag::parse(text).unwrap_or_else(|_| Tag::random())
     }
 
+    /// A fingerprint of `title` submitted at the epoch, with no user or tag.
     fn fingerprint(title: &str) -> Fingerprint {
         Fingerprint::new(title, Timestamp::default())
     }

@@ -127,6 +127,7 @@ impl NotifyConfig {
         Self::new(SocketAddr::from(([127, 0, 0, 1], 0)), "http://127.0.0.1:1/")
     }
 
+    /// Use `tuning` for leases, renewals, back-off and the listener's limits.
     #[must_use]
     pub fn with_tuning(mut self, tuning: EventTuning) -> Self {
         self.tuning = tuning;
@@ -134,6 +135,7 @@ impl NotifyConfig {
     }
 }
 
+/// A configuration refusal: invalid request, prepare phase, safe to retry once fixed.
 fn refused(why: String) -> PrintError {
     PrintError::new(ErrorKind::InvalidRequest, why).with_phase(crate::Phase::Prepare).with_safety(crate::RetrySafety::Safe)
 }
@@ -245,6 +247,7 @@ struct Counters {
     ended: AtomicU64,
 }
 
+/// Add one to a statistics counter.
 fn bump(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
 }
@@ -279,10 +282,13 @@ const MAX_SEEN: usize = 256;
 const MAX_RECEIVERS: usize = 64;
 
 impl Sub {
+    /// Whether events can be trusted now: subscribed, not degraded, the lease not run out, and an event
+    /// heard within `quiet`.
     fn healthy(&self, now: Duration, quiet: Duration) -> bool {
         self.handle.is_some() && !self.degraded && now < self.expires_at && self.last_event.is_some_and(|at| now.saturating_sub(at) <= quiet)
     }
 
+    /// Tell every attached wake receiver whether the subscription is currently healthy.
     fn publish_health(&self, now: Duration, quiet: Duration) {
         let healthy = self.healthy(now, quiet);
         for rx in &self.receivers {
@@ -290,6 +296,7 @@ impl Sub {
         }
     }
 
+    /// Drop wake receivers whose watch has gone away.
     fn prune(&mut self) {
         self.receivers.retain(|rx| rx.tx.is_connected());
     }
@@ -313,6 +320,7 @@ struct Shared {
     maintaining: Mutex<()>,
 }
 
+/// Lock `mutex`, taking the data even if a panicking thread poisoned it.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -327,6 +335,7 @@ fn ct_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// A fresh 64-hex-digit secret from two random UUIDs, used in the sink URL and as the subscription identifier.
 fn new_token() -> String {
     let mut token = String::with_capacity(64);
     for _ in 0..2 {
@@ -343,6 +352,7 @@ pub struct Events {
 }
 
 impl std::fmt::Debug for Events {
+    /// The listening address and the advertised base URL; subscriptions and secrets are left out.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Events").field("listening", &self.local).field("advertise", &self.shared.advertise).finish_non_exhaustive()
     }
@@ -548,10 +558,14 @@ impl Events {
         }
     }
 
+    /// A WSD client for `printer` with the shared transport and limits.
     fn client(&self, printer: &PrinterUrl) -> Client<SharedTransport> {
         Client::new(Arc::clone(&self.shared.transport), printer.clone()).with_limits(self.shared.limits)
     }
 
+    /// Run one network action outside the state lock and record its result. A new subscription gets its
+    /// lease and renewal time, or a back-off after a failure; a failed renewal either starts over (the
+    /// printer faulted) or retries soon until the lease runs out. Unsubscribe is best effort.
     fn perform(&self, action: Action) {
         let shared = &self.shared;
         let tuning = shared.tuning;
@@ -620,6 +634,8 @@ impl Events {
         }
     }
 
+    /// Subscribe at `printer` to the job events this backend follows, delivered to this listener's
+    /// sink URLs for `token` (`/n/` for events, `/e/` for the end notice), for one lease.
     fn subscribe(&self, printer: &PrinterUrl, token: &str) -> Result<Subscription, WsdError> {
         let base = &self.shared.advertise;
         let sink = |kind: &str| EndpointRef::new(format!("{base}/{kind}/{token}")).with_parameter(ReferenceParameter::new(WSE, "Identifier", token));
@@ -655,6 +671,7 @@ impl Events {
 }
 
 impl Drop for Events {
+    /// Shut down: unsubscribe everything and stop the listener.
     fn drop(&mut self) {
         self.shutdown();
     }

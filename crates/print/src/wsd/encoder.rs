@@ -69,10 +69,12 @@ impl<'a> PassThrough<'a> {
 }
 
 impl DocumentEncoder for PassThrough<'_> {
+    /// The one format the bytes are in.
     fn formats(&self) -> Vec<String> {
         vec![self.format.clone()]
     }
 
+    /// The bytes, borrowed, when `format` matches (ignoring case); any other format is an encode error.
     fn encode(&self, format: &str, _ctx: &EncodeContext) -> Result<Cow<'_, [u8]>> {
         if format.eq_ignore_ascii_case(&self.format) {
             Ok(Cow::Borrowed(&self.bytes))
@@ -86,6 +88,7 @@ impl DocumentEncoder for PassThrough<'_> {
 pub struct Chain<'a>(pub Vec<Box<dyn DocumentEncoder + 'a>>);
 
 impl DocumentEncoder for Chain<'_> {
+    /// Every encoder's formats in order, without case-insensitive duplicates.
     fn formats(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for f in self.0.iter().flat_map(|e| e.formats()) {
@@ -96,6 +99,7 @@ impl DocumentEncoder for Chain<'_> {
         out
     }
 
+    /// Encode with the first encoder that lists `format`.
     fn encode(&self, format: &str, ctx: &EncodeContext) -> Result<Cow<'_, [u8]>> {
         match self.0.iter().find(|e| e.formats().iter().any(|f| f.eq_ignore_ascii_case(format))) {
             Some(e) => e.encode(format, ctx),
@@ -106,6 +110,7 @@ impl DocumentEncoder for Chain<'_> {
 
 /// Renders pages to pixels (the application's renderer).
 pub trait PageSource {
+    /// How many pages there are; 0 is refused by the encoder.
     fn page_count(&self) -> usize;
     /// Page `index` (0-based) at `dpi`; `gray` asks for 8-bit grey, else 24-bit RGB.
     fn render(&self, index: usize, dpi: (u32, u32), gray: bool) -> Result<RasterPage>;
@@ -117,6 +122,7 @@ pub struct RasterEncoder<S: PageSource> {
 }
 
 impl<S: PageSource> RasterEncoder<S> {
+    /// An encoder rendering pages from `source`.
     pub fn new(source: S) -> Self {
         Self { source }
     }
@@ -130,6 +136,8 @@ impl<S: PageSource> DocumentEncoder for RasterEncoder<S> {
         vec![PWG_RASTER.to_owned()]
     }
 
+    /// Render every page at the context's resolution (grey unless colour is asked for) and pack them as
+    /// PWG raster, duplexed as the context's sides say. Fails on no pages or more than `pwg::MAX_PAGES`.
     fn encode(&self, format: &str, ctx: &EncodeContext) -> Result<Cow<'_, [u8]>> {
         if !format.eq_ignore_ascii_case(PWG_RASTER) {
             return Err(WsdError::Encode(format!("cannot produce {format}")));
@@ -158,6 +166,7 @@ impl<S: PageSource> DocumentEncoder for RasterEncoder<S> {
 mod tests {
     use super::*;
 
+    /// Colour at 300 dpi, no sides or media.
     fn ctx() -> EncodeContext {
         EncodeContext { color: true, dpi: (300, 300), sides: None, media_size: None }
     }
@@ -188,6 +197,7 @@ mod tests {
         fn page_count(&self) -> usize {
             self.0
         }
+        /// A blank (white) page a tenth of an inch square at `dpi`.
         fn render(&self, _i: usize, dpi: (u32, u32), gray: bool) -> Result<RasterPage> {
             let (w, h) = (dpi.0 / 10, dpi.1 / 10);
             Ok(RasterPage { width: w, height: h, gray, pixels: vec![255; (w * h) as usize * if gray { 1 } else { 3 }] })

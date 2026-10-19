@@ -45,6 +45,8 @@ pub struct Limits {
 }
 
 impl Default for Limits {
+    /// 4 MiB messages, 1024 groups, 16 384 attributes, 65 536 values (4096 per attribute), and
+    /// collections nested six deep.
     fn default() -> Self {
         Self { max_message: 4 << 20, max_groups: 1024, max_attributes: 16_384, max_values: 65_536, max_values_per_attribute: 4096, max_depth: 6 }
     }
@@ -121,6 +123,7 @@ pub enum GroupTag {
 }
 
 impl GroupTag {
+    /// The delimiter tag that opens this group on the wire.
     pub const fn byte(self) -> u8 {
         match self {
             Self::Operation => 0x01,
@@ -135,6 +138,8 @@ impl GroupTag {
         }
     }
 
+    /// The group a delimiter tag opens; `None` for anything that is not a group tag (including
+    /// end-of-attributes, `0x03`).
     pub const fn from_byte(byte: u8) -> Option<Self> {
         Some(match byte {
             0x01 => Self::Operation,
@@ -321,6 +326,7 @@ impl Value {
         }
     }
 
+    /// The value of a `boolean`.
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Boolean(b) => Some(*b),
@@ -346,6 +352,7 @@ impl Value {
         }
     }
 
+    /// The members of a `collection`, each a name and its values.
     pub fn as_collection(&self) -> Option<&[(String, Vec<Value>)]> {
         match self {
             Self::Collection(members) => Some(members),
@@ -367,42 +374,52 @@ pub struct Attribute {
 }
 
 impl Attribute {
+    /// An attribute with one value. The name is checked when the message is written, not here.
     pub fn new(name: impl Into<String>, value: Value) -> Self {
         Self { name: name.into(), values: vec![value] }
     }
 
+    /// An attribute with several values (a 1setOf); writing refuses an empty set.
     pub fn set(name: impl Into<String>, values: Vec<Value>) -> Self {
         Self { name: name.into(), values }
     }
 
+    /// An `integer` attribute.
     pub fn integer(name: &str, n: i32) -> Self {
         Self::new(name, Value::Integer(n))
     }
 
+    /// A `boolean` attribute.
     pub fn boolean(name: &str, b: bool) -> Self {
         Self::new(name, Value::Boolean(b))
     }
 
+    /// An `enum` attribute (`print-quality`, `orientation-requested`, ...).
     pub fn enumeration(name: &str, n: i32) -> Self {
         Self::new(name, Value::Enum(n))
     }
 
+    /// A `keyword` attribute.
     pub fn keyword(name: &str, k: &str) -> Self {
         Self::new(name, Value::Keyword(k.to_owned()))
     }
 
+    /// A 1setOf `keyword` attribute, in the order given.
     pub fn keywords(name: &str, ks: &[&str]) -> Self {
         Self::set(name, ks.iter().map(|k| Value::Keyword((*k).to_owned())).collect())
     }
 
+    /// A `uri` attribute.
     pub fn uri(name: &str, u: &str) -> Self {
         Self::new(name, Value::Uri(u.to_owned()))
     }
 
+    /// A `name` attribute without a language (`requesting-user-name`, `job-name`).
     pub fn name_value(name: &str, n: &str) -> Self {
         Self::new(name, Value::Name(n.to_owned()))
     }
 
+    /// A `text` attribute without a language.
     pub fn text(name: &str, t: &str) -> Self {
         Self::new(name, Value::Text(t.to_owned()))
     }
@@ -431,32 +448,39 @@ pub struct Group {
 }
 
 impl Group {
+    /// An empty group of this kind.
     pub fn new(tag: GroupTag) -> Self {
         Self { tag, attributes: Vec::new() }
     }
 
+    /// Append `attribute`; names are not deduplicated.
     #[must_use]
     pub fn with(mut self, attribute: Attribute) -> Self {
         self.attributes.push(attribute);
         self
     }
 
+    /// The first attribute called `name` in this group.
     pub fn get(&self, name: &str) -> Option<&Attribute> {
         self.attributes.iter().find(|a| a.name == name)
     }
 
+    /// The first value of `name` as a string (any string syntax), if it has one.
     pub fn first_str(&self, name: &str) -> Option<&str> {
         self.get(name).and_then(Attribute::first).and_then(Value::as_str)
     }
 
+    /// The first value of `name` as an integer (`integer` or `enum`).
     pub fn first_i32(&self, name: &str) -> Option<i32> {
         self.get(name).and_then(Attribute::first).and_then(Value::as_i32)
     }
 
+    /// The first value of `name` as a boolean.
     pub fn first_bool(&self, name: &str) -> Option<bool> {
         self.get(name).and_then(Attribute::first).and_then(Value::as_bool)
     }
 
+    /// Every string value of `name`; empty when the attribute is absent.
     pub fn strings(&self, name: &str) -> Vec<&str> {
         self.get(name).map(Attribute::strings).unwrap_or_default()
     }
@@ -476,16 +500,20 @@ pub struct Message {
 }
 
 impl Message {
+    /// A message with no groups and no document. `code` is the operation id of a request or the status
+    /// code of a response.
     pub fn new(major: u8, minor: u8, code: u16, request_id: u32) -> Self {
         Self { major, minor, code, request_id, groups: Vec::new(), data: Vec::new() }
     }
 
+    /// Append `group`; groups are written in the order they were added.
     #[must_use]
     pub fn with_group(mut self, group: Group) -> Self {
         self.groups.push(group);
         self
     }
 
+    /// Set the document bytes that follow the end-of-attributes tag, replacing any already set.
     #[must_use]
     pub fn with_data(mut self, data: Vec<u8>) -> Self {
         self.data = data;
@@ -571,6 +599,7 @@ impl Message {
     }
 }
 
+/// Refuse an attribute or member name that is empty, longer than 255 bytes, or not printable ASCII.
 fn check_name(name: &str) -> Result<(), CodecError> {
     if name.is_empty() || name.len() > 255 || !name.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(CodecError::BadName);
@@ -578,12 +607,14 @@ fn check_name(name: &str) -> Result<(), CodecError> {
     Ok(())
 }
 
+/// Append `n` as a two-byte big-endian length; more than 65 535 is a [`CodecError::BadLength`].
 fn put_len(out: &mut Vec<u8>, n: usize) -> Result<(), CodecError> {
     let n = u16::try_from(n).map_err(|_| CodecError::BadLength { tag: 0, length: n })?;
     out.extend_from_slice(&n.to_be_bytes());
     Ok(())
 }
 
+/// Append one encoded value: the tag, the name and the value, each length-prefixed.
 fn put(out: &mut Vec<u8>, tag: u8, name: &str, value: &[u8]) -> Result<(), CodecError> {
     out.push(tag);
     put_len(out, name.len())?;
@@ -593,6 +624,7 @@ fn put(out: &mut Vec<u8>, tag: u8, name: &str, value: &[u8]) -> Result<(), Codec
     Ok(())
 }
 
+/// The tag and text of a string-syntax value without a language; `None` for every other syntax.
 fn string_tag(value: &Value) -> Option<(u8, &str)> {
     Some(match value {
         Value::Text(s) => (tag::TEXT, s),
@@ -607,6 +639,8 @@ fn string_tag(value: &Value) -> Option<(u8, &str)> {
     })
 }
 
+/// Append `value` under `name` (empty for an additional value or a collection member's value).
+/// Collections are written recursively and refused past the default depth cap.
 fn write_value(out: &mut Vec<u8>, name: &str, value: &Value, depth: usize) -> Result<(), CodecError> {
     if !name.is_empty() {
         check_name(name)?;
@@ -684,6 +718,8 @@ fn write_value(out: &mut Vec<u8>, name: &str, value: &Value, depth: usize) -> Re
     }
 }
 
+/// The value bytes of a `textWithLanguage` or `nameWithLanguage`: the language and the text, each
+/// length-prefixed.
 fn with_language(language: &str, text: &str) -> Result<Vec<u8>, CodecError> {
     let mut v = Vec::with_capacity(4 + language.len() + text.len());
     put_len(&mut v, language.len())?;
@@ -702,6 +738,7 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
+    /// The next `n` bytes, advancing past them; [`CodecError::Truncated`] if fewer remain.
     fn take(&mut self, n: usize) -> Result<&[u8], CodecError> {
         let end = self.pos.checked_add(n).ok_or(CodecError::Truncated { at: self.pos })?;
         let slice = self.bytes.get(self.pos..end).ok_or(CodecError::Truncated { at: self.pos })?;
@@ -709,15 +746,18 @@ impl Reader<'_> {
         Ok(slice)
     }
 
+    /// The next byte.
     fn u8(&mut self) -> Result<u8, CodecError> {
         self.take(1)?.first().copied().ok_or(CodecError::Truncated { at: self.pos })
     }
 
+    /// The next two bytes as a big-endian `u16`.
     fn u16(&mut self) -> Result<u16, CodecError> {
         let b = self.take(2)?;
         Ok(u16::from_be_bytes([b.first().copied().unwrap_or(0), b.get(1).copied().unwrap_or(0)]))
     }
 
+    /// The next four bytes as a big-endian `u32`.
     fn u32(&mut self) -> Result<u32, CodecError> {
         let b = self.take(4)?;
         let mut a = [0u8; 4];
@@ -725,6 +765,7 @@ impl Reader<'_> {
         Ok(u32::from_be_bytes(a))
     }
 
+    /// Count one more value against [`Limits::max_values`].
     fn count_value(&mut self) -> Result<(), CodecError> {
         self.values += 1;
         if self.values > self.limits.max_values {
@@ -733,6 +774,7 @@ impl Reader<'_> {
         Ok(())
     }
 
+    /// Count one more attribute against [`Limits::max_attributes`].
     fn count_attribute(&mut self) -> Result<(), CodecError> {
         self.attributes += 1;
         if self.attributes > self.limits.max_attributes {
@@ -761,6 +803,8 @@ impl Reader<'_> {
         Ok((name, value))
     }
 
+    /// Read the value with tag `t` into `group`: a named value starts a new attribute, an unnamed one
+    /// adds to the last attribute (refused if there is none). A `begCollection` reads the whole collection.
     fn attribute_or_value(&mut self, t: u8, group: &mut Group) -> Result<(), CodecError> {
         let (name, raw) = self.name_and_value()?;
         let raw = raw.to_vec();
@@ -836,10 +880,12 @@ impl Reader<'_> {
     }
 }
 
+/// `raw` as a string; invalid UTF-8 is a [`CodecError::BadValue`] naming `what`.
 fn utf8(raw: &[u8], what: &'static str) -> Result<String, CodecError> {
     std::str::from_utf8(raw).map(str::to_owned).map_err(|_| CodecError::BadValue(what))
 }
 
+/// The big-endian `i32` at `at`, with missing bytes read as zero (callers check the length first).
 fn be_i32(raw: &[u8], at: usize) -> i32 {
     let mut a = [0u8; 4];
     for (slot, byte) in a.iter_mut().zip(raw.iter().skip(at)) {
@@ -848,6 +894,7 @@ fn be_i32(raw: &[u8], at: usize) -> i32 {
     i32::from_be_bytes(a)
 }
 
+/// Refuse a value of tag `tag` unless it is exactly `want` bytes long.
 fn fixed(tag: u8, raw: &[u8], want: usize) -> Result<(), CodecError> {
     if raw.len() == want { Ok(()) } else { Err(CodecError::BadLength { tag, length: raw.len() }) }
 }
@@ -861,6 +908,9 @@ fn counted(tag: u8, raw: &[u8], at: usize) -> Result<(&[u8], usize), CodecError>
     Ok((body, at + 2 + n))
 }
 
+/// Decode one value of tag `t`. Fixed-size syntaxes must have their exact length, tokens must be
+/// UTF-8 (text and names are decoded lossily), collection delimiters are refused here, and an unknown
+/// tag is kept as [`Value::Other`].
 fn decode_value(t: u8, raw: &[u8]) -> Result<Value, CodecError> {
     Ok(match t {
         tag::INTEGER | tag::ENUM => {
@@ -949,10 +999,12 @@ fn decode_value(t: u8, raw: &[u8]) -> Result<Value, CodecError> {
 mod tests {
     use super::*;
 
+    /// The default reader limits.
     fn limits() -> Limits {
         Limits::default()
     }
 
+    /// A Get-Printer-Attributes-shaped request that uses every value syntax, for round trips.
     fn sample() -> Message {
         Message::new(1, 1, 0x000B, 7)
             .with_group(
@@ -1055,10 +1107,12 @@ mod tests {
         }
     }
 
+    /// A version 1.1 header with operation 0 and request id 1.
     fn header() -> Vec<u8> {
         vec![1, 1, 0, 0, 0, 0, 0, 1]
     }
 
+    /// One raw value: `tag`, then `name` and `value`, each with a two-byte length.
     fn attr(tag: u8, name: &str, value: &[u8]) -> Vec<u8> {
         let mut v = vec![tag];
         v.extend_from_slice(&(name.len() as u16).to_be_bytes());
@@ -1068,6 +1122,7 @@ mod tests {
         v
     }
 
+    /// [`header`] followed by `parts`, with no end tag added.
     fn message(parts: &[&[u8]]) -> Vec<u8> {
         let mut v = header();
         for p in parts {
@@ -1110,6 +1165,7 @@ mod tests {
         assert!(matches!(Message::decode(&v, &limits()), Err(CodecError::Truncated { .. })));
     }
 
+    /// A message whose job group holds one collection with `depth` more collections nested inside it.
     fn nested(depth: usize) -> Vec<u8> {
         let mut v = vec![0x02];
         v.extend_from_slice(&attr(0x34, "c", &[]));

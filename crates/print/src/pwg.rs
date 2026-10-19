@@ -98,6 +98,7 @@ impl RasterType {
         if self.is_gray() { 1 } else { 3 }
     }
 
+    /// Whether the type has one grey channel (`sgray_8` or `sgray_16`).
     pub const fn is_gray(self) -> bool {
         matches!(self, Self::Sgray8 | Self::Sgray16)
     }
@@ -179,22 +180,27 @@ pub struct PwgOptions {
     pub duplex: Duplex,
 }
 
+/// A [`PwgError::Invalid`] error saying `why`.
 fn invalid<T>(why: impl Into<String>) -> Result<T> {
     Err(PwgError::Invalid(why.into()))
 }
 
+/// Write `v` big-endian at byte `at` of the header; out-of-range offsets are ignored.
 fn set_u32(header: &mut [u8], at: usize, v: u32) {
     if let Some(slot) = header.get_mut(at..at + 4) {
         slot.copy_from_slice(&v.to_be_bytes());
     }
 }
 
+/// Write `s` at byte `at` of the header, cut to 63 bytes so the field stays NUL-terminated.
 fn set_str(header: &mut [u8], at: usize, s: &str) {
     if let Some(slot) = header.get_mut(at..at + s.len().min(63)) {
         slot.copy_from_slice(s.as_bytes().get(..slot.len()).unwrap_or(&[]));
     }
 }
 
+/// The 1796-byte page header: resolution, duplex and tumble, page size in points, pixel layout,
+/// colour space and the stream's page count. Copies are always 1 (they belong in the ticket).
 fn page_header(page: &View<'_>, total: u32, opts: &PwgOptions) -> Vec<u8> {
     let mut h = vec![0u8; HEADER];
     let bpp = page.kind.bytes_per_pixel() as u32;
@@ -234,6 +240,9 @@ pub fn encode_typed(pages: &[TypedPage], opts: &PwgOptions) -> Result<Vec<u8>> {
     encode_views(&pages.iter().map(View::from).collect::<Vec<_>>(), opts)
 }
 
+/// The sync word, then each page's header and rows: repeated rows are counted (up to 255 repeats)
+/// and each row is run-length packed. Fails on no pages, too many pages, a malformed page, or a
+/// stream over the size cap.
 fn encode_views(pages: &[View<'_>], opts: &PwgOptions) -> Result<Vec<u8>> {
     if pages.is_empty() {
         return invalid("there are no pages");
@@ -265,6 +274,8 @@ fn encode_views(pages: &[View<'_>], opts: &PwgOptions) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Refuse a page outside 1 to `MAX_SIDE` pixels per side, over the per-page byte cap, or whose
+/// buffer is not exactly width x height x bytes per pixel.
 fn check_page(p: &View<'_>) -> Result<()> {
     if p.width == 0 || p.height == 0 || p.width > MAX_SIDE || p.height > MAX_SIDE {
         return invalid(format!("page size {}x{} is outside 1 to {MAX_SIDE} pixels", p.width, p.height));
@@ -277,6 +288,8 @@ fn check_page(p: &View<'_>) -> Result<()> {
     }
 }
 
+/// Append `row` in PWG's PackBits form: runs of up to 128 equal pixels as a count and one pixel,
+/// other stretches as a negative count and the literal pixels.
 fn pack_row(row: &[u8], bpp: usize, out: &mut Vec<u8>) {
     let pixels: Vec<&[u8]> = row.chunks_exact(bpp).collect();
     let n = pixels.len();
@@ -391,10 +404,12 @@ pub(crate) fn decode_for_tests(data: &[u8]) -> Result<Vec<RasterPage>> {
 mod tests {
     use super::*;
 
+    /// 300 dpi, simplex.
     fn opts() -> PwgOptions {
         PwgOptions { dpi: (300, 300), duplex: Duplex::Off }
     }
 
+    /// A `w` x `h` page whose pixel at (x, y) is `f(x, y)`, each colour channel offset by 7 from the last.
     fn page(w: u32, h: u32, gray: bool, f: impl Fn(u32, u32) -> u8) -> RasterPage {
         let bpp = if gray { 1 } else { 3 };
         let mut pixels = Vec::new();
@@ -474,6 +489,7 @@ mod tests {
         assert!(decode_for_tests(&bytes).is_err());
     }
 
+    /// A `w` x `h` page of `kind` whose byte `i` of pixel (x, y) is `f(x, y, i)`.
     fn typed(w: u32, h: u32, kind: RasterType, f: impl Fn(u32, u32, usize) -> u8) -> TypedPage {
         let per_sample = kind.bits() as usize / 8;
         let mut data = Vec::new();

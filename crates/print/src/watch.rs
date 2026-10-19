@@ -30,15 +30,20 @@ use crate::wake::WakeReceiver;
 /// Where a watch gets status from and sends cancels to. The [`Registry`] is one (by job id); a
 /// test can supply its own.
 pub trait JobSource {
+    /// Read the current status of `job` once. A `NotFound` error means the job (or, by its subject,
+    /// the printer) is gone.
     fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError>;
+    /// Ask for `job` to be cancelled. Success means the request was taken, not that the job has ended.
     fn cancel_job(&self, job: &JobId) -> Result<(), PrintError>;
 }
 
 impl JobSource for Registry {
+    /// Route to the backend that owns the job id; one status read on the network for network backends.
     fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
         Registry::job_status(self, job)
     }
 
+    /// Route the cancel to the backend that owns the job id.
     fn cancel_job(&self, job: &JobId) -> Result<(), PrintError> {
         Registry::cancel_job(self, job)
     }
@@ -66,6 +71,8 @@ pub struct WaitPolicy {
 }
 
 impl Default for WaitPolicy {
+    /// The backend's interval (else 2 s) growing by half per unchanged poll up to 10 s, two minutes
+    /// in all, five tries per failed poll, and a 30-second safety poll while pushed.
     fn default() -> Self {
         Self {
             interval: None,
@@ -85,6 +92,7 @@ impl WaitPolicy {
         Self { interval: Some(interval), growth_percent: 100, ..Self::default() }
     }
 
+    /// Stop following after `max_wait`, counted from the watch's creation.
     #[must_use]
     pub fn with_max_wait(mut self, max_wait: Duration) -> Self {
         self.max_wait = max_wait;
@@ -138,6 +146,7 @@ impl WatchOutcome {
     }
 }
 
+/// `what`, followed by the status's reasons in parentheses when there are any.
 fn with_reasons(what: &str, status: &JobStatus) -> String {
     if status.reasons.is_empty() { what.to_owned() } else { format!("{what} ({})", status.reasons.join(", ")) }
 }
@@ -185,6 +194,7 @@ pub struct JobWatch {
 }
 
 impl std::fmt::Debug for JobWatch {
+    /// The job id, watch support, poll and failure counts, and how it ended; the clock and policy are left out.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JobWatch")
             .field("job", &self.job.to_string())
@@ -220,6 +230,8 @@ impl JobWatch {
         Some(Self::build(job, submitted.watch, submitted.poll_interval, policy, clock).with_expected(submitted.expected))
     }
 
+    /// A watch of `job` starting now on `clock`. The poll gap is the policy's, else the backend's
+    /// recommendation, else 2 s, and never under 10 ms; the first poll is due at once.
     fn build(job: JobId, support: WatchSupport, recommended: Option<Duration>, policy: WaitPolicy, clock: Arc<dyn Clock>) -> Self {
         let base_interval = policy.interval.or(recommended).unwrap_or(FALLBACK_INTERVAL).max(MIN_INTERVAL);
         let started = clock.now();
@@ -311,6 +323,7 @@ impl JobWatch {
         self
     }
 
+    /// The job being followed.
     pub fn job(&self) -> &JobId {
         &self.job
     }
@@ -331,6 +344,7 @@ impl JobWatch {
         self.healthy()
     }
 
+    /// Whether a wake receiver is attached and reports its push channel healthy.
     fn healthy(&self) -> bool {
         self.wake.as_ref().is_some_and(WakeReceiver::is_healthy)
     }
@@ -361,6 +375,7 @@ impl JobWatch {
         self.done.as_ref()
     }
 
+    /// Whether the watch has ended; [`Self::outcome`] then says how.
     pub fn is_done(&self) -> bool {
         self.done.is_some()
     }
@@ -427,11 +442,14 @@ impl JobWatch {
         self.poll(source, now)
     }
 
+    /// End the watch with `outcome`, keeping it for later queries.
     fn finish(&mut self, outcome: WatchOutcome) -> WatchStep {
         self.done = Some(outcome.clone());
         WatchStep::Done(outcome)
     }
 
+    /// Send the cancel and look at the job at once. A backend that cannot report status ends the watch
+    /// with a `Cancelled` reading; a failed cancel is retried like a failed poll.
     fn send_cancel(&mut self, source: &dyn JobSource, now: Duration) -> WatchStep {
         match source.cancel_job(&self.job) {
             Ok(()) => {
@@ -455,6 +473,9 @@ impl JobWatch {
         }
     }
 
+    /// One status read. A terminal status ends the watch; any other resets the gap if it changed or
+    /// grows it if not. A missing printer ends it as failed, a missing job as forgotten (or as
+    /// cancelled after a cancel was sent), and other errors go to the retry policy.
     fn poll(&mut self, source: &dyn JobSource, now: Duration) -> WatchStep {
         self.polls = self.polls.saturating_add(1);
         self.last_poll_at = Some(now);
@@ -495,6 +516,8 @@ impl JobWatch {
         }
     }
 
+    /// The next gap after an unchanged poll: the current one times `growth_percent` (at least 100),
+    /// capped at `max_interval` (or the base gap if that is larger).
     fn grown(&self) -> Duration {
         let percent = self.policy.growth_percent.max(100);
         let grown = Duration::try_from_secs_f64(self.interval.as_secs_f64() * f64::from(percent) / 100.0).unwrap_or(self.interval);
@@ -568,26 +591,31 @@ mod tests {
     }
 
     impl Script {
+        /// A source that answers polls with `polls` in order, repeating the last one forever.
         fn new(polls: Vec<Result<JobStatus, PrintError>>) -> Self {
             Self { polls: Mutex::new(polls), cancels: Mutex::new(Vec::new()), seen_polls: Mutex::new(0), seen_cancels: Mutex::new(0) }
         }
 
+        /// How many status reads were made.
         fn polls(&self) -> u32 {
             *self.seen_polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
         }
 
+        /// How many cancels were sent.
         fn cancels(&self) -> u32 {
             *self.seen_cancels.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
         }
     }
 
     impl JobSource for Script {
+        /// The next scripted result; the last one repeats, and an empty script reads as unknown.
         fn job_status(&self, _: &JobId) -> Result<JobStatus, PrintError> {
             *self.seen_polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
             let mut polls = self.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if polls.len() > 1 { polls.remove(0) } else { polls.first().cloned().unwrap_or_else(|| Ok(JobStatus::unknown())) }
         }
 
+        /// The next queued cancel result, or success once none are queued.
         fn cancel_job(&self, _: &JobId) -> Result<(), PrintError> {
             *self.seen_cancels.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
             let mut cancels = self.cancels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -595,16 +623,19 @@ mod tests {
         }
     }
 
+    /// A status in `state` with nothing else set.
     fn status(state: JobState) -> JobStatus {
         JobStatus::new(state)
     }
 
+    /// A watch of a test job under `policy`, on a manual clock with fixed jitter.
     fn watch(policy: WaitPolicy) -> (JobWatch, ManualClock) {
         let clock = ManualClock::new();
         let watch = JobWatch::new(JobId::new("t", "1"), policy).with_clock(Arc::new(clock.clone())).with_jitter(Jitter::new(3));
         (watch, clock)
     }
 
+    /// A transient, idempotent-safe "unavailable" error.
     fn busy() -> PrintError {
         PrintError::new(ErrorKind::Unavailable, "down").with_safety(crate::RetrySafety::Idempotent)
     }
@@ -909,31 +940,38 @@ mod wake_tests {
     }
 
     impl Source {
+        /// A source that has not finished and has not been polled.
         fn new() -> Self {
             Self { polls: Mutex::new(0), done: Mutex::new(false) }
         }
 
+        /// How many status reads were made.
         fn polls(&self) -> u32 {
             *self.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
         }
 
+        /// Make every later status read report `Completed`.
         fn finish(&self) {
             *self.done.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
         }
     }
 
     impl JobSource for Source {
+        /// `Processing` until [`Self::finish`] is called, then `Completed`.
         fn job_status(&self, _: &JobId) -> Result<JobStatus, PrintError> {
             *self.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
             let done = *self.done.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             Ok(JobStatus::new(if done { JobState::Completed } else { JobState::Processing }))
         }
 
+        /// Accept every cancel.
         fn cancel_job(&self, _: &JobId) -> Result<(), PrintError> {
             Ok(())
         }
     }
 
+    /// A 2-second watch on a manual clock with a wake channel whose health is `healthy`, and the sender
+    /// side of that channel.
     fn pushed(healthy: bool) -> (JobWatch, ManualClock, WakeSender) {
         let clock = ManualClock::new();
         let (tx, rx) = wake_channel();
@@ -943,6 +981,7 @@ mod wake_tests {
         (watch, clock, tx)
     }
 
+    /// `n` seconds.
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
     }
@@ -1067,9 +1106,11 @@ mod wake_tests {
     fn a_failed_poll_keeps_its_backoff_when_healthy() {
         struct Flaky;
         impl JobSource for Flaky {
+            /// Always a transient, idempotent-safe failure.
             fn job_status(&self, _: &JobId) -> Result<JobStatus, PrintError> {
                 Err(PrintError::new(ErrorKind::Unavailable, "down").with_safety(crate::RetrySafety::Idempotent))
             }
+            /// Accept every cancel.
             fn cancel_job(&self, _: &JobId) -> Result<(), PrintError> {
                 Ok(())
             }

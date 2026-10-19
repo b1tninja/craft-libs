@@ -162,6 +162,8 @@ pub struct PrintError {
 }
 
 impl PrintError {
+    /// An error of `kind` with `message` and nothing else set: no native code, phase, retry safety or
+    /// `Retry-After`, and an unknown not-found subject.
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
         Self { kind, message: message.into(), native: None, subject: NotFoundSubject::Unknown, phase: None, safety: None, retry_after: None }
     }
@@ -218,14 +220,17 @@ impl PrintError {
         Self::new(ErrorKind::NotFound, message).with_subject(NotFoundSubject::Job)
     }
 
+    /// The neutral category, for deciding what to do.
     pub fn kind(&self) -> ErrorKind {
         self.kind
     }
 
+    /// The text to show a person.
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    /// The backend's own code (an IPP status, a Win32 error, ...), when it gave one.
     pub fn native(&self) -> Option<NativeCode> {
         self.native
     }
@@ -260,6 +265,7 @@ impl PrintError {
 }
 
 impl std::fmt::Display for PrintError {
+    /// The message only; kind, code and phase are not shown.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.message)
     }
@@ -270,6 +276,7 @@ impl std::error::Error for PrintError {}
 /// The legacy spooler error keeps its message; it carries no more detail than that, so the kind
 /// is [`ErrorKind::Failed`].
 impl From<Error> for PrintError {
+    /// The spooler error's text, as [`ErrorKind::Failed`].
     fn from(error: Error) -> Self {
         Self::new(ErrorKind::Failed, error.to_string())
     }
@@ -355,6 +362,7 @@ impl DocumentFormat {
         Self::OctetStream,
     ];
 
+    /// The MIME type the format is sent as.
     pub const fn mime(self) -> &'static str {
         match self {
             Self::Pdf => "application/pdf",
@@ -490,10 +498,12 @@ pub struct Document<'a> {
 }
 
 impl<'a> Document<'a> {
+    /// A document of `format` borrowing `bytes`; the bytes are not inspected.
     pub fn new(format: DocumentFormat, bytes: &'a [u8]) -> Self {
         Self { format, bytes }
     }
 
+    /// A PDF document borrowing `bytes`.
     pub fn pdf(bytes: &'a [u8]) -> Self {
         Self::new(DocumentFormat::Pdf, bytes)
     }
@@ -548,14 +558,17 @@ impl UserConfirmed {
 pub struct CancelToken(Arc<AtomicBool>);
 
 impl CancelToken {
+    /// A token that is not cancelled.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set the flag for every clone; it cannot be cleared.
     pub fn cancel(&self) {
         self.0.store(true, Ordering::SeqCst);
     }
 
+    /// Whether [`Self::cancel`] was called on this token or a clone.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }
@@ -675,6 +688,8 @@ pub struct SubmitRequest<'a> {
 }
 
 impl<'a> SubmitRequest<'a> {
+    /// A request to print `document` as `job`, with default options, no consent, a fresh cancel token,
+    /// no progress callback and no tag.
     pub fn new(document: Document<'a>, job: Job) -> Self {
         Self { document, job, options: JobOptions::default(), consent: None, cancel: CancelToken::new(), progress: None, tag: None }
     }
@@ -693,18 +708,22 @@ impl<'a> SubmitRequest<'a> {
         self
     }
 
+    /// Attach the person's confirmation that this print may be sent; the registry refuses a network
+    /// backend's submit without it.
     #[must_use]
     pub fn with_consent(mut self, consent: UserConfirmed) -> Self {
         self.consent = Some(consent);
         self
     }
 
+    /// Use `cancel` (shared with the caller) instead of the request's own token.
     #[must_use]
     pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
         self
     }
 
+    /// Report submit progress to `progress` while the document is sent.
     #[must_use]
     pub fn with_progress(mut self, progress: ProgressCallback<'a>) -> Self {
         self.progress = Some(progress);

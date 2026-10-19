@@ -158,6 +158,8 @@ impl WsdBackend {
         self.add_entry(url, Some(name.to_owned()))
     }
 
+    /// Add the printer at `url` (or, if it is already added, update its name when one is given) and
+    /// return its native id, the canonical URL. No network.
     fn add_entry(&self, url: &str, name: Option<String>) -> Result<String, PrintError> {
         let url = PrinterUrl::parse(url).map_err(PrintError::from)?;
         let id = url.as_url();
@@ -187,10 +189,12 @@ impl WsdBackend {
         self.snapshot().iter().map(|e| e.url.as_url()).collect()
     }
 
+    /// A copy of the added printers.
     fn snapshot(&self) -> Vec<Entry> {
         self.printers.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
+    /// Apply `change` to a copy of the configuration; clones made earlier keep the old one.
     fn configured(mut self, change: impl FnOnce(&mut Config)) -> Self {
         let mut config = (*self.config).clone();
         change(&mut config);
@@ -310,6 +314,7 @@ impl WsdBackend {
             .ok_or_else(|| PrintError::printer_not_found(format!("{native_id} is not a WS-Print printer that was added to this backend")))
     }
 
+    /// A WSD print client for `entry` with this backend's transport and limits.
     fn client(&self, entry: &Entry) -> Client<SharedTransport> {
         Client::new(Arc::clone(&self.transport), entry.url.clone()).with_limits(self.config.limits)
     }
@@ -400,6 +405,7 @@ pub struct WsdJob {
     pub job_number: u32,
 }
 
+/// The ticket orientation for a neutral one; anything unknown is portrait.
 fn ticket_orientation(o: crate::Orientation) -> ticket::Orientation {
     match o {
         crate::Orientation::Landscape => ticket::Orientation::Landscape,
@@ -426,6 +432,7 @@ fn document_format(listed: &str) -> Option<DocumentFormat> {
     FORMATS.iter().copied().find(|f| f.mime().eq_ignore_ascii_case(listed.split(';').next().unwrap_or("").trim()))
 }
 
+/// The neutral state of a WSD `PrinterState` (`Idle`, `Processing`, `Stopped`); `None` otherwise.
 fn printer_state(state: &str) -> Option<PrinterState> {
     match state {
         "Idle" => Some(PrinterState::Idle),
@@ -435,6 +442,8 @@ fn printer_state(state: &str) -> Option<PrinterState> {
     }
 }
 
+/// Neutral printer details from GetPrinterElements: the name (printer's, given, or the URL),
+/// colour, formats, duplex, media sizes, copies, resolutions and state with reasons.
 fn details_of(entry: &Entry, elements: PrinterElements) -> PrinterDetails {
     let id = entry.url.as_url();
     let description = elements.description.unwrap_or_default();
@@ -568,6 +577,7 @@ impl Backend for WsdBackend {
         events.register(&entry.url, id)
     }
 
+    /// The configured poll interval (2 s by default).
     fn recommended_poll_interval(&self) -> Option<Duration> {
         Some(self.config.poll_interval)
     }

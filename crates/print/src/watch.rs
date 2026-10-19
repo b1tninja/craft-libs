@@ -179,6 +179,8 @@ pub struct JobWatch {
     last: Option<JobStatus>,
     expected: ExpectedTotals,
     cancel_sent: bool,
+    /// After a cancel failed with a retryable error: when it may be sent again.
+    cancel_retry_at: Option<Duration>,
     done: Option<WatchOutcome>,
 }
 
@@ -242,6 +244,7 @@ impl JobWatch {
             last: None,
             expected: ExpectedTotals::default(),
             cancel_sent: false,
+            cancel_retry_at: None,
             done: None,
         }
     }
@@ -369,10 +372,10 @@ impl JobWatch {
             return None;
         }
         let now = self.clock.now();
-        if self.cancel.is_cancelled() && !self.cancel_sent {
-            return Some(Duration::ZERO);
-        }
         let deadline = self.started.saturating_add(self.policy.max_wait);
+        if self.cancel.is_cancelled() && !self.cancel_sent {
+            return Some(self.cancel_retry_at.map_or(Duration::ZERO, |at| at.min(deadline).saturating_sub(now)));
+        }
         Some(self.due_at().min(deadline).saturating_sub(now))
     }
 
@@ -384,7 +387,18 @@ impl JobWatch {
         }
         let now = self.clock.now();
         if self.cancel.is_cancelled() && !self.cancel_sent {
-            return self.send_cancel(source, now);
+            // A cancel that failed waits out its backoff like a poll would, rather than being
+            // resent on every tick.
+            match self.cancel_retry_at {
+                Some(at) if now < at => {
+                    let deadline = self.started.saturating_add(self.policy.max_wait);
+                    if now >= deadline {
+                        return self.finish(WatchOutcome::TimedOut { last: self.last.clone() });
+                    }
+                    return WatchStep::Pending { next_in: at.min(deadline).saturating_sub(now) };
+                }
+                _ => return self.send_cancel(source, now),
+            }
         }
         if now >= self.started.saturating_add(self.policy.max_wait) {
             return self.finish(WatchOutcome::TimedOut { last: self.last.clone() });
@@ -433,7 +447,11 @@ impl JobWatch {
                 }
                 WatchStep::Pending { next_in: Duration::ZERO }
             }
-            Err(error) => self.failed(error, now),
+            Err(error) => {
+                let step = self.failed(error, now);
+                self.cancel_retry_at = matches!(step, WatchStep::Retrying { .. }).then_some(self.next_at);
+                step
+            }
         }
     }
 
@@ -792,6 +810,32 @@ mod tests {
         let (watch, _) = watch(WaitPolicy::default());
         let mut watch = watch.with_cancel(cancel);
         assert!(matches!(watch.tick(&script), WatchStep::Done(WatchOutcome::Failed(e)) if e.kind() == ErrorKind::Unsupported));
+    }
+
+    #[test]
+    fn a_cancel_that_fails_is_retried_after_its_backoff_not_on_every_tick() {
+        let script = Script::new(vec![Ok(status(JobState::Processing)), Ok(status(JobState::Cancelled))]);
+        let retry_later = || busy().with_retry_after(Duration::from_secs(5));
+        script.cancels.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend([Err(retry_later()), Err(retry_later())]);
+        let cancel = CancelToken::new();
+        let (watch, clock) = watch(WaitPolicy::every(Duration::from_secs(1)));
+        let mut watch = watch.with_cancel(cancel.clone());
+        assert!(matches!(watch.tick(&script), WatchStep::Update(_)));
+        cancel.cancel();
+        assert!(matches!(watch.tick(&script), WatchStep::Retrying { .. }));
+        assert_eq!(script.cancels(), 1);
+        // Not due yet: no second cancel however often it is ticked, and it says how long to wait.
+        for _ in 0..5 {
+            assert!(matches!(watch.tick(&script), WatchStep::Pending { next_in } if next_in > Duration::ZERO));
+        }
+        assert_eq!(script.cancels(), 1, "the failed cancel waits for its backoff");
+        assert!(watch.next_poll_in().is_some_and(|d| d > Duration::ZERO));
+        clock.advance(Duration::from_secs(5));
+        assert!(matches!(watch.tick(&script), WatchStep::Retrying { .. }));
+        assert_eq!(script.cancels(), 2);
+        let outcome = watch.run(&script, &mut |_| {});
+        assert_eq!(script.cancels(), 3, "sent again once each backoff ran out, then it succeeded");
+        assert!(matches!(outcome, WatchOutcome::Terminal(ref s) if s.state == JobState::Cancelled), "{outcome:?}");
     }
 
     #[test]

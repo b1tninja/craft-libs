@@ -83,6 +83,8 @@ pub struct RetryPolicy {
 }
 
 impl Default for RetryPolicy {
+    /// Four attempts, a first wait of 500 ms doubling up to 8 s, 20 percent jitter, and device hints honoured up to
+    /// 60 s.
     fn default() -> Self {
         Self {
             max_attempts: 4,
@@ -131,22 +133,26 @@ pub struct RetryFacts {
 }
 
 impl RetryFacts {
+    /// Facts for the first failure (`attempts_so_far` is 1) with no device hint and seed 0.
     pub const fn new(retryable: bool, safety: RetrySafety) -> Self {
         Self { retryable, safety, retry_after: None, attempts_so_far: 1, jitter_seed: 0 }
     }
 
+    /// Sets the device's own "come back in" hint.
     #[must_use]
     pub const fn with_retry_after(mut self, retry_after: Duration) -> Self {
         self.retry_after = Some(retry_after);
         self
     }
 
+    /// Sets the number of attempts made so far, the failed one included.
     #[must_use]
     pub const fn with_attempts(mut self, attempts_so_far: u32) -> Self {
         self.attempts_so_far = attempts_so_far;
         self
     }
 
+    /// Sets the seed of the jitter; the same facts and seed always give the same advice.
     #[must_use]
     pub const fn with_jitter_seed(mut self, seed: u64) -> Self {
         self.jitter_seed = seed;
@@ -210,6 +216,7 @@ mod tests {
 
     const MS: fn(u64) -> Duration = Duration::from_millis;
 
+    /// A policy with whole-number millisecond delays and no jitter, so test waits are exact.
     fn policy() -> RetryPolicy {
         RetryPolicy { max_attempts: 5, base: MS(100), max_delay: MS(1000), jitter_percent: 0, max_retry_after: MS(2500) }
     }

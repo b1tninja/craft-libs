@@ -16,22 +16,26 @@ pub struct DocumentRef {
 }
 
 impl DocumentRef {
+    /// A document with only its name; format, pages and bytes are unknown until set. The name is a label, not a path.
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into(), format: None, pages: None, bytes: None }
     }
 
+    /// Sets the format label or media type.
     #[must_use]
     pub fn with_format(mut self, format: impl Into<String>) -> Self {
         self.format = Some(format.into());
         self
     }
 
+    /// Sets the page count.
     #[must_use]
     pub fn with_pages(mut self, pages: u32) -> Self {
         self.pages = Some(pages);
         self
     }
 
+    /// Sets the size in bytes.
     #[must_use]
     pub fn with_bytes(mut self, bytes: u64) -> Self {
         self.bytes = Some(bytes);
@@ -45,32 +49,39 @@ impl DocumentRef {
 pub struct JobDocuments(Vec<DocumentRef>);
 
 impl JobDocuments {
+    /// An empty list.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Appends a document at the end.
     pub fn push(&mut self, document: DocumentRef) {
         self.0.push(document);
     }
 
+    /// Appends a document and returns the list, for chaining.
     #[must_use]
     pub fn with(mut self, document: DocumentRef) -> Self {
         self.0.push(document);
         self
     }
 
+    /// How many documents there are.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// Whether the list has no documents.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
+    /// The first document, if any.
     pub fn first(&self) -> Option<&DocumentRef> {
         self.0.first()
     }
 
+    /// Iterates the documents in order.
     pub fn iter(&self) -> std::slice::Iter<'_, DocumentRef> {
         self.0.iter()
     }
@@ -87,6 +98,7 @@ impl JobDocuments {
 }
 
 impl From<Vec<DocumentRef>> for JobDocuments {
+    /// Wraps an existing list without copying it.
     fn from(documents: Vec<DocumentRef>) -> Self {
         Self(documents)
     }
@@ -96,6 +108,7 @@ impl<'a> IntoIterator for &'a JobDocuments {
     type Item = &'a DocumentRef;
     type IntoIter = std::slice::Iter<'a, DocumentRef>;
 
+    /// Iterates the documents in order, by reference.
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }

@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct Timestamp(u64);
 
 impl Timestamp {
+    /// From milliseconds since the Unix epoch.
     pub const fn from_millis(ms: u64) -> Self {
         Self(ms)
     }
@@ -23,14 +24,17 @@ impl Timestamp {
         Some(Self(u64::try_from(d.as_millis()).unwrap_or(u64::MAX)))
     }
 
+    /// Milliseconds since the Unix epoch.
     pub const fn millis(self) -> u64 {
         self.0
     }
 
+    /// Whole seconds since the epoch; the milliseconds are dropped.
     pub const fn secs(self) -> u64 {
         self.0 / 1000
     }
 
+    /// Adds `d`, rounded down to milliseconds; saturates at the largest timestamp.
     #[must_use]
     pub fn saturating_add(self, d: Duration) -> Self {
         Self(self.0.saturating_add(u64::try_from(d.as_millis()).unwrap_or(u64::MAX)))
@@ -54,22 +58,26 @@ pub struct JobTimes {
 }
 
 impl JobTimes {
+    /// No times set.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets when the job was created.
     #[must_use]
     pub const fn with_created(mut self, t: Timestamp) -> Self {
         self.created = Some(t);
         self
     }
 
+    /// Sets when the job started.
     #[must_use]
     pub const fn with_started(mut self, t: Timestamp) -> Self {
         self.started = Some(t);
         self
     }
 
+    /// Sets when the job finished.
     #[must_use]
     pub const fn with_finished(mut self, t: Timestamp) -> Self {
         self.finished = Some(t);

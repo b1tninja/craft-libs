@@ -28,16 +28,19 @@ pub struct ErrorSummary {
 }
 
 impl ErrorSummary {
+    /// A summary with a message and a kind label; the retry advice and native code are unset.
     pub fn new(message: impl Into<String>, kind_label: impl Into<String>) -> Self {
         Self { message: message.into(), kind_label: kind_label.into(), retry_advice: None, native: None }
     }
 
+    /// Sets the advice for what to do about the failure.
     #[must_use]
     pub fn with_retry_advice(mut self, advice: RetryAdvice) -> Self {
         self.retry_advice = Some(advice);
         self
     }
 
+    /// Sets the native error code behind the failure.
     #[must_use]
     pub fn with_native(mut self, native: NativeCode) -> Self {
         self.native = Some(native);
@@ -76,6 +79,7 @@ pub struct JobView {
 }
 
 impl JobView {
+    /// A view with the required fields; every other field starts empty, zero or `None`.
     pub fn new(id: JobId, kind: JobKind, title: impl Into<String>, state: JobState) -> Self {
         Self {
             id,
@@ -93,48 +97,56 @@ impl JobView {
         }
     }
 
+    /// Appends a device-reported reason. Order is kept.
     #[must_use]
     pub fn with_reason(mut self, reason: impl Into<String>) -> Self {
         self.reasons.push(reason.into());
         self
     }
 
+    /// Sets the progress.
     #[must_use]
     pub fn with_progress(mut self, progress: Progress) -> Self {
         self.progress = Some(progress);
         self
     }
 
+    /// Sets the timestamps.
     #[must_use]
     pub fn with_times(mut self, times: JobTimes) -> Self {
         self.times = times;
         self
     }
 
+    /// Replaces the documents.
     #[must_use]
     pub fn with_documents(mut self, documents: JobDocuments) -> Self {
         self.documents = documents;
         self
     }
 
+    /// Sets the number of attempts made so far.
     #[must_use]
     pub fn with_attempts(mut self, attempts: u32) -> Self {
         self.attempts = attempts;
         self
     }
 
+    /// Sets the last failure.
     #[must_use]
     pub fn with_error(mut self, error: ErrorSummary) -> Self {
         self.last_error = Some(error);
         self
     }
 
+    /// Sets the tag placed in the job.
     #[must_use]
     pub fn with_tag(mut self, tag: Tag) -> Self {
         self.tag = Some(tag);
         self
     }
 
+    /// Sets the display name of the printer or scanner.
     #[must_use]
     pub fn with_device_name(mut self, name: impl Into<String>) -> Self {
         self.device_name = Some(name.into());

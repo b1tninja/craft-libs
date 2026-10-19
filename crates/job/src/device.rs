@@ -31,10 +31,12 @@ impl Tri {
         }
     }
 
+    /// From a plain `bool`: `true` is `On`, `false` is `Off`. Never yields `NotReported`.
     pub const fn from_bool(value: bool) -> Self {
         if value { Self::On } else { Self::Off }
     }
 
+    /// `On` is `Some(true)`, `Off` is `Some(false)`, `NotReported` is `None`; the inverse of [`Self::from_option`].
     pub const fn to_option(self) -> Option<bool> {
         match self {
             Self::On => Some(true),
@@ -43,20 +45,24 @@ impl Tri {
         }
     }
 
+    /// Whether the indicator is reported and on. `NotReported` is not on.
     pub const fn is_on(self) -> bool {
         matches!(self, Self::On)
     }
 
+    /// Whether the indicator is reported and off. `NotReported` is not off.
     pub const fn is_off(self) -> bool {
         matches!(self, Self::Off)
     }
 
+    /// Whether the device said anything: `true` for `On` and `Off`.
     pub const fn is_reported(self) -> bool {
         !matches!(self, Self::NotReported)
     }
 }
 
 impl From<Option<bool>> for Tri {
+    /// Same as [`Tri::from_option`].
     fn from(value: Option<bool>) -> Self {
         Self::from_option(value)
     }
@@ -129,6 +135,7 @@ impl IndicatorKey {
 
 #[cfg(feature = "serde")]
 impl From<IndicatorKey> for String {
+    /// The wire name of the key, as written by `Serialize`.
     fn from(key: IndicatorKey) -> String {
         key.wire_name().to_string()
     }
@@ -136,6 +143,7 @@ impl From<IndicatorKey> for String {
 
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for IndicatorKey {
+    /// Reads the wire name; a name that is not a known key becomes `Other` (see `From<String>`).
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         String::deserialize(deserializer).map(Self::from)
     }
@@ -223,18 +231,21 @@ impl Indicator {
         Self { key, label: key.default_label().to_string(), state, severity: key.default_severity(state), detail: None }
     }
 
+    /// Replaces the label, which starts as [`IndicatorKey::default_label`].
     #[must_use]
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
         self
     }
 
+    /// Replaces the severity, which starts as [`IndicatorKey::default_severity`] for the state.
     #[must_use]
     pub fn with_severity(mut self, severity: Severity) -> Self {
         self.severity = severity;
         self
     }
 
+    /// Adds free text for the indicator, such as a code or a part name.
     #[must_use]
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
@@ -292,28 +303,33 @@ pub struct CapabilitiesSummary {
 }
 
 impl CapabilitiesSummary {
+    /// An empty summary: every capability `NotReported`, no honoured options.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets whether the device has a document feeder.
     #[must_use]
     pub fn with_feeder(mut self, v: Tri) -> Self {
         self.has_feeder = v;
         self
     }
 
+    /// Sets whether the device has a flatbed.
     #[must_use]
     pub fn with_flatbed(mut self, v: Tri) -> Self {
         self.has_flatbed = v;
         self
     }
 
+    /// Sets whether the device can do two-sided scanning or printing.
     #[must_use]
     pub fn with_duplex(mut self, v: Tri) -> Self {
         self.duplex = v;
         self
     }
 
+    /// Adds an option name to the list of options the device applies. Call it once per option.
     #[must_use]
     pub fn with_honoured(mut self, option: impl Into<String>) -> Self {
         self.honoured.push(option.into());
@@ -346,28 +362,33 @@ pub struct PaperPathView {
 }
 
 impl PaperPathView {
+    /// An empty view: nothing reported, no source in use.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets whether paper is loaded in the feeder.
     #[must_use]
     pub fn with_feeder_loaded(mut self, v: Tri) -> Self {
         self.feeder_loaded = v;
         self
     }
 
+    /// Sets how many sheets the feeder holds.
     #[must_use]
     pub fn with_feeder_capacity(mut self, sheets: u32) -> Self {
         self.feeder_capacity = Some(sheets);
         self
     }
 
+    /// Sets whether the glass (flatbed) can be used now.
     #[must_use]
     pub fn with_glass_available(mut self, v: Tri) -> Self {
         self.glass_available = v;
         self
     }
 
+    /// Sets the source the current job reads from.
     #[must_use]
     pub fn with_source_in_use(mut self, source: PaperSource) -> Self {
         self.source_in_use = Some(source);
@@ -389,6 +410,7 @@ pub struct Supply {
 }
 
 impl Supply {
+    /// A supply with no level. `state` says whether it is available, low or empty, or unknown.
     pub fn new(label: impl Into<String>, state: Tri) -> Self {
         Self { label: label.into(), level_percent: None, state }
     }
@@ -424,6 +446,7 @@ pub struct DeviceView {
 }
 
 impl DeviceView {
+    /// A view with `Unknown` connection and state and nothing else reported; the `with_*` methods fill it in.
     pub fn new(id: DeviceId, name: impl Into<String>, kind: JobKind) -> Self {
         Self {
             id,
@@ -438,36 +461,42 @@ impl DeviceView {
         }
     }
 
+    /// Sets how the device is attached.
     #[must_use]
     pub fn with_connection(mut self, connection: DeviceConnection) -> Self {
         self.connection = connection;
         self
     }
 
+    /// Sets the overall state.
     #[must_use]
     pub fn with_state(mut self, state: DeviceState) -> Self {
         self.state = state;
         self
     }
 
+    /// Replaces the capabilities summary.
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: CapabilitiesSummary) -> Self {
         self.capabilities = capabilities;
         self
     }
 
+    /// Appends an indicator. Order is kept.
     #[must_use]
     pub fn with_indicator(mut self, indicator: Indicator) -> Self {
         self.indicators.push(indicator);
         self
     }
 
+    /// Sets the paper path view.
     #[must_use]
     pub fn with_paper(mut self, paper: PaperPathView) -> Self {
         self.paper = Some(paper);
         self
     }
 
+    /// Appends a supply. Order is kept.
     #[must_use]
     pub fn with_supply(mut self, supply: Supply) -> Self {
         self.supplies.push(supply);

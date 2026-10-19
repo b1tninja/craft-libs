@@ -677,6 +677,20 @@ impl Draft {
         }
     }
 
+    /// The fewest copies the printer takes: the bottom of the range it lists (never above
+    /// [`Self::max_copies`]), 1 when it lists none.
+    pub fn min_copies(&self) -> u32 {
+        match self.copies_state() {
+            Capability::Supported(Advertised { choices: Choices::Range { min, .. }, .. }) => min.clamp(1, self.max_copies()),
+            _ => 1,
+        }
+    }
+
+    /// The copies within what the printer takes ([`Self::min_copies`] to [`Self::max_copies`]).
+    fn copies_in_range(&self) -> u32 {
+        self.copies.clamp(self.min_copies(), self.max_copies())
+    }
+
     /// The sheets the job should use, estimated from [`Self::expected_pages`]: halved (rounded up)
     /// for a two-sided job, times the copies. An estimate: the printer's own counting can differ,
     /// and what it reports wins. `None` without a page count (or with zero pages).
@@ -684,7 +698,7 @@ impl Draft {
         let pages = self.expected_pages.filter(|pages| *pages > 0)?;
         let sides = self.sides.filter(|s| self.sides_state().allows(s));
         let per_sheet = if matches!(sides, Some(Sides::LongEdge | Sides::ShortEdge)) { 2 } else { 1 };
-        Some(pages.div_ceil(per_sheet).saturating_mul(self.copies.clamp(1, self.max_copies())))
+        Some(pages.div_ceil(per_sheet).saturating_mul(self.copies_in_range()))
     }
 
     /// Start a query: returns the generation its answer must carry. Clears the confirmation.
@@ -730,7 +744,7 @@ impl Draft {
         self.quality = self.quality.filter(|q| self.quality_state().allows(q));
         self.color = self.color.filter(|c| self.color_state().allows(c));
         self.resolution = self.resolution.filter(|r| self.resolution_state().allows(r));
-        self.copies = self.copies.clamp(1, self.max_copies());
+        self.copies = self.copies_in_range();
     }
 
     /// What stops a print now. `address_ok`: the address passes the host's policy. `sheets`: the
@@ -761,7 +775,7 @@ impl Draft {
     pub fn request(&self, media: Option<&str>) -> Request {
         let media_size = media.and_then(|m| self.media_state().clamp_to_supported(&m.to_owned()));
         Request {
-            copies: (self.copies > 1 && self.copies_state().is_enabled()).then_some(self.copies.min(self.max_copies())),
+            copies: Some(self.copies_in_range()).filter(|n| *n > 1 && self.copies_state().is_enabled()),
             sides: self.sides.filter(|s| self.sides_state().allows(s)),
             orientation: self.orientation.filter(|o| self.orientation_state().allows(o)),
             quality: self.quality.filter(|q| self.quality_state().allows(q)),
@@ -1251,7 +1265,7 @@ impl State {
         let qualities = draft.offered_qualities();
         let colors = draft.offered_colors();
         let resolutions = draft.offered_resolutions();
-        let max = draft.max_copies();
+        let (min, max) = (draft.min_copies(), draft.max_copies());
         // An unsupported option holds no value, so the disabled control shows the printer's default.
         if !copies_state.is_enabled() {
             draft.copies = 1;
@@ -1276,7 +1290,7 @@ impl State {
                 let copies = &mut draft.copies;
                 changed |=
                     option_row(ui, labels.copies, copies_state.is_enabled(), labels.note(&copies_state, labels.unsupported_copies), |ui, label| {
-                        let response = ui.add(egui::DragValue::new(copies).range(1..=max)).labelled_by(label);
+                        let response = ui.add(egui::DragValue::new(copies).range(min..=max)).labelled_by(label);
                         (response.clone(), response.changed())
                     });
                 changed |=

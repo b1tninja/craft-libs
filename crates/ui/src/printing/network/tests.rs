@@ -202,6 +202,24 @@ fn a_request_is_limited_to_what_the_printer_lists() {
 }
 
 #[test]
+fn copies_stay_within_a_range_that_does_not_start_at_one() {
+    let mut p = printer();
+    p.caps.copies = Capability::from_option_range(Some((2, 5)));
+    let mut d = queried_with(p);
+    assert_eq!((d.min_copies(), d.max_copies()), (2, 5));
+    // The default single copy is below what the printer takes: it is brought up, and sent.
+    assert_eq!(d.copies, 2, "the copies are clamped when the printer is queried");
+    d.copies = 1;
+    assert_eq!(d.request(None).copies, Some(2), "a request never asks for fewer copies than the printer takes");
+    d.expected_pages = Some(3);
+    assert_eq!(d.expected_sheets(), Some(3 * 2));
+    // A range starting at one changes nothing: one copy is the default and is not sent.
+    let d = queried("192.0.2.5");
+    assert_eq!(d.min_copies(), 1);
+    assert_eq!(d.request(None).copies, None);
+}
+
+#[test]
 fn choices_the_next_printer_lacks_are_dropped() {
     let mut d = queried("192.0.2.5");
     d.copies = 5;

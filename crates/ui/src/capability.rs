@@ -123,10 +123,12 @@ impl<T> Capability<T> {
         !matches!(self, Capability::Unknown)
     }
 
+    /// The device listed the option ([`Capability::Supported`]).
     pub fn is_supported(&self) -> bool {
         matches!(self, Capability::Supported(_))
     }
 
+    /// The device said it does not take the option ([`Capability::Unsupported`]).
     pub fn is_unsupported(&self) -> bool {
         matches!(self, Capability::Unsupported)
     }

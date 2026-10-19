@@ -18,6 +18,7 @@ pub fn split_id(id: &str) -> Option<(&str, &str)> {
     id.split_once(':')
 }
 
+/// Whether `name` is non-empty and made only of lowercase ASCII letters, digits, `-` and `_`.
 fn valid_backend_name(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
@@ -43,16 +44,19 @@ pub struct ParseIdError {
 }
 
 impl ParseIdError {
+    /// Wraps `kind`; only this module builds the error.
     const fn new(kind: ParseIdErrorKind) -> Self {
         Self { kind }
     }
 
+    /// Which part of the text was wrong.
     pub const fn kind(&self) -> ParseIdErrorKind {
         self.kind
     }
 }
 
 impl fmt::Display for ParseIdError {
+    /// Writes a one-sentence description of the problem; the text is stable and does not include the input.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self.kind {
             ParseIdErrorKind::MissingSeparator => "an id looks like <backend>:<native id>, and this has no colon",
@@ -72,6 +76,8 @@ impl std::error::Error for ParseIdError {}
 pub struct BackendName(String);
 
 impl BackendName {
+    /// Validates `name`: an empty name is [`ParseIdErrorKind::EmptyBackend`], a bad character is
+    /// [`ParseIdErrorKind::InvalidBackend`].
     pub fn new(name: impl Into<String>) -> Result<Self, ParseIdError> {
         let name = name.into();
         if name.is_empty() {
@@ -83,6 +89,7 @@ impl BackendName {
         }
     }
 
+    /// The name as text.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -90,6 +97,7 @@ impl BackendName {
 
 #[cfg(feature = "serde")]
 impl From<BackendName> for String {
+    /// The name as a `String`, for serialisation.
     fn from(value: BackendName) -> String {
         value.0
     }
@@ -99,12 +107,14 @@ impl From<BackendName> for String {
 impl TryFrom<String> for BackendName {
     type Error = ParseIdError;
 
+    /// Parses like [`BackendName::new`].
     fn try_from(text: String) -> Result<Self, Self::Error> {
         Self::new(text)
     }
 }
 
 impl fmt::Display for BackendName {
+    /// Writes the name unchanged.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -113,11 +123,13 @@ impl fmt::Display for BackendName {
 impl FromStr for BackendName {
     type Err = ParseIdError;
 
+    /// Parses like [`BackendName::new`].
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::new(text)
     }
 }
 
+/// The checks shared by parsing and `try_new`, in order: backend present, backend valid, native present.
 fn check_parts(backend: &str, native: &str) -> Result<(), ParseIdError> {
     if backend.is_empty() {
         return Err(ParseIdError::new(ParseIdErrorKind::EmptyBackend));

@@ -19,6 +19,7 @@ pub struct NativeCode {
 }
 
 impl NativeCode {
+    /// A code in `domain`, with its symbolic `name` when known. For an HRESULT use [`Self::hresult`].
     pub const fn new(domain: &'static str, code: i64, name: Option<&'static str>) -> Self {
         Self { domain, code, name }
     }
@@ -36,6 +37,7 @@ impl NativeCode {
 
 /// `hresult 0x80004005 (E_FAIL)`, `http 503`, `sane 5 (SANE_STATUS_NO_DOCS)`.
 impl fmt::Display for NativeCode {
+    /// Writes `domain code (name)`; an HRESULT code is shown as eight hex digits.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_hresult() {
             write!(f, "{} {:#010x}", self.domain, self.code as u32)?;

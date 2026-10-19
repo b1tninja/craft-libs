@@ -7,6 +7,7 @@ use craft_job::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+/// Serialises `value`, reads it back, checks the two are equal and returns the JSON text.
 fn round<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: &T) -> String {
     let text = serde_json::to_string(value).expect("serialise");
     let back: T = serde_json::from_str(&text).expect("deserialise");
@@ -100,6 +101,7 @@ fn times_progress_documents_and_fingerprint() {
     assert_eq!(bare.window, Fingerprint::DEFAULT_WINDOW);
 }
 
+/// A job view with every field set, used to check the full wire shape.
 fn sample_view() -> JobView {
     JobView::new(JobId::new("wia", "local-3"), JobKind::Scan, "Invoices", JobState::NeedsAttention)
         .with_reason("jam")

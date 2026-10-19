@@ -41,6 +41,7 @@ pub enum Sides {
 impl Sides {
     pub const ALL: [Sides; 3] = [Sides::OneSided, Sides::LongEdge, Sides::ShortEdge];
 
+    /// The WS-Print keyword for this value (`OneSided`, `TwoSidedLongEdge`, ...).
     pub const fn token(self) -> &'static str {
         match self {
             Self::OneSided => "OneSided",
@@ -61,6 +62,7 @@ pub enum Orientation {
 impl Orientation {
     pub const ALL: [Orientation; 4] = [Self::Portrait, Self::Landscape, Self::ReversePortrait, Self::ReverseLandscape];
 
+    /// The WS-Print keyword for this value (`Portrait`, `Landscape`, ...).
     pub const fn token(self) -> &'static str {
         match self {
             Self::Portrait => "Portrait",
@@ -90,6 +92,7 @@ impl Quality {
         Self::ALL.into_iter().find(|q| q.token().eq_ignore_ascii_case(token.trim()))
     }
 
+    /// The WS-Print keyword for this value (`Draft`, `Normal`, ...).
     pub const fn token(self) -> &'static str {
         match self {
             Self::Draft => "Draft",
@@ -110,6 +113,7 @@ pub enum ColorMode {
 impl ColorMode {
     pub const ALL: [ColorMode; 2] = [Self::Color, Self::Monochrome];
 
+    /// The WS-Print keyword for this value (`Color` or `Monochrome`).
     pub const fn token(self) -> &'static str {
         match self {
             Self::Color => "Color",
@@ -126,10 +130,12 @@ pub struct Resolution {
 }
 
 impl Resolution {
+    /// A resolution of `x_dpi` across and `y_dpi` along the feed, in dots per inch.
     pub const fn new(x_dpi: u32, y_dpi: u32) -> Self {
         Resolution { x_dpi, y_dpi }
     }
 
+    /// The same resolution in both directions.
     pub const fn square(dpi: u32) -> Self {
         Resolution { x_dpi: dpi, y_dpi: dpi }
     }
@@ -292,6 +298,7 @@ pub struct Failure {
 }
 
 impl Failure {
+    /// A failure of `kind` with the detail shown under its heading; not marked as possibly delivered.
     pub fn new(kind: FailureKind, detail: impl Into<String>) -> Self {
         Failure { kind, detail: detail.into(), outcome_unknown: false }
     }
@@ -334,6 +341,7 @@ impl Outcome {
         }
     }
 
+    /// The job printed, with or without warnings.
     pub fn is_success(self) -> bool {
         matches!(self, Outcome::Completed | Outcome::CompletedWithWarnings)
     }
@@ -535,6 +543,7 @@ impl Draft {
         Draft { url: url.to_owned(), ..Default::default() }
     }
 
+    /// The typed address, trimmed and with `http://` added when it has no scheme (see [`normalize_url`]).
     pub fn normalized_url(&self) -> String {
         normalize_url(&self.url)
     }
@@ -544,6 +553,7 @@ impl Draft {
         matches!(self.job, JobView::Running { .. } | JobView::Accepted { .. })
     }
 
+    /// A query of the printer is running.
     pub fn querying(&self) -> bool {
         self.query == Query::Running
     }
@@ -598,10 +608,12 @@ impl Draft {
         typed(&self.caps().sides, &Sides::ALL, Sides::token, |v| v.iter().any(|s| *s != Sides::OneSided))
     }
 
+    /// What the queried printer says about orientation.
     pub fn orientation_state(&self) -> Capability<Orientation> {
         typed(&self.caps().orientations, &Orientation::ALL, Orientation::token, |_| true)
     }
 
+    /// What the queried printer says about print quality.
     pub fn quality_state(&self) -> Capability<Quality> {
         typed(&self.caps().qualities, &Quality::ALL, Quality::token, |_| true)
     }
@@ -611,6 +623,7 @@ impl Draft {
         typed(&self.caps().color_modes, &ColorMode::ALL, ColorMode::token, |v| v.contains(&ColorMode::Color))
     }
 
+    /// The resolutions the queried printer lists, if it lists any.
     pub fn resolution_state(&self) -> Capability<Resolution> {
         self.caps().resolutions.clone()
     }
@@ -623,6 +636,7 @@ impl Draft {
         }
     }
 
+    /// The media size names the queried printer lists, if it lists any.
     pub fn media_state(&self) -> Capability<String> {
         self.caps().media_sizes.clone()
     }
@@ -633,18 +647,22 @@ impl Draft {
         offered(&self.sides_state(), &Sides::ALL)
     }
 
+    /// The orientations to offer in the menu (see [`Self::offered_sides`]).
     pub fn offered_orientations(&self) -> Vec<Orientation> {
         offered(&self.orientation_state(), &Orientation::ALL)
     }
 
+    /// The qualities to offer in the menu (see [`Self::offered_sides`]).
     pub fn offered_qualities(&self) -> Vec<Quality> {
         offered(&self.quality_state(), &Quality::ALL)
     }
 
+    /// The color modes to offer in the menu (see [`Self::offered_sides`]).
     pub fn offered_colors(&self) -> Vec<ColorMode> {
         offered(&self.color_state(), &ColorMode::ALL)
     }
 
+    /// The resolutions to offer: the listed ones, else the common ones as hints.
     pub fn offered_resolutions(&self) -> Vec<Resolution> {
         offered(&self.resolution_state(), &COMMON_RESOLUTIONS)
     }
@@ -792,6 +810,7 @@ impl Draft {
         }
     }
 
+    /// Set the job's view: how it ended, or [`JobView::Idle`] to clear it.
     pub fn job_finished(&mut self, view: JobView) {
         self.job = view;
     }
@@ -932,6 +951,7 @@ pub struct Labels<'a> {
 }
 
 impl Labels<'_> {
+    /// The application's heading for a failure of `kind`.
     pub fn failure_heading(&self, kind: FailureKind) -> &str {
         match kind {
             FailureKind::Policy => self.failure_policy,
@@ -1051,6 +1071,7 @@ pub struct State {
 }
 
 impl State {
+    /// The panel state for `draft`, with nothing else started.
     pub fn new(draft: Draft) -> Self {
         State { draft, ..Default::default() }
     }

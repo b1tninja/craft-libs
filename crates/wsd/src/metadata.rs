@@ -73,6 +73,7 @@ pub struct ServiceEntry {
 }
 
 impl ServiceEntry {
+    /// Whether the entry lists the type `q` (exact namespace and local name).
     pub fn has_type(&self, q: &QName) -> bool {
         self.types.contains(q)
     }
@@ -136,6 +137,7 @@ impl DeviceMetadata {
         Ok(out)
     }
 
+    /// Take a `Relationship`'s `Host` (the first one seen wins) and up to `MAX_SERVICES` `Hosted` entries.
     fn read_relationship(&mut self, rel: Node<'_, '_>) -> Result<()> {
         if let Some(h) = xml::child(rel, ns::WSDP, "Host")
             && self.host.is_none()
@@ -197,10 +199,12 @@ impl DeviceMetadata {
     }
 }
 
+/// The text of the child `{ns_uri}local`, cut to `MAX_FIELD` characters.
 fn field(n: Node<'_, '_>, ns_uri: &str, local: &str) -> Option<String> {
     xml::child_text(n, ns_uri, local).map(|t| t.chars().take(MAX_FIELD).collect())
 }
 
+/// Read `wsdp:ThisModel`; missing names are empty and at most eight device categories are kept.
 fn read_model(n: Node<'_, '_>) -> ThisModel {
     ThisModel {
         manufacturer: field(n, ns::WSDP, "Manufacturer").unwrap_or_default(),
@@ -215,6 +219,7 @@ fn read_model(n: Node<'_, '_>) -> ThisModel {
     }
 }
 
+/// Read `wsdp:ThisDevice`; a missing friendly name is empty.
 fn read_device(n: Node<'_, '_>) -> ThisDevice {
     ThisDevice {
         friendly_name: field(n, ns::WSDP, "FriendlyName").unwrap_or_default(),
@@ -296,11 +301,13 @@ mod tests {
         )
     }
 
+    /// Parse `text` and read its root element as device metadata.
     fn read(text: &str) -> Result<DeviceMetadata> {
         let doc = xml::parse(text)?;
         DeviceMetadata::from_element(doc.root_element())
     }
 
+    /// The scan service's namespace.
     fn scan_ns() -> &'static str {
         ServiceKind::Scan.descriptor().namespace
     }

@@ -13,6 +13,7 @@ use craft_wsd::eventing::{self, CollectingSink, EndStatus, EventingFault, Expiry
 use craft_wsd::testing::FakeDevice;
 use craft_wsd::{EndpointRef, Error, QName, ReferenceParameter, ServiceKind, SoapClient, ns, xml};
 
+/// A discovery target of `kind` that advertises `device`'s URL and one public address the policy drops.
 fn target_for(kind: ServiceKind, device: &FakeDevice) -> Target {
     Target {
         address: "urn:uuid:00000000-0000-4000-8000-000000000001".into(),

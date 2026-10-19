@@ -10,14 +10,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct CancelToken(Arc<AtomicBool>);
 
 impl CancelToken {
+    /// A token that is not cancelled yet.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set the flag for every clone. Cannot be undone; work already on the wire is not interrupted.
     pub fn cancel(&self) {
         self.0.store(true, Ordering::SeqCst);
     }
 
+    /// Whether [`Self::cancel`] has been called on this token or any clone of it.
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::SeqCst)
     }

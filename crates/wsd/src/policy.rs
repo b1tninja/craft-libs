@@ -25,6 +25,7 @@ pub struct DeviceUrl {
     path: String,
 }
 
+/// A [`Error::Policy`] refusal with the reason `why`.
 fn refuse<T>(why: impl Into<String>) -> Result<T> {
     Err(Error::Policy(why.into()))
 }
@@ -37,11 +38,14 @@ pub fn address_allowed(ip: IpAddr) -> bool {
     }
 }
 
+/// Loopback, link-local (169.254/16) or private (RFC 1918) IPv4, never unspecified, multicast or broadcast.
 fn v4_allowed(a: Ipv4Addr) -> bool {
     // is_private covers 10/8, 172.16/12 and 192.168/16.
     !(a.is_unspecified() || a.is_multicast() || a.is_broadcast()) && (a.is_loopback() || a.is_link_local() || a.is_private())
 }
 
+/// Loopback, link-local (`fe80::/10`) or unique-local (`fc00::/7`) IPv6; IPv4-mapped addresses
+/// are refused.
 fn v6_allowed(a: Ipv6Addr) -> bool {
     if a.is_unspecified() || a.is_multicast() || a.to_ipv4_mapped().is_some() {
         return false;
@@ -97,14 +101,17 @@ impl DeviceUrl {
         Ok(Self { host, port, path: path.to_owned() })
     }
 
+    /// The numeric host address.
     pub fn host(&self) -> IpAddr {
         self.host
     }
 
+    /// The port; 80 when the URL gave none.
     pub fn port(&self) -> u16 {
         self.port
     }
 
+    /// The path, starting with `/`; `/` when the URL had none.
     pub fn path(&self) -> &str {
         &self.path
     }
@@ -118,11 +125,13 @@ impl DeviceUrl {
     }
 }
 
+/// `text` without `prefix`, compared ASCII case-insensitively.
 fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
     let head = text.get(..prefix.len())?;
     if head.eq_ignore_ascii_case(prefix) { text.get(prefix.len()..) } else { None }
 }
 
+/// Split `host[:port]` or `[v6][:port]` into the host text and the port text, unparsed.
 fn split_authority<'a>(authority: &'a str, noun: &str) -> Result<(&'a str, Option<&'a str>)> {
     if let Some(inner) = authority.strip_prefix('[') {
         let Some(close) = inner.find(']') else { return refuse(format!("unterminated [ in the {noun} URL")) };
@@ -163,9 +172,11 @@ impl Default for NetworkLimits {
 mod tests {
     use super::*;
 
+    /// Parse `s`, panicking with the reason if it is refused.
     fn ok(s: &str) -> DeviceUrl {
         DeviceUrl::parse(s).unwrap_or_else(|e| panic!("{s}: {e}"))
     }
+    /// Assert that `s` is refused by the policy.
     fn no(s: &str) {
         assert!(matches!(DeviceUrl::parse(s), Err(Error::Policy(_))), "{s} should be refused");
     }

@@ -104,6 +104,7 @@ impl Fault {
 }
 
 impl fmt::Display for Fault {
+    /// `the device refused: {sub-code}`, then the reason in parentheses and the detail in brackets when present.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "the device refused: {}", self.code.local)?;
         if !self.reason.is_empty() {
@@ -163,6 +164,8 @@ mod tests {
 
     const SVC: &str = "urn:example:service";
 
+    /// A whole envelope with a sender fault whose sub-code is `sub`; `extra_ns` adds namespace
+    /// declarations to the envelope.
     fn fault_xml(sub: &str, extra_ns: &str) -> String {
         format!(
             "<s:Envelope xmlns:s=\"{}\" xmlns:svc=\"{SVC}\" xmlns:wsa=\"{}\"{extra_ns}><s:Body><s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>{sub}</s:Value></s:Subcode></s:Code><s:Reason><s:Text xml:lang=\"en\">bad</s:Text></s:Reason><s:Detail><svc:JobId>7</svc:JobId></s:Detail></s:Fault></s:Body></s:Envelope>",
@@ -171,6 +174,7 @@ mod tests {
         )
     }
 
+    /// Parse the first `soap:Fault` in `xml_text`.
     fn parse_one(xml_text: &str) -> Fault {
         let doc = xml::parse(xml_text).unwrap();
         let f = doc.descendants().find(|n| xml::is(*n, ns::SOAP, "Fault")).unwrap();

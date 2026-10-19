@@ -24,10 +24,12 @@ pub struct ReferenceParameter {
 }
 
 impl ReferenceParameter {
+    /// A parameter element `{ns}local` with `text` as its content; nothing is validated until it is written.
     pub fn new(ns: impl Into<String>, local: impl Into<String>, text: impl Into<String>) -> Self {
         Self { ns: ns.into(), local: local.into(), text: text.into() }
     }
 
+    /// Whether the parameter can be serialised: a non-empty namespace and an NCName local name.
     fn writable(&self) -> bool {
         xml::is_ncname(&self.local) && !self.ns.is_empty()
     }
@@ -41,10 +43,12 @@ pub struct EndpointRef {
 }
 
 impl EndpointRef {
+    /// An endpoint reference to `address` with no reference parameters.
     pub fn new(address: impl Into<String>) -> Self {
         Self { address: address.into(), reference_parameters: Vec::new() }
     }
 
+    /// Append a reference parameter, to be echoed as a header block by [`Self::header_xml`].
     pub fn with_parameter(mut self, p: ReferenceParameter) -> Self {
         self.reference_parameters.push(p);
         self
@@ -117,6 +121,7 @@ mod tests {
 
     const WSE: &str = ns::WSE;
 
+    /// Parse `inner` as the children of a wrapper element that declares `wsa` and `wse`.
     fn parse(inner: &str) -> Result<EndpointRef> {
         let text = format!("<e xmlns:wsa=\"{}\" xmlns:wse=\"{WSE}\">{inner}</e>", ns::WSA);
         let doc = xml::parse(&text).unwrap();

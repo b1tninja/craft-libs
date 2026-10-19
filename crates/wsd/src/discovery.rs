@@ -76,6 +76,7 @@ pub struct AppSequence {
 }
 
 impl AppSequence {
+    /// A sequence with no `SequenceId`.
     pub fn new(instance_id: u64, message_number: u64) -> Self {
         Self { instance_id, sequence_id: None, message_number }
     }
@@ -103,6 +104,7 @@ pub struct Target {
 }
 
 impl Target {
+    /// Whether the target announces the type `q` (exact namespace and local name).
     pub fn has_type(&self, q: &QName) -> bool {
         self.types.contains(q)
     }
@@ -140,6 +142,8 @@ pub enum MatchBy {
 }
 
 impl MatchBy {
+    /// The rule a `MatchBy` attribute names; an absent attribute means [`MatchBy::Rfc3986`], and an
+    /// unknown URI is kept as [`MatchBy::Unknown`].
     pub fn from_uri(uri: Option<&str>) -> Self {
         match uri.map(str::trim) {
             None | Some(MATCH_BY_RFC3986) => Self::Rfc3986,
@@ -151,6 +155,7 @@ impl MatchBy {
         }
     }
 
+    /// The rule's URI as written in a `MatchBy` attribute.
     pub fn uri(&self) -> &str {
         match self {
             Self::Rfc3986 => MATCH_BY_RFC3986,
@@ -163,6 +168,7 @@ impl MatchBy {
     }
 }
 
+/// A scope with its scheme and host lowercased and trailing slashes removed, for RFC 3986 prefix matching.
 fn normalise_scope(s: &str) -> String {
     let s = s.trim();
     let (head, path) = match s.find("://") {
@@ -252,14 +258,17 @@ pub struct Message {
     pub body: Body,
 }
 
+/// Whether `n` is the discovery element `local`, in the WS-Discovery 2005 or 1.1 namespace.
 fn is_wsd(n: Node<'_, '_>, local: &str) -> bool {
     xml::is(n, ns::WSD, local) || xml::is(n, ns::WSD_11, local)
 }
 
+/// The child elements of `n` named `local` in either discovery namespace.
 fn wsd_children<'a, 'i>(n: Node<'a, 'i>, local: &'a str) -> impl Iterator<Item = Node<'a, 'i>> {
     n.children().filter(move |c| is_wsd(*c, local))
 }
 
+/// The single child `local` of `n`, if any; a repeated element is a protocol error.
 fn only<'a, 'i>(n: Node<'a, 'i>, local: &'a str) -> Result<Option<Node<'a, 'i>>> {
     let mut it = wsd_children(n, local);
     let first = it.next();
@@ -282,6 +291,8 @@ fn tokens(n: Node<'_, '_>, max: usize) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Read the target a `Hello`, `Bye`, `ProbeMatch` or `ResolveMatch` describes: the EPR address is
+/// required, the lists are bounded, and a non-numeric `MetadataVersion` is refused.
 fn read_target(n: Node<'_, '_>) -> Result<Target> {
     let epr = n.children().find(|c| xml::is(*c, ns::WSA, "EndpointReference") || xml::is(*c, ns::WSA_FINAL, "EndpointReference"));
     let address = EndpointRef::parse(epr.ok_or_else(|| Error::Protocol("a target has no EndpointReference".into()))?)?.address;
@@ -304,10 +315,13 @@ fn read_target(n: Node<'_, '_>) -> Result<Target> {
     Ok(Target { address, types, scopes, xaddrs, metadata_version })
 }
 
+/// A plain decimal of at most 18 digits (no sign, no spaces), so it always fits a `u64`.
 fn unsigned(s: &str) -> Option<u64> {
     if s.is_empty() || s.len() > 18 || !s.bytes().all(|b| b.is_ascii_digit()) { None } else { s.parse().ok() }
 }
 
+/// The header's `AppSequence`, if present. A repeated element or a non-numeric `InstanceId` or
+/// `MessageNumber` is a protocol error.
 fn read_sequence(header: Node<'_, '_>) -> Result<Option<AppSequence>> {
     let mut it = header.children().filter(|c| is_wsd(*c, "AppSequence"));
     let Some(a) = it.next() else { return Ok(None) };
@@ -397,6 +411,8 @@ pub fn parse(bytes: &[u8]) -> Result<Message> {
 
 // ---- building ----
 
+/// A complete discovery envelope addressed to `to`, with `body` as the already-serialised body
+/// content. `message_id` and `relates_to` are bare UUIDs; the `urn:uuid:` prefix is added here.
 fn envelope(to: &str, action: &str, message_id: &str, relates_to: Option<&str>, seq: Option<&AppSequence>, body: &str) -> String {
     let relates = relates_to.map(|r| format!("<wsa:RelatesTo>urn:uuid:{}</wsa:RelatesTo>", xml::esc(r))).unwrap_or_default();
     let seq = seq
@@ -436,6 +452,8 @@ fn types_xml(types: &[QName]) -> String {
     if names.is_empty() { String::new() } else { format!("<wsd:Types{decls}>{}</wsd:Types>", names.join(" ")) }
 }
 
+/// The children of a `Hello`, `Bye` or match element describing `t`; `MetadataVersion` is written
+/// only when `with_version` is set and the target has one.
 fn target_xml(t: &Target, with_version: bool) -> String {
     let scopes = if t.scopes.is_empty() { String::new() } else { format!("<wsd:Scopes>{}</wsd:Scopes>", xml::esc(&t.scopes.join(" "))) };
     let version = match (with_version, t.metadata_version) {
@@ -567,6 +585,7 @@ impl Default for DiscoverOptions {
 }
 
 impl DiscoverOptions {
+    /// The default options, probing for devices of this service kind.
     pub fn for_service(kind: ServiceKind) -> Self {
         Self { query: ProbeQuery::for_service(kind), ..Self::default() }
     }
@@ -625,6 +644,9 @@ struct Collector<'a> {
 }
 
 impl Collector<'_> {
+    /// Record a found device, or update the one with the same address. Older sequences and lower
+    /// metadata versions are counted as stale, as is anything replaying a remembered `Bye`; past
+    /// `max_devices`, new devices are counted as over the limit.
     fn add(&mut self, target: Target, seq: Option<AppSequence>, from: SocketAddr) {
         let gone = self.byes.iter().find(|(a, _)| a.eq_ignore_ascii_case(&target.address)).map(|(_, s)| s);
         if matches!((&seq, gone), (Some(n), Some(g)) if !n.supersedes(g)) {
@@ -662,6 +684,8 @@ impl Collector<'_> {
         self.report.devices.push(DiscoveredDevice { target, urls, dropped_xaddrs, from, app_sequence: seq });
     }
 
+    /// Sort one datagram: matches correlated with `expecting` (and announcements, if accepted) are
+    /// added or removed; everything else only increments a counter in [`Ignored`].
     fn handle(&mut self, d: Datagram, expecting: &Expecting<'_>) {
         if !address_allowed(d.from.ip()) {
             self.report.ignored.disallowed_source += 1;
@@ -723,6 +747,8 @@ impl Collector<'_> {
         }
     }
 
+    /// Remember the sequence of a `Bye` for `address` so an older message cannot revive the device;
+    /// at most `MAX_BYES` addresses are kept.
     fn remember_bye(&mut self, address: &str, seq: AppSequence) {
         if let Some(known) = self.byes.iter_mut().find(|(a, _)| a.eq_ignore_ascii_case(address)) {
             known.1 = seq;
@@ -732,10 +758,13 @@ impl Collector<'_> {
     }
 }
 
+/// [`Error::Cancelled`] once the options' cancel token is set.
 fn check_cancel(opts: &DiscoverOptions) -> Result<()> {
     if opts.cancel.as_ref().is_some_and(CancelToken::is_cancelled) { Err(Error::Cancelled) } else { Ok(()) }
 }
 
+/// Receive and handle datagrams until `until`, the socket reports none, or the run is cancelled.
+/// Datagrams past `MAX_DATAGRAMS_PER_SLICE` are counted as over the limit, not parsed.
 fn listen<S: DiscoverySocket + ?Sized>(socket: &S, until: Instant, c: &mut Collector<'_>, expecting: &Expecting<'_>) -> Result<()> {
     let mut seen = 0usize;
     loop {
@@ -831,10 +860,12 @@ pub mod fake {
     }
 
     impl FakeResponder {
+        /// A responder announcing `target` from `from`, instance 1, counting messages from 1.
         pub fn new(target: Target, from: SocketAddr) -> Self {
             Self { target, from, instance_id: 1, message_number: Mutex::new(0) }
         }
 
+        /// The `AppSequence` for this device's next message; numbers increase by one per call.
         fn next_seq(&self) -> AppSequence {
             let mut n = self.message_number.lock().unwrap();
             *n += 1;
@@ -868,6 +899,7 @@ pub mod fake {
     }
 
     impl FakeSocket {
+        /// An empty socket: nothing queued, nothing sent, no responders.
         pub fn new() -> Self {
             Self::default()
         }
@@ -894,6 +926,7 @@ pub mod fake {
     }
 
     impl DiscoverySocket for FakeSocket {
+        /// Record the datagram, then queue whatever every responder answers to it. Never fails.
         fn send(&self, to: &Destination, payload: &[u8]) -> Result<()> {
             self.sent.lock().unwrap().push((to.clone(), payload.to_vec()));
             let replies: Vec<Datagram> = self.responders.lock().unwrap().iter().flat_map(|r| r(to, payload)).collect();
@@ -901,6 +934,7 @@ pub mod fake {
             Ok(())
         }
 
+        /// The next queued datagram, or `None` at once when the queue is empty; the deadline is ignored.
         fn recv(&self, _deadline: Instant) -> Result<Option<Datagram>> {
             Ok(self.inbox.lock().unwrap().pop_front())
         }
@@ -927,10 +961,12 @@ mod tests {
         assert!(matches!(Destination::unicast(public), Err(Error::Policy(_))));
     }
 
+    /// The device-level type print devices announce.
     fn print_dev() -> QName {
         ServiceKind::Print.descriptor().device_type_qname()
     }
 
+    /// A target `urn:uuid:{uuid}` of type `ty` with one scope, metadata version 7 and these `xaddrs`.
     fn target(uuid: &str, ty: QName, xaddrs: &[&str]) -> Target {
         Target {
             address: format!("urn:uuid:{uuid}"),
@@ -941,6 +977,7 @@ mod tests {
         }
     }
 
+    /// The discovery address `10.0.0.{last}:3702`.
     fn peer(last: u8) -> SocketAddr {
         SocketAddr::from(([10, 0, 0, last], 3702))
     }
@@ -1109,6 +1146,7 @@ mod tests {
         assert!(Destination::unicast("[ff02::c]:3702".parse().unwrap()).is_err(), "multicast is never a unicast destination");
     }
 
+    /// A [`FakeSocket`] that has every responder in `devices` attached.
     fn socket_with(devices: Vec<FakeResponder>) -> FakeSocket {
         let s = FakeSocket::new();
         for d in devices {
@@ -1326,6 +1364,7 @@ mod tests {
     }
 
     impl DiscoverySocket for FailingUnicast {
+        /// Fail unicast sends to `fail_to` as unreachable; pass everything else to the inner socket.
         fn send(&self, to: &Destination, payload: &[u8]) -> Result<()> {
             if *to == Destination::Unicast(self.fail_to) {
                 return Err(Error::transport(crate::error::TransportKind::Unreachable, "no route"));

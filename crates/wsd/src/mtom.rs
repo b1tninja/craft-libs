@@ -48,6 +48,7 @@ pub fn package(envelope: &str, cid: &str, document: &[u8]) -> Package {
     Package { content_type, body }
 }
 
+/// A random multipart boundary that does not occur in `document`.
 fn unique_boundary(document: &[u8]) -> String {
     for _ in 0..8 {
         let b = format!("craft-wsd-{}", new_uuid());
@@ -75,6 +76,7 @@ pub fn base64(bytes: &[u8]) -> String {
     out
 }
 
+/// The first position of `needle` in `hay` at or after `from`; an empty needle is never found.
 fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() {
         return None;
@@ -136,6 +138,7 @@ pub struct Part<'a> {
     pub data: &'a [u8],
 }
 
+/// The value of the first MIME header `name` (case-insensitive) in a part's header block, trimmed.
 fn header_value(headers: &[u8], name: &str) -> Option<String> {
     String::from_utf8_lossy(headers).lines().find_map(|l| {
         let (k, v) = l.split_once(':')?;
@@ -143,6 +146,7 @@ fn header_value(headers: &[u8], name: &str) -> Option<String> {
     })
 }
 
+/// A `Content-ID` without surrounding whitespace and angle brackets.
 fn bare_id(s: &str) -> String {
     s.trim().trim_matches(|c| c == '<' || c == '>').to_owned()
 }
@@ -207,6 +211,7 @@ pub fn resolve_href<'a>(parts: &[Part<'a>], href: &str) -> Option<&'a [u8]> {
     parts.iter().find(|p| p.content_id.as_deref() == Some(cid.as_str())).map(|p| p.data)
 }
 
+/// Decode `%XX` escapes; malformed escapes are kept as written and invalid UTF-8 is replaced.
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());

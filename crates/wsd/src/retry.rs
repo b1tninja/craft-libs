@@ -72,6 +72,7 @@ const DAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const LONG_DAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/// `text` as a number if it is `min` to `max` ASCII digits and nothing else.
 fn digits(text: &str, min: usize, max: usize) -> Option<u32> {
     if text.len() < min || text.len() > max || !text.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -79,10 +80,12 @@ fn digits(text: &str, min: usize, max: usize) -> Option<u32> {
     text.parse().ok()
 }
 
+/// The month number (1 to 12) of an English three-letter abbreviation, any case.
 fn month(text: &str) -> Option<u32> {
     MONTHS.iter().position(|m| m.eq_ignore_ascii_case(text)).and_then(|i| u32::try_from(i + 1).ok())
 }
 
+/// Whether `text` is one of the day `names`, any case. The day is not checked against the date.
 fn weekday_ok(text: &str, names: &[&str]) -> bool {
     names.iter().any(|d| d.eq_ignore_ascii_case(text))
 }
@@ -156,10 +159,12 @@ mod tests {
     /// 1994-11-06 08:49:37 UTC, the RFC's example instant.
     const T0: u64 = 784_111_777;
 
+    /// The instant `secs` seconds after the Unix epoch.
     fn at(secs: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(secs)
     }
 
+    /// The wait `value` asks for, in whole seconds, when it is received at `now` (Unix seconds).
     fn after(value: &str, now: u64) -> Option<u64> {
         parse_retry_after(value, at(now)).map(|d| d.as_secs())
     }

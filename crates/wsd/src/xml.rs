@@ -73,6 +73,7 @@ pub fn check_depth(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// The index just past the next `needle` at or after `from`, or the end of `bytes` if there is none.
 fn skip_to(bytes: &[u8], from: usize, needle: &[u8]) -> usize {
     let mut i = from;
     while i < bytes.len() {
@@ -161,16 +162,19 @@ pub struct QName {
 }
 
 impl QName {
+    /// The name `{ns}local`; nothing is validated.
     pub fn new(ns: impl Into<String>, local: impl Into<String>) -> Self {
         Self { ns: ns.into(), local: local.into() }
     }
 
+    /// Whether this is the name `{ns}local`.
     pub fn is(&self, ns: &str, local: &str) -> bool {
         self.ns == ns && self.local == local
     }
 }
 
 impl std::fmt::Display for QName {
+    /// Clark notation: `{namespace}local`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{{{}}}{}", self.ns, self.local)
     }

@@ -894,6 +894,35 @@ fn reconcile_reports_not_found_and_ambiguity_and_only_matches_this_backends_user
 }
 
 #[test]
+fn reconcile_matches_what_each_ticket_shape_sends() {
+    // A name-only ticket sends no user, so the printer's own user name cannot rule the job out.
+    let p = FakePrinter::new(FakeConfig { ending: Ending::Hangs, ..FakeConfig::default() });
+    let b = backend(&p).with_ticket_shape(TicketShape::JobNameOnly);
+    b.add(URL).unwrap();
+    let r = registry(&b);
+    r.submit_job(request(job(URL))).unwrap();
+    assert!(matches!(b.reconcile(URL, "Report").unwrap(), Reconciled::Found(_)), "a name-only ticket's job is found");
+    let fingerprint = craft_print::Fingerprint::new("Report", craft_print::Timestamp::default());
+    assert!(matches!(r.find_job(&id(URL), &fingerprint).unwrap(), craft_print::Reconciled::Found(_)), "through the registry too");
+
+    // A title XML cannot carry as it is comes back without the control characters.
+    let (_p, b, r) = setup(FakeConfig { ending: Ending::Hangs, ..FakeConfig::default() });
+    let odd = "Re\u{1}port\r\n";
+    r.submit_job(request(Job { title: odd.into(), ..job(URL) })).unwrap();
+    assert!(matches!(b.reconcile(URL, odd).unwrap(), Reconciled::Found(_)), "matched as the printer stored it");
+
+    // An empty ticket names no job: matching is refused rather than reported as nothing found.
+    let p = FakePrinter::new(FakeConfig { ending: Ending::Hangs, ..FakeConfig::default() });
+    let b = backend(&p).with_ticket_shape(TicketShape::Empty);
+    b.add(URL).unwrap();
+    let r = registry(&b);
+    r.submit_job(request(job(URL))).unwrap();
+    assert_eq!(b.reconcile(URL, "Report").unwrap_err().kind(), ErrorKind::Unsupported);
+    assert_eq!(r.find_job(&id(URL), &fingerprint).unwrap_err().kind(), ErrorKind::Unsupported);
+    assert_eq!(b.tag_support(), craft_print::TagSupport::None, "nothing carries a tag");
+}
+
+#[test]
 fn a_history_the_printer_cannot_give_right_now_is_an_error_not_an_empty_history() {
     // A finished job is only in the history. If a busy printer's fault there read as "no history",
     // reconcile would call the job unknown and a caller would print it again.

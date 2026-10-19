@@ -170,6 +170,16 @@ impl TicketShape {
         }
     }
 
+    /// Whether the ticket carries `JobName` (every shape but [`Self::Empty`]).
+    pub const fn carries_name(self) -> bool {
+        !matches!(self, Self::Empty)
+    }
+
+    /// Whether the ticket carries `JobOriginatingUserName` ([`Self::Full`] and [`Self::Description`]).
+    pub const fn carries_user(self) -> bool {
+        matches!(self, Self::Full | Self::Description)
+    }
+
     pub const fn token(self) -> &'static str {
         match self {
             Self::Full => "full",

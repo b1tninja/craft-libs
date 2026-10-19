@@ -337,10 +337,7 @@ impl WsdBackend {
         };
         let options = PrintOptions {
             // The tag, when there is one, is the suffix of the name and survives the length cap.
-            job_name: match tag {
-                Some(tag) => tag.apply_to(&job.title, Some(MAX_NAME)),
-                None => job.title.chars().take(MAX_NAME).collect(),
-            },
+            job_name: ticket_name(&job.title, tag),
             user_name: config.user_name.clone(),
             document_name: None,
             // One copy is the printer's default and needs no setting (a reduced ticket has no room for it).
@@ -612,13 +609,14 @@ impl Backend for WsdBackend {
     /// The tag is a suffix of the job name in the ticket (`"title [ref abc123de]"`, cut so that it
     /// fits the 255 characters), and `GetActiveJobs` / `GetJobHistory` return the name, so a
     /// listing can match it.
+    /// An empty ticket (`TicketShape::Empty`) names no job, so then nothing carries the tag.
     fn tag_support(&self) -> TagSupport {
-        TagSupport::Carried(TagPlacement::JobNameSuffix)
+        if self.config.ticket_shape.carries_name() { TagSupport::Carried(TagPlacement::JobNameSuffix) } else { TagSupport::None }
     }
 
     /// Active jobs and history, with the user; no creation time (job summaries do not carry one).
     fn job_query_caps(&self) -> JobQueryCaps {
-        JobQueryCaps { list: true, created_time: false, user: true, tag: true, history: true }
+        JobQueryCaps { list: true, created_time: false, user: true, tag: self.config.ticket_shape.carries_name(), history: true }
     }
 
     /// `GetActiveJobs` and `GetJobHistory` (two idempotent reads; a service without
@@ -631,8 +629,19 @@ impl Backend for WsdBackend {
 
     /// Reconcile by tag (the tag is in the job name), else by title and this backend's user name.
     fn find_job(&self, printer_native: &str, fingerprint: &Fingerprint) -> Result<FoundJobs, PrintError> {
+        let shape = self.config.ticket_shape;
+        if !shape.carries_name() {
+            return Err(unmatchable(shape));
+        }
         let mut fingerprint = fingerprint.clone();
-        fingerprint.user.get_or_insert_with(|| self.config.user_name.clone());
+        // Compared as it was sent: cut to the name's length and as the printer can store it.
+        fingerprint.title = comparable(&ticket_name(&fingerprint.title, None));
+        if shape.carries_user() {
+            fingerprint.user.get_or_insert_with(|| self.config.user_name.clone());
+        } else {
+            // The ticket named no user, so the printer filled in its own.
+            fingerprint.user = None;
+        }
         let support = self.tag_support();
         let jobs = self.list_jobs(printer_native, &fingerprint.filter(support.matchable()))?;
         Ok(reconcile_jobs(jobs, &fingerprint, support))
@@ -705,6 +714,33 @@ pub struct JobMatch {
     pub status: JobStatus,
 }
 
+/// The job name a ticket carries for this title and tag: the tag is the suffix and survives the
+/// length cap.
+fn ticket_name(title: &str, tag: Option<&Tag>) -> String {
+    match tag {
+        Some(tag) => tag.apply_to(title, Some(MAX_NAME)),
+        None => title.chars().take(MAX_NAME).collect(),
+    }
+}
+
+/// A job name as it can come back from the printer: XML drops the control characters it cannot
+/// carry and turns line breaks into `\n`, and a printer may trim the ends. Both sides of a match go
+/// through this.
+fn comparable(name: &str) -> String {
+    let kept: String = name
+        .replace("\r\n", "\n")
+        .chars()
+        .map(|c| if c == '\r' { '\n' } else { c })
+        .filter(|&c| !(u32::from(c) < 0x20 && !matches!(c, '\t' | '\n')) && c != '\u{fffe}' && c != '\u{ffff}')
+        .collect();
+    kept.trim().to_owned()
+}
+
+/// A ticket shape that names no job: nothing on the printer can be matched to the print.
+fn unmatchable(shape: TicketShape) -> PrintError {
+    PrintError::new(ErrorKind::Unsupported, format!("a {} ticket names no job, so the printer's jobs cannot be matched to this print", shape.token()))
+}
+
 /// The printer's job history, or none when it does not offer one (`wsa:ActionNotSupported`: the
 /// service has no GetJobHistory). Any other fault, a busy or broken printer included, is an error:
 /// read as "no history", it would make a finished job look unknown and invite a second print.
@@ -746,7 +782,7 @@ impl WsdBackend {
                 }
             }
             let status = neutral_status(&row.status);
-            let mut remote = RemoteJob::new(JobId::new(NAME, job_native(&url, id)), name, status.state).with_reasons(status.reasons);
+            let mut remote = RemoteJob::new(JobId::new(NAME, job_native(&url, id)), comparable(&name), status.state).with_reasons(status.reasons);
             if !user.is_empty() {
                 remote = remote.with_user(user);
             }
@@ -794,18 +830,23 @@ impl WsdBackend {
     /// tagged job is never found and sending again would print it twice.
     pub fn reconcile_tagged(&self, printer: &str, job_title: &str, tag: Option<&Tag>) -> Result<Reconciled, PrintError> {
         let entry = self.entry(printer)?;
+        let shape = self.config.ticket_shape;
+        if !shape.carries_name() {
+            return Err(unmatchable(shape));
+        }
         let client = self.client(&entry);
-        let name: String = match tag {
-            Some(tag) => tag.apply_to(job_title, Some(MAX_NAME)),
-            None => job_title.chars().take(MAX_NAME).collect(),
-        };
-        let user = self.config.user_name.as_str();
+        let name = comparable(&ticket_name(job_title, tag));
+        // Without a user in the ticket the printer filled in its own, so the user cannot narrow it.
+        let user = shape.carries_user().then_some(self.config.user_name.as_str());
         let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
         let history = history_or_none(client.get_job_history())?;
         let url = entry.url.as_url();
         let mut found: Vec<(u32, JobMatch)> = Vec::new();
         for row in active.into_iter().chain(history) {
-            if row.job_name != name || row.user_name != user || found.iter().any(|(id, _)| *id == row.status.job_id) {
+            if comparable(&row.job_name) != name
+                || user.is_some_and(|user| row.user_name != user)
+                || found.iter().any(|(id, _)| *id == row.status.job_id)
+            {
                 continue;
             }
             let job = JobId::new(NAME, job_native(&url, row.status.job_id));

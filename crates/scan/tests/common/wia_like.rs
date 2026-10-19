@@ -43,6 +43,7 @@ pub const CODE_NAMES: [(u32, &str); 22] = [
     (0x8007_0057, "E_INVALIDARG"),
 ];
 
+/// The symbolic name of a WIA HRESULT, if the table has one.
 pub fn code_name(code: u32) -> Option<&'static str> {
     CODE_NAMES.iter().find(|(known, _)| *known == code).map(|(_, name)| *name)
 }
@@ -70,6 +71,7 @@ pub const KIND_BY_CODE: [(u32, InterruptKind); 19] = [
     (0x8021_0020, InterruptKind::MultiFeed),
 ];
 
+/// The interrupt kind a classified HRESULT stands for.
 pub fn kind_for_hresult(code: u32) -> Option<InterruptKind> {
     KIND_BY_CODE.iter().find(|(known, _)| *known == code).map(|(_, kind)| *kind)
 }
@@ -253,10 +255,12 @@ pub fn generic_scan_failure(error: &ScanError) -> bool {
         || text.starts_with("The scan was interrupted.")
 }
 
+/// Whether the error carries the sentence for a busy device.
 fn is_busy(error: &ScanError) -> bool {
     wia_error_message(0x8021_0006).is_some_and(|sentence| error.to_string().contains(sentence))
 }
 
+/// Whether the error carries the sentence for a paper problem.
 fn is_paper_problem(error: &ScanError) -> bool {
     wia_error_message(0x8021_0004).is_some_and(|sentence| error.to_string().contains(sentence))
 }
@@ -336,6 +340,7 @@ pub struct WiaLike {
 pub const WIA_ID: &str = r"{00000000-0000-4000-8000-000000000001}\0000";
 
 impl WiaLike {
+    /// A scanner with the feeder and flatbed ready (status bits 0x3) that lists normally.
     pub fn new() -> Self {
         Self { bits: 0x3, fail_listing: false }
     }

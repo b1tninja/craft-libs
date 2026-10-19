@@ -14,6 +14,7 @@ use craft_scan::{
     image_format, preflight,
 };
 
+/// A registry with the Windows-, SANE- and eSCL-like backends registered.
 fn all_three() -> Registry {
     let registry = Registry::new();
     registry.register(Box::new(WiaLike::new())).expect("wia");
@@ -22,6 +23,7 @@ fn all_three() -> Registry {
     registry
 }
 
+/// The ids of `items`, as owned strings.
 fn ids<T>(items: &[T], id: impl Fn(&T) -> &str) -> Vec<String> {
     items.iter().map(|item| id(item).to_string()).collect()
 }

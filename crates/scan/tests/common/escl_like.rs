@@ -32,10 +32,12 @@ pub struct EsclLike {
 }
 
 impl EsclLike {
+    /// A scanner whose feeder is in state `adf` and holds `sheets` pages.
     pub fn new(adf: AdfState, sheets: usize) -> Self {
         Self { adf, sheets, jam_after: None, fail_listing: false }
     }
 
+    /// The handling status the feeder state implies.
     fn handling(&self) -> HandlingStatus {
         HandlingStatus {
             feeder_ready: Some(self.adf == AdfState::Loaded),

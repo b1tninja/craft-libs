@@ -51,10 +51,12 @@ pub struct AcquireTrace {
 }
 
 impl AcquireTrace {
+    /// A trace that writes where the trace environment variable says (off when it is unset).
     pub fn from_env() -> Self {
         Self::new(trace_dest_from_env())
     }
 
+    /// A trace writing to `dest`. A file that cannot be opened for appending turns the trace off instead of failing.
     pub fn new(dest: TraceDest) -> Self {
         let file = match &dest {
             TraceDest::File(path) => open_trace_file(path),
@@ -67,10 +69,13 @@ impl AcquireTrace {
         Self { dest, file: Mutex::new(file) }
     }
 
+    /// Whether lines are written at all.
     pub fn enabled(&self) -> bool {
         !matches!(self.dest, TraceDest::Off)
     }
 
+    /// Writes one JSON line with the timestamp, `name` as `phase`, and each field as a string value. Write errors are
+    /// ignored. Nothing is written when the trace is off.
     pub fn phase(&self, name: &str, fields: &[(&str, &str)]) {
         if matches!(self.dest, TraceDest::Off) {
             return;
@@ -93,6 +98,7 @@ impl AcquireTrace {
         }
     }
 
+    /// Writes a `status_read` line for a handling-status read taken `when`; `feeder_ready` is `unknown` when not reported.
     pub fn status(&self, when: &str, status: HandlingStatus) {
         self.phase(
             "status_read",
@@ -112,14 +118,17 @@ impl AcquireTrace {
     }
 }
 
+/// `"true"` or `"false"`.
 fn bool_str(value: bool) -> &'static str {
     if value { "true" } else { "false" }
 }
 
+/// Opens `path` for appending, creating it; `None` on any error.
 fn open_trace_file(path: &Path) -> Option<File> {
     OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
+/// One trace line: a JSON object with `ts` (milliseconds since the Unix epoch), `phase` and the fields, all as strings.
 fn format_line(phase: &str, fields: &[(&str, &str)]) -> String {
     let ts = timestamp_ms();
     let mut out = String::from("{\"ts\":");
@@ -136,6 +145,7 @@ fn format_line(phase: &str, fields: &[(&str, &str)]) -> String {
     out
 }
 
+/// Milliseconds since the Unix epoch as text, or "0" when the clock is before it.
 fn timestamp_ms() -> String {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_millis().to_string(),
@@ -143,6 +153,7 @@ fn timestamp_ms() -> String {
     }
 }
 
+/// Appends `text` to `buf` as a quoted JSON string, escaping quotes, backslashes and control characters.
 fn json_string(buf: &mut String, text: &str) {
     buf.push('"');
     for ch in text.chars() {

@@ -38,6 +38,7 @@ pub fn scanner(id: &str, name: &str) -> Scanner {
     }
 }
 
+/// Settings for `device` scanning `pages` pages from `source`, everything else default.
 pub fn request(device: &str, source: Source, pages: u32) -> ScanSettings {
     ScanSettings { device: device.to_string(), source, pages, ..ScanSettings::default() }
 }

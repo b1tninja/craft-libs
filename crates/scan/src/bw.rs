@@ -44,6 +44,7 @@ pub struct LengthPlan {
 }
 
 impl PageRule {
+    /// The rule a request implies: its dpi, a threshold byte only for black-and-white, and no length plan.
     pub fn for_settings(settings: &ScanSettings) -> Self {
         let bw_threshold = (settings.color == Color::BlackAndWhite).then(|| threshold_byte(settings.threshold));
         Self { dpi: settings.dpi, bw_threshold, length: LengthPlan::default() }
@@ -114,6 +115,8 @@ pub fn threshold_to_one_bit_at(bytes: &[u8], threshold: u8, (x, y): density::Den
     threshold_with_pels(bytes, threshold, (pels(x), pels(y)))
 }
 
+/// Shared body of the two threshold entry points; `pels` is the (x, y) resolution in pixels per metre written
+/// into the BMP header. The result is `Unreadable` when the image cannot be decoded or its size does not fit `u32`.
 fn threshold_with_pels(bytes: &[u8], threshold: u8, pels: (u32, u32)) -> Thresholded {
     let read = match read_bmp(bytes) {
         Some(read) => read,
@@ -182,6 +185,7 @@ pub fn page_for(delivered: &[u8], rule: PageRule) -> (Page, Option<u32>) {
     )
 }
 
+/// A dpi rounded to the nearest whole number and clamped to `1..=u32::MAX`.
 fn round_dpi(dpi: f64) -> u32 {
     dpi.round().clamp(1.0, f64::from(u32::MAX)) as u32
 }
@@ -244,6 +248,8 @@ fn read_bmp(bytes: &[u8]) -> Option<Read> {
     Some(Read::Luma(Luma { width, height, from_bits: u32::from(info.bits), pixels }))
 }
 
+/// Reads a page that is not a BMP this crate parses: 1-bit PNG and TIFF are reported as already 1-bit, anything
+/// else is decoded through `image` to 8-bit luminance. `Unreadable` when decoding fails or the size is zero.
 fn read_other(bytes: &[u8]) -> Read {
     let one_bit = match image_format(bytes) {
         "png" => png_is_one_bit(bytes),
@@ -419,6 +425,7 @@ mod tests {
             .collect()
     }
 
+    /// Thresholds `bytes` at 300 dpi and returns the 1-bit result; panics if it was not converted.
     fn converted(bytes: &[u8], threshold: u8) -> OneBit {
         match threshold_to_one_bit(bytes, threshold, 300) {
             Thresholded::Converted(one) => one,
@@ -426,6 +433,7 @@ mod tests {
         }
     }
 
+    /// Expands each row of grey values to RGB triples with all three channels equal.
     fn rgb_rows(values: &[&[u8]]) -> Vec<Vec<u8>> {
         values.iter().map(|row| row.iter().flat_map(|v| [*v, *v, *v]).collect()).collect()
     }

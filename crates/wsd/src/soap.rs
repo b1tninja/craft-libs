@@ -120,6 +120,7 @@ impl<'a> Call<'a> {
         self
     }
 
+    /// The request's `wsa:Action`.
     pub fn action(&self) -> &str {
         &self.action
     }
@@ -136,11 +137,14 @@ pub struct SoapClient<T: Transport> {
     reply_label: &'static str,
 }
 
+/// Message ids as random v4 UUIDs.
 fn default_ids() -> IdSource {
     Arc::new(new_uuid)
 }
 
 impl<T: Transport> SoapClient<T> {
+    /// A client for `endpoint` with the default limits, no cancel token, no deadline and random message ids.
+    /// Nothing is sent until a call.
     pub fn new(transport: T, endpoint: DeviceUrl) -> Self {
         Self {
             transport,
@@ -153,6 +157,7 @@ impl<T: Transport> SoapClient<T> {
         }
     }
 
+    /// Use `limits` for the timeout and the request and response size caps.
     pub fn with_limits(mut self, limits: NetworkLimits) -> Self {
         self.limits = limits;
         self
@@ -192,14 +197,17 @@ impl<T: Transport> SoapClient<T> {
         self
     }
 
+    /// The endpoint every call is posted to.
     pub fn endpoint(&self) -> &DeviceUrl {
         &self.endpoint
     }
 
+    /// The limits calls are made with.
     pub fn limits(&self) -> NetworkLimits {
         self.limits
     }
 
+    /// The transport calls go through.
     pub fn transport(&self) -> &T {
         &self.transport
     }
@@ -218,6 +226,7 @@ impl<T: Transport> SoapClient<T> {
         }
     }
 
+    /// [`Error::Cancelled`] once the client's cancel token is set.
     fn check_cancel(&self) -> Result<()> {
         if self.cancel.as_ref().is_some_and(CancelToken::is_cancelled) { Err(Error::Cancelled) } else { Ok(()) }
     }
@@ -374,9 +383,11 @@ mod tests {
     }
 
     impl Script {
+        /// A script that answers every post with `reply`.
         fn new(reply: impl Fn(&Request) -> Result<Response> + Send + Sync + 'static) -> Self {
             Self { seen: Mutex::new(Vec::new()), reply: Box::new(reply) }
         }
+        /// A script that answers every post with a `DoItResponse` of value 42 related to the request's message id.
         fn echo() -> Self {
             Self::new(|req| {
                 let text = String::from_utf8_lossy(&req.body).into_owned();
@@ -390,26 +401,31 @@ mod tests {
                 })
             })
         }
+        /// How many posts the script has received.
         fn count(&self) -> usize {
             self.seen.lock().unwrap().len()
         }
     }
 
     impl Transport for Script {
+        /// Record the URL and request, then answer with the script's reply.
         fn post(&self, url: &DeviceUrl, request: Request) -> Result<Response> {
             self.seen.lock().unwrap().push((url.as_url(), request.clone()));
             (self.reply)(&request)
         }
     }
 
+    /// The loopback endpoint the tests post to.
     fn url() -> DeviceUrl {
         DeviceUrl::parse("http://127.0.0.1:5357/svc").unwrap()
     }
 
+    /// A `DoIt` call expecting a `DoItResponse` element.
     fn call() -> Call<'static> {
         Call::new(ACT, ACT_RESP).reply_element(SVC, "DoItResponse").namespace("svc", SVC).body("<svc:DoItRequest/>")
     }
 
+    /// The text of the reply's `Value` child; empty when there is none.
     fn value(n: Node<'_, '_>) -> Result<String> {
         Ok(xml::child_text(n, SVC, "Value").unwrap_or_default())
     }
@@ -675,6 +691,7 @@ mod tests {
 
     const BUSY_FAULT: &str = "<s:Fault><s:Code><s:Value>s:Receiver</s:Value><s:Subcode><s:Value xmlns:v=\"urn:example:service\">v:Busy</s:Value><s:Subcode><s:Value xmlns:v=\"urn:example:service\">v:PaperOut</s:Value></s:Subcode></s:Subcode></s:Code><s:Reason><s:Text>busy</s:Text></s:Reason></s:Fault>";
 
+    /// The message id (without `urn:uuid:`) of a request the client sent.
     fn id_of(req: &Request) -> String {
         let text = String::from_utf8_lossy(&req.body).into_owned();
         text.split("urn:uuid:").nth(1).and_then(|r| r.split('<').next()).unwrap_or("").to_owned()

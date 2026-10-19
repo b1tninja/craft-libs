@@ -17,6 +17,8 @@ use craft_wsd::http::HttpTransport;
 use craft_wsd::metadata::{self, DIALECT_RELATIONSHIP};
 use craft_wsd::{DeviceUrl, EndpointRef, ServiceKind, SoapClient};
 
+/// The device and print-service URLs from `CRAFT_WSD_LIVE_URL` (and optionally
+/// `CRAFT_WSD_LIVE_DEVICE_URL`), or `None` to skip the live tests. Panics unless both are loopback.
 fn urls() -> Option<(DeviceUrl, DeviceUrl)> {
     let service = std::env::var("CRAFT_WSD_LIVE_URL").ok().filter(|u| !u.is_empty())?;
     let service = DeviceUrl::parse(&service).expect("CRAFT_WSD_LIVE_URL must be a numeric loopback/private http URL");
@@ -29,6 +31,7 @@ fn urls() -> Option<(DeviceUrl, DeviceUrl)> {
     Some((device, service))
 }
 
+/// A real HTTP client for `url` with a 30-second budget per test.
 fn client(url: DeviceUrl) -> SoapClient<HttpTransport> {
     SoapClient::new(HttpTransport::new(), url).with_budget(Duration::from_secs(30))
 }

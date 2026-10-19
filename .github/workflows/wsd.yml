@@ -29,6 +29,12 @@ jobs:
       - run: cargo clippy -p craft-wsd --all-targets --all-features --locked -- -D warnings
       - run: cargo test -p craft-wsd --locked
       - run: cargo test -p craft-wsd --all-features --locked
+      - run: cargo doc -p craft-wsd --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo doc -p craft-wsd --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Message layer builds for the browser (no HTTP client there)
         if: runner.os == 'Linux'
         run: cargo check --target wasm32-unknown-unknown -p craft-wsd --locked

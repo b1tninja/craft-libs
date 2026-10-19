@@ -6,7 +6,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use super::codec::{Group, Value};
+use super::codec::{Attribute, Group, Value};
 use super::protocol::{job_state, printer_state};
 
 /// The cap on how many entries of one list attribute are kept.
@@ -25,7 +25,7 @@ impl MediaSize {
     /// rounding of PWG self-describing names (half a millimetre).
     pub fn fits(&self, width: i32, height: i32) -> bool {
         const TOL: i32 = 50;
-        let inside = |(low, high): (i32, i32), n: i32| n >= low - TOL && n <= high + TOL;
+        let inside = |(low, high): (i32, i32), n: i32| n >= low.saturating_sub(TOL) && n <= high.saturating_add(TOL);
         inside(self.width, width) && inside(self.height, height)
     }
 }
@@ -90,8 +90,14 @@ fn cap<T>(mut v: Vec<T>) -> Vec<T> {
     v
 }
 
+/// The attribute, unless it is absent or carries only out-of-band values (`no-value`, `unknown`,
+/// ...): a printer that answers `media-supported = no-value` has not said it supports nothing.
+fn listed<'g>(group: &'g Group, name: &str) -> Option<&'g Attribute> {
+    group.get(name).filter(|a| !a.values.iter().all(Value::is_out_of_band))
+}
+
 fn strings(group: &Group, name: &str) -> Option<Vec<String>> {
-    group.get(name).map(|a| cap(a.strings().into_iter().map(str::to_owned).collect()))
+    listed(group, name).map(|a| cap(a.strings().into_iter().map(str::to_owned).collect()))
 }
 
 fn dimension(values: &[(String, Vec<Value>)], name: &str) -> Option<(i32, i32)> {
@@ -110,20 +116,26 @@ fn resolution_dpi(value: &Value) -> Option<(u32, u32)> {
         4 => 2.54,
         _ => return None,
     };
-    let to = |n: i32| u32::try_from(n).ok().filter(|n| *n > 0).map(|n| (f64::from(n) * scale).round() as u32);
+    // Dots per centimetre only approximate the usual dpi values (236 dpcm is 599.4 dpi): within half a
+    // dot per centimetre (1.27 dpi) of a multiple of 25 dpi, that value is meant.
+    let snap = |dpi: f64| {
+        let near = (dpi / 25.0).round() * 25.0;
+        if (dpi - near).abs() <= 1.27 { near } else { dpi.round() }
+    };
+    let to = |n: i32| u32::try_from(n).ok().filter(|n| *n > 0).map(|n| snap(f64::from(n) * scale) as u32);
     Some((to(*cross_feed)?, to(*feed)?))
 }
 
 impl PrinterAttrs {
     /// Read the printer group of a `Get-Printer-Attributes` reply.
     pub fn from_group(group: &Group) -> Self {
-        let integers = |name: &str| group.get(name).map(|a| cap(a.integers()));
-        let copies = group.get("copies-supported").and_then(|a| a.first()).and_then(|v| match v {
+        let integers = |name: &str| listed(group, name).map(|a| cap(a.integers()));
+        let copies = listed(group, "copies-supported").and_then(|a| a.first()).and_then(|v| match v {
             Value::Range { lower, upper } => Some((*lower, *upper)),
             Value::Integer(n) => Some((1, *n)),
             _ => None,
         });
-        let media_sizes = group.get("media-size-supported").map(|a| {
+        let media_sizes = listed(group, "media-size-supported").map(|a| {
             cap(a
                 .values
                 .iter()
@@ -131,7 +143,7 @@ impl PrinterAttrs {
                 .filter_map(|members| Some(MediaSize { width: dimension(members, "x-dimension")?, height: dimension(members, "y-dimension")? }))
                 .collect())
         });
-        let resolutions = group.get("printer-resolution-supported").map(|a| cap(a.values.iter().filter_map(resolution_dpi).collect()));
+        let resolutions = listed(group, "printer-resolution-supported").map(|a| cap(a.values.iter().filter_map(resolution_dpi).collect()));
         Self {
             name: group.first_str("printer-name").map(str::to_owned),
             info: group.first_str("printer-info").map(str::to_owned),
@@ -329,6 +341,39 @@ mod tests {
         }
         let size = MediaSize { width: (21000, 21000), height: (14800, 29700) };
         assert!(size.fits(21000, 29700) && size.fits(20960, 14800) && !size.fits(21000, 30000) && !size.fits(22000, 20000));
+    }
+
+    #[test]
+    fn a_size_range_at_the_ends_of_i32_neither_overflows_nor_widens() {
+        let all = MediaSize { width: (i32::MIN, i32::MAX), height: (i32::MIN, i32::MAX) };
+        assert!(all.fits(21000, 29700) && all.fits(i32::MIN, i32::MAX));
+        let edge = MediaSize { width: (i32::MAX - 10, i32::MAX), height: (0, 0) };
+        assert!(edge.fits(i32::MAX, 50) && !edge.fits(0, 0));
+    }
+
+    #[test]
+    fn out_of_band_values_mean_not_listed_rather_than_supports_nothing() {
+        let group = Group::new(GroupTag::Printer)
+            .with(Attribute::new("media-supported", Value::NoValue))
+            .with(Attribute::new("sides-supported", Value::Unknown))
+            .with(Attribute::new("print-quality-supported", Value::NoValue))
+            .with(Attribute::new("copies-supported", Value::Unknown))
+            .with(Attribute::new("printer-resolution-supported", Value::NoValue));
+        let a = PrinterAttrs::from_group(&group);
+        assert_eq!(a.supports_media("iso_a4_210x297mm"), None);
+        assert_eq!(a.supports_sides("one-sided"), None);
+        assert_eq!(a.supports_quality(4), None);
+        assert_eq!(a.supports_copies(2), None);
+        assert_eq!(a.supports_resolution((300, 300)), None);
+    }
+
+    #[test]
+    fn dots_per_centimetre_land_on_the_dpi_they_stand_for() {
+        let res = |n: i32| resolution_dpi(&Value::Resolution { cross_feed: n, feed: n, units: 4 });
+        assert_eq!(res(236), Some((600, 600)), "599.4 dpi is 600");
+        assert_eq!(res(118), Some((300, 300)));
+        assert_eq!(res(472), Some((1200, 1200)));
+        assert_eq!(res(47), Some((119, 119)), "not near a usual value: rounded as it is");
     }
 
     fn printer() -> Group {

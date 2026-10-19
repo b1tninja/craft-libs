@@ -68,6 +68,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// The name used in the journal and the listings (`fronts` or `backs`); [`Direction::parse`] reads it back.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Fronts => "fronts",
@@ -75,6 +76,7 @@ impl Direction {
         }
     }
 
+    /// The direction named `text`, or `None` for anything but `fronts` or `backs`.
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "fronts" => Some(Self::Fronts),
@@ -111,10 +113,13 @@ impl ManualDuplex {
         Self { cursor: self.sheets - backs, ..self }
     }
 
+    /// The `manual_duplex` object of the job file.
     fn to_json(self) -> Value {
         json!({ "sheets": self.sheets, "direction": self.direction.as_str(), "cursor": self.cursor })
     }
 
+    /// Reads the `manual_duplex` object of a job file. Errs when a field is missing or not a whole number, the
+    /// direction is unknown, there are no sheets, or the cursor is past the last sheet.
     fn from_json(value: &Value) -> Result<Self, String> {
         let number = |key: &str| {
             value
@@ -240,6 +245,7 @@ impl JobRecord {
         self.journal.pages.len()
     }
 
+    /// Whether the job ended with the `Completed` outcome (not failed, cancelled or still running).
     fn completed(&self) -> bool {
         self.effective_state() == ScanJobState::Terminal(scan::job::Outcome::Completed)
     }
@@ -312,6 +318,7 @@ pub fn page_numbers(dir: &Path) -> Result<Vec<usize>, String> {
     Ok(numbered_page_files(dir)?.into_iter().map(|(number, _)| number).collect())
 }
 
+/// Every `page-NNN.*` file in `dir` as (number, path), sorted by number. Errs when the folder cannot be read.
 fn numbered_page_files(dir: &Path) -> Result<Vec<(usize, PathBuf)>, String> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|error| format!("{}: {error}", dir.display()))? {
@@ -548,6 +555,8 @@ pub fn detail_text(program: &str, dir: &Path, record: &JobRecord) -> String {
     out
 }
 
+/// One line for an attempt of the job file (number, continuation, kept pages, outcome, error kind, start time).
+/// Fields that are missing show as `-` or 0.
 fn attempt_line(attempt: &Value) -> String {
     let text = |key: &str| attempt.get(key).and_then(Value::as_str).unwrap_or("-");
     let number = |key: &str| attempt.get(key).and_then(Value::as_u64).unwrap_or(0);
@@ -745,6 +754,7 @@ mod tests {
     use super::*;
     use craft_scan::job::{ScanJob, ScanJobConfig};
 
+    /// A fresh, empty temp folder for the test `name`.
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("craft-scan-jobs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -752,6 +762,7 @@ mod tests {
         dir
     }
 
+    /// A new job record with an empty journal for `state_settings`, not a manual-duplex job.
     fn record(state_settings: ScanSettings) -> JobRecord {
         let job = ScanJob::new(state_settings.clone(), ScanJobConfig::default().with_title("Invoices"));
         let snapshot = job.snapshot();
@@ -767,6 +778,7 @@ mod tests {
         }
     }
 
+    /// The journal entry of a 2x2 bmp page numbered `number`.
     fn page(number: u32) -> scan::job::PageInfo {
         serde_json::from_value(json!({ "number": number, "attempt": 1, "format": "bmp", "width": 2, "height": 2, "dpi": 200, "bytes": 8 })).unwrap()
     }

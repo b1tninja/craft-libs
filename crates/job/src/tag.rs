@@ -17,6 +17,7 @@ const HEX_LEN: usize = 8;
 pub struct TagError;
 
 impl fmt::Display for TagError {
+    /// Writes the sentence "a tag is exactly 8 lowercase hexadecimal characters".
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("a tag is exactly 8 lowercase hexadecimal characters")
     }
@@ -88,6 +89,7 @@ impl Tag {
 
 #[cfg(feature = "serde")]
 impl From<Tag> for String {
+    /// The tag as its 8 characters.
     fn from(value: Tag) -> String {
         value.as_str().to_string()
     }
@@ -97,12 +99,14 @@ impl From<Tag> for String {
 impl TryFrom<String> for Tag {
     type Error = TagError;
 
+    /// Parses like [`Tag::parse`].
     fn try_from(text: String) -> Result<Self, Self::Error> {
         Self::parse(&text)
     }
 }
 
 impl fmt::Display for Tag {
+    /// Writes the 8 characters, without the ` [ref ]` wrapper.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -111,6 +115,7 @@ impl fmt::Display for Tag {
 impl FromStr for Tag {
     type Err = TagError;
 
+    /// Parses like [`Tag::parse`].
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         Self::parse(text)
     }
@@ -183,22 +188,26 @@ impl Fingerprint {
     /// The default `window`: five minutes either way.
     pub const DEFAULT_WINDOW: Duration = Duration::from_secs(300);
 
+    /// A fingerprint of the job `title` submitted at `submitted`, with no user or tag and the default window.
     pub fn new(title: impl Into<String>, submitted: Timestamp) -> Self {
         Self { title: title.into(), user: None, submitted, window: Self::DEFAULT_WINDOW, tag: None }
     }
 
+    /// Sets the user the job was submitted as, for matching against the owner a device lists.
     #[must_use]
     pub fn with_user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self
     }
 
+    /// Sets how far a device's creation time may be from `submitted` and still match.
     #[must_use]
     pub fn with_window(mut self, window: Duration) -> Self {
         self.window = window;
         self
     }
 
+    /// Sets the tag that was placed in the job.
     #[must_use]
     pub fn with_tag(mut self, tag: Tag) -> Self {
         self.tag = Some(tag);
@@ -215,6 +224,7 @@ impl Fingerprint {
 mod tests {
     use super::*;
 
+    /// Parses `s` as a tag; the test fails if `s` is not a valid tag.
     fn tag(s: &str) -> Tag {
         Tag::parse(s).expect("valid tag")
     }

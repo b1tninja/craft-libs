@@ -94,6 +94,8 @@ pub struct Progress {
 }
 
 impl Progress {
+    /// Progress with `done` units finished and `total` units expected, if known. Prefer [`Self::of`] and
+    /// [`Self::done_only`] when the case is fixed.
     pub const fn new(done: u32, total: Option<u32>) -> Self {
         Self { done, total }
     }

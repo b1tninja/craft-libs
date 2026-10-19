@@ -21,6 +21,8 @@ const KNOWN: [&str; 9] = ["hresult", "win32", "sane", "http", "ipp", "wsd-fault"
 
 static TABLE: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
+/// The `'static` string for `text`: a known literal, an entry already in the table, or a new leaked entry. `None`
+/// when `text` is longer than [`MAX_LEN`] or the table is full.
 fn intern(text: &str) -> Option<&'static str> {
     if let Some(known) = KNOWN.iter().find(|k| **k == text) {
         return Some(known);
@@ -40,6 +42,7 @@ fn intern(text: &str) -> Option<&'static str> {
     Some(leaked)
 }
 
+/// [`intern`] with `"other"` in place of `None`.
 pub(crate) fn intern_or_other(text: &str) -> &'static str {
     intern(text).unwrap_or("other")
 }
@@ -54,12 +57,15 @@ struct NativeCodeWire {
 }
 
 impl<'de> Deserialize<'de> for crate::native::NativeCode {
+    /// Reads the domain and name from the wire; an uninternable domain becomes `"other"` and an uninternable name
+    /// becomes `None`.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = NativeCodeWire::deserialize(deserializer)?;
         Ok(Self { domain: intern_or_other(&wire.domain), code: wire.code, name: wire.name.and_then(|n| intern(&n)) })
     }
 }
 
+/// The default for `Fingerprint::window` when the field is missing on the wire.
 pub(crate) fn default_window() -> Duration {
     crate::tag::Fingerprint::DEFAULT_WINDOW
 }
@@ -70,10 +76,12 @@ pub(crate) mod duration_ms {
 
     use serde::{Deserialize, Deserializer, Serializer};
 
+    /// Writes `value` as whole milliseconds, saturating at `u64::MAX`.
     pub(crate) fn serialize<S: Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u64(u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
     }
 
+    /// Reads milliseconds as a [`Duration`].
     pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
         u64::deserialize(deserializer).map(Duration::from_millis)
     }

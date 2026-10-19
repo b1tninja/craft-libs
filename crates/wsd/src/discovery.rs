@@ -20,7 +20,7 @@
 //! * replies are accepted only if they correlate (`RelatesTo`) with the probe or resolve we sent,
 //!   and an `AppSequence` that goes backwards for a known device is ignored.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use roxmltree::Node;
@@ -57,6 +57,8 @@ const MAX_TOKEN: usize = 1024;
 /// Datagrams examined per listening slice before the rest are counted as a flood and skipped.
 const MAX_DATAGRAMS_PER_SLICE: usize = 4096;
 const MAX_RESOLVES: usize = 8;
+/// How many `Bye`s are remembered per run (see `Collector::byes`).
+const MAX_BYES: usize = 1024;
 /// The port directed resolves are addressed to: the well-known discovery port, a protocol constant
 /// and not a socket. A socket implementation that needs another port maps the destination itself.
 const DISCOVERY_PORT: u16 = 3702;
@@ -542,7 +544,7 @@ pub struct DiscoverOptions {
     pub max_devices: usize,
     /// For a match without any usable address, send a directed `Resolve` to the host it came from.
     pub resolve_missing_xaddrs: bool,
-    /// How long to wait for the answers to those resolves.
+    /// How long to wait for the answers to each of those resolves (more than 0, at most 60 seconds).
     pub resolve_window: Duration,
     /// Also take `Hello` (add) and `Bye` (remove) announcements heard while listening.
     pub accept_announcements: bool,
@@ -578,8 +580,8 @@ pub struct DiscoveredDevice {
     pub urls: Vec<DeviceUrl>,
     /// Advertised addresses that were dropped by the policy (public, host names, malformed).
     pub dropped_xaddrs: usize,
-    /// Where the answering datagram came from.
-    pub from: IpAddr,
+    /// Where the answering datagram came from (an IPv6 link-local peer keeps its scope id).
+    pub from: SocketAddr,
     pub app_sequence: Option<AppSequence>,
 }
 
@@ -616,10 +618,19 @@ enum Expecting<'a> {
 struct Collector<'a> {
     opts: &'a DiscoverOptions,
     report: DiscoveryReport,
+    /// Per endpoint address, the sequence of the last accepted `Bye` (or, if it carried none, of
+    /// the device it removed). Kept for the rest of the run so that a replayed or reordered older
+    /// message cannot bring the device back.
+    byes: Vec<(String, AppSequence)>,
 }
 
 impl Collector<'_> {
-    fn add(&mut self, target: Target, seq: Option<AppSequence>, from: IpAddr) {
+    fn add(&mut self, target: Target, seq: Option<AppSequence>, from: SocketAddr) {
+        let gone = self.byes.iter().find(|(a, _)| a.eq_ignore_ascii_case(&target.address)).map(|(_, s)| s);
+        if matches!((&seq, gone), (Some(n), Some(g)) if !n.supersedes(g)) {
+            self.report.ignored.stale += 1;
+            return;
+        }
         let (urls, dropped_xaddrs) = target.device_urls();
         if let Some(existing) = self.report.devices.iter_mut().find(|d| d.target.address.eq_ignore_ascii_case(&target.address)) {
             let newer_seq = match (&seq, &existing.app_sequence) {
@@ -666,18 +677,18 @@ impl Collector<'_> {
             (Body::ProbeMatches(targets), Expecting::Probe(id)) if correlated(id) => {
                 for t in targets {
                     if self.opts.query.matches(&t) {
-                        self.add(t, msg.header.app_sequence.clone(), d.from.ip());
+                        self.add(t, msg.header.app_sequence.clone(), d.from);
                     } else {
                         self.report.ignored.unmatched += 1;
                     }
                 }
             }
             (Body::ResolveMatches(Some(t)), Expecting::Resolve(id, address)) if correlated(id) && t.address.eq_ignore_ascii_case(address) => {
-                self.add(t, msg.header.app_sequence, d.from.ip());
+                self.add(t, msg.header.app_sequence, d.from);
             }
             (Body::Hello(t), _) if self.opts.accept_announcements => {
                 if self.opts.query.matches(&t) {
-                    self.add(t, msg.header.app_sequence, d.from.ip());
+                    self.add(t, msg.header.app_sequence, d.from);
                 } else {
                     self.report.ignored.unmatched += 1;
                 }
@@ -685,6 +696,7 @@ impl Collector<'_> {
             (Body::Bye(t), _) if self.opts.accept_announcements => {
                 let seq = msg.header.app_sequence;
                 let mut stale = false;
+                let mut removed = None;
                 self.report.devices.retain(|dev| {
                     if !dev.target.address.eq_ignore_ascii_case(&t.address) {
                         return true;
@@ -696,13 +708,26 @@ impl Collector<'_> {
                         _ => true,
                     };
                     stale |= !newer;
+                    if newer {
+                        removed.clone_from(&dev.app_sequence);
+                    }
                     !newer
                 });
                 if stale {
                     self.report.ignored.stale += 1;
+                } else if let Some(gone) = seq.or(removed) {
+                    self.remember_bye(&t.address, gone);
                 }
             }
             _ => self.report.ignored.unrelated += 1,
+        }
+    }
+
+    fn remember_bye(&mut self, address: &str, seq: AppSequence) {
+        if let Some(known) = self.byes.iter_mut().find(|(a, _)| a.eq_ignore_ascii_case(address)) {
+            known.1 = seq;
+        } else if self.byes.len() < MAX_BYES {
+            self.byes.push((address.to_owned(), seq));
         }
     }
 }
@@ -740,13 +765,16 @@ pub fn discover<S: DiscoverySocket + ?Sized>(socket: &S, opts: &DiscoverOptions)
     if !(1..=5).contains(&opts.probe_sends) || !(1..=1024).contains(&opts.max_devices) {
         return Err(Error::Invalid("discovery: probe_sends is 1 to 5 and max_devices 1 to 1024".into()));
     }
+    if opts.resolve_missing_xaddrs && (opts.resolve_window.is_zero() || opts.resolve_window > Duration::from_secs(60)) {
+        return Err(Error::Invalid("discovery resolve window: use more than 0 and at most 60 seconds".into()));
+    }
     check_cancel(opts)?;
     let id = new_uuid();
     let bytes = probe(&id, &opts.query);
     if bytes.len() > MAX_DATAGRAM {
         return Err(Error::TooLarge("the probe", MAX_DATAGRAM));
     }
-    let mut c = Collector { opts, report: DiscoveryReport::default() };
+    let mut c = Collector { opts, report: DiscoveryReport::default(), byes: Vec::new() };
     let start = Instant::now();
     for i in 0..opts.probe_sends {
         check_cancel(opts)?;
@@ -760,15 +788,24 @@ pub fn discover<S: DiscoverySocket + ?Sized>(socket: &S, opts: &DiscoverOptions)
             .devices
             .iter()
             .filter(|d| d.urls.is_empty())
-            .map(|d| (d.target.address.clone(), SocketAddr::new(d.from, DISCOVERY_PORT)))
+            .map(|d| {
+                // Same host and (link-local) scope id, at the discovery port.
+                let mut to = d.from;
+                to.set_port(DISCOVERY_PORT);
+                (d.target.address.clone(), to)
+            })
             .take(MAX_RESOLVES)
             .collect();
         for (address, to) in pending {
             check_cancel(opts)?;
             let rid = new_uuid();
             let Ok(dest) = Destination::unicast(to) else { continue };
-            socket.send(&dest, resolve(&rid, &address).as_bytes())?;
-            listen(socket, Instant::now() + opts.resolve_window, &mut c, &Expecting::Resolve(&rid, &address))?;
+            // A host that cannot be reached is skipped: it must not cost the devices already found.
+            if socket.send(&dest, resolve(&rid, &address).as_bytes()).is_err() {
+                continue;
+            }
+            let until = Instant::now().checked_add(opts.resolve_window).ok_or_else(|| Error::Invalid("discovery resolve window".into()))?;
+            listen(socket, until, &mut c, &Expecting::Resolve(&rid, &address))?;
         }
     }
     Ok(c.report)
@@ -1091,7 +1128,7 @@ mod tests {
         assert_eq!(d.target.address, "urn:uuid:p1");
         assert_eq!(d.urls.iter().map(DeviceUrl::as_url).collect::<Vec<_>>(), ["http://10.0.0.5:5357/dev"]);
         assert_eq!(d.dropped_xaddrs, 1);
-        assert_eq!(d.from, peer(5).ip());
+        assert_eq!(d.from, peer(5));
         // Two probe sends answered twice: still one device, and the repeat is not "stale" noise only.
         let sent = socket.sent();
         assert_eq!(sent.len(), 2);
@@ -1263,7 +1300,12 @@ mod tests {
         assert!(bad(DiscoverOptions { probe_sends: 0, ..Default::default() }));
         assert!(bad(DiscoverOptions { probe_sends: 6, ..Default::default() }));
         assert!(bad(DiscoverOptions { max_devices: 0, ..Default::default() }));
+        assert!(bad(DiscoverOptions { resolve_window: Duration::ZERO, ..Default::default() }));
+        assert!(bad(DiscoverOptions { resolve_window: Duration::MAX, ..Default::default() }));
         assert!(socket.sent().is_empty(), "invalid options send nothing");
+        // The resolve window only matters when resolving is on.
+        let off = DiscoverOptions { probe_sends: 1, resolve_missing_xaddrs: false, resolve_window: Duration::MAX, ..Default::default() };
+        assert!(discover(&FakeSocket::new(), &off).is_ok());
         let token = CancelToken::new();
         token.cancel();
         assert_eq!(discover(&socket, &DiscoverOptions { cancel: Some(token), ..Default::default() }), Err(Error::Cancelled));
@@ -1275,6 +1317,74 @@ mod tests {
         }
         let r = discover(&many, &DiscoverOptions { probe_sends: 1, max_devices: 3, ..Default::default() }).unwrap();
         assert_eq!((r.devices.len(), r.ignored.over_limit), (3, 7));
+    }
+
+    /// A [`FakeSocket`] whose unicast sends to one address fail.
+    struct FailingUnicast {
+        inner: FakeSocket,
+        fail_to: SocketAddr,
+    }
+
+    impl DiscoverySocket for FailingUnicast {
+        fn send(&self, to: &Destination, payload: &[u8]) -> Result<()> {
+            if *to == Destination::Unicast(self.fail_to) {
+                return Err(Error::transport(crate::error::TransportKind::Unreachable, "no route"));
+            }
+            self.inner.send(to, payload)
+        }
+
+        fn recv(&self, deadline: Instant) -> Result<Option<Datagram>> {
+            self.inner.recv(deadline)
+        }
+    }
+
+    #[test]
+    fn a_failed_resolve_send_skips_that_device_and_keeps_the_others() {
+        let socket = FailingUnicast {
+            inner: socket_with(vec![
+                FakeResponder::new(target("a", print_dev(), &[]), peer(5)),
+                FakeResponder::new(target("b", print_dev(), &[]), peer(6)),
+                FakeResponder::new(target("c", print_dev(), &["http://10.0.0.7/x"]), peer(7)),
+            ]),
+            fail_to: peer(5),
+        };
+        let opts = DiscoverOptions { probe_sends: 1, resolve_window: Duration::from_millis(10), ..Default::default() };
+        let r = discover(&socket, &opts).unwrap();
+        assert_eq!(r.devices.len(), 3, "{r:?}");
+        let sent = socket.inner.sent();
+        assert!(sent.iter().any(|(dest, _)| *dest == Destination::Unicast(peer(6))), "the resolve after the failed one is still sent");
+    }
+
+    #[test]
+    fn a_replayed_hello_after_a_bye_does_not_bring_the_device_back() {
+        let t = target("h", print_dev(), &["http://10.0.0.7/x"]);
+        let opts = DiscoverOptions { probe_sends: 1, accept_announcements: true, ..Default::default() };
+        let run = |last: &AppSequence| {
+            let socket = FakeSocket::new();
+            socket.push(Datagram { from: peer(7), payload: hello("m1", &AppSequence::new(1, 1), &t).into_bytes() });
+            socket.push(Datagram { from: peer(7), payload: bye("m2", &AppSequence::new(1, 2), &t).into_bytes() });
+            socket.push(Datagram { from: peer(7), payload: hello("m3", last, &t).into_bytes() });
+            discover(&socket, &opts).unwrap()
+        };
+        let replayed = run(&AppSequence::new(1, 1));
+        assert!(replayed.devices.is_empty(), "{replayed:?}");
+        assert_eq!(replayed.ignored.stale, 1);
+        assert_eq!(run(&AppSequence::new(2, 1)).devices.len(), 1, "a new instance comes back");
+        assert_eq!(run(&AppSequence::new(1, 3)).devices.len(), 1, "a later message of the same instance comes back");
+    }
+
+    #[test]
+    fn a_link_local_responder_is_resolved_on_its_own_interface() {
+        use std::net::{Ipv6Addr, SocketAddrV6};
+        let from = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 5), 50_000, 0, 7));
+        let socket = socket_with(vec![FakeResponder::new(target("ll", print_dev(), &[]), from)]);
+        let r = discover(&socket, &DiscoverOptions { probe_sends: 1, resolve_window: Duration::from_millis(10), ..Default::default() }).unwrap();
+        assert_eq!(r.devices.len(), 1, "{r:?}");
+        assert_eq!(r.devices[0].from, from);
+        let sent = socket.sent();
+        assert_eq!(sent.len(), 2);
+        let want = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 5), DISCOVERY_PORT, 0, 7));
+        assert_eq!(sent[1].0, Destination::Unicast(want));
     }
 
     #[test]

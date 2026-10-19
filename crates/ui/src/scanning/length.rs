@@ -56,6 +56,7 @@ pub enum LengthAvailability {
 }
 
 impl LengthAvailability {
+    /// Whether the option can be chosen, including when the scanner has not confirmed it.
     pub fn is_enabled(self) -> bool {
         !matches!(self, Self::Unavailable(_))
     }
@@ -116,6 +117,7 @@ pub struct LengthLabels<'a> {
 }
 
 impl<'a> LengthLabels<'a> {
+    /// The caption of an option.
     pub fn option(&self, value: PageLength) -> &'a str {
         match value {
             PageLength::Driver => self.driver,
@@ -125,6 +127,7 @@ impl<'a> LengthLabels<'a> {
         }
     }
 
+    /// The text explaining why an option is disabled.
     pub fn reason(&self, reason: LengthReason) -> &'a str {
         match reason {
             LengthReason::NoPageSize => self.no_page_size,

@@ -27,6 +27,8 @@ impl State {
         response
     }
 
+    /// Draws the scanner combo box, the refresh button, and the progress or retry control for the choices read.
+    /// A refresh or retry that starts is recorded in `response`.
     fn device_row(&mut self, ui: &mut egui::Ui, labels: &Labels<'_>, discover: &Discover, load_choices: &LoadChoices, response: &mut Response) {
         ui.horizontal_wrapped(|ui| {
             let caption = ui.label(labels.scanner);
@@ -65,6 +67,7 @@ impl State {
         });
     }
 
+    /// Draws the source, colour, resolution, page and length rows for `choices`, editing the settings in place.
     fn controls(&mut self, ui: &mut egui::Ui, labels: &Labels<'_>, choices: &Choices) {
         let warnings = self.warnings.clone();
         let settings = &mut self.settings;

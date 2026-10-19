@@ -76,6 +76,7 @@ pub enum Preset {
 impl Preset {
     pub const ALL: [Preset; 4] = [Preset::DocumentText, Preset::ColorDocument, Preset::BlackAndWhite, Preset::Photo];
 
+    /// The colour mode this preset selects.
     fn color(self) -> Color {
         match self {
             Preset::DocumentText => Color::Gray,
@@ -84,6 +85,7 @@ impl Preset {
         }
     }
 
+    /// The resolution this preset selects from the `listed` ones, or `None` when none are listed.
     fn dpi(self, listed: &[u32]) -> Option<u32> {
         match self {
             Preset::Photo => photo_dpi(listed),
@@ -171,6 +173,7 @@ impl Choices {
         self.resolve(source) != Source::Glass && self.feeder.is_enabled()
     }
 
+    /// The most pages one request may ask for: the largest value the device offers, capped at `MAX_PAGES`.
     fn page_limit(&self) -> u32 {
         match self.max_pages.choices() {
             Some(Offered::Range { max, .. }) => (*max).clamp(1, MAX_PAGES),
@@ -261,6 +264,8 @@ fn unit_sent<T>(unit: &Capability<()>, value: T) -> Sent<T> {
     }
 }
 
+/// What to send for `value` given what `cap` offers: omitted when nothing fits, a hint when the capability is
+/// unconfirmed, else the value clamped into what the device listed.
 fn value_sent<T: PartialOrd + Clone>(cap: &Capability<T>, value: &T) -> Sent<T> {
     match (cap.clamp_to_supported(value), cap.is_supported()) {
         (None, _) => Sent::Omitted,
@@ -290,6 +295,7 @@ impl<T> Sent<T> {
         }
     }
 
+    /// Whether the value is only a hint the backend may ignore.
     pub fn is_hint(&self) -> bool {
         matches!(self, Sent::Hint(_))
     }
@@ -461,6 +467,7 @@ fn base_name(name: &str) -> &str {
     trimmed
 }
 
+/// Whether two device names are the same once the trailing connection tag is dropped, ignoring case.
 fn same_base_name(a: &str, b: &str) -> bool {
     let (a, b) = (base_name(a), base_name(b));
     !a.is_empty() && a.to_lowercase() == b.to_lowercase()
@@ -491,6 +498,7 @@ pub fn default_scanner_id(scanners: &[Scanner]) -> Option<String> {
     both.or_else(|| scanners.first()).map(|item| item.id.clone())
 }
 
+/// The resolution for document presets: 300 dpi, else 200, else the first one listed.
 fn preferred_dpi(listed: &[u32]) -> Option<u32> {
     [300, 200].into_iter().find(|dpi| listed.contains(dpi)).or_else(|| listed.first().copied())
 }
@@ -538,6 +546,7 @@ pub struct State {
 }
 
 impl State {
+    /// The listed scanners, in the order the backend returned them.
     pub fn scanners(&self) -> &[Scanner] {
         &self.scanners
     }
@@ -547,10 +556,12 @@ impl State {
         self.scanners.iter().find(|s| s.id == self.settings.scanner)
     }
 
+    /// Whether a scanner listing is in progress.
     pub fn loading(&self) -> bool {
         self.loading
     }
 
+    /// Whether the selected scanner's choices are being read.
     pub fn checking(&self) -> bool {
         self.details == DetailsState::Loading
     }
@@ -560,14 +571,17 @@ impl State {
         self.warnings = warnings;
     }
 
+    /// The device's current status warnings.
     pub fn warnings(&self) -> &[Warning] {
         &self.warnings
     }
 
+    /// How reading the selected scanner's choices has gone.
     pub fn details(&self) -> &DetailsState {
         &self.details
     }
 
+    /// The message of a failed choices read, `None` in any other state.
     pub fn details_error(&self) -> Option<&str> {
         match &self.details {
             DetailsState::Failed(error) => Some(error),
@@ -656,12 +670,14 @@ impl State {
         self.repaint_if_pending(ctx);
     }
 
+    /// Schedules another frame shortly while a listing or choices read is still waiting for its result.
     fn repaint_if_pending(&self, ctx: &egui::Context) {
         if self.list_rx.is_some() || self.details_rx.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 
+    /// Starts a listing and returns its generation; `None` when one is already running.
     fn begin_list(&mut self) -> Option<u64> {
         if self.loading {
             return None;
@@ -710,6 +726,8 @@ impl State {
         Some(self.details_generation)
     }
 
+    /// Starts a new choices read for the selection after a failure and returns its generation; `None` when the last
+    /// read did not fail.
     fn retry_details(&mut self) -> Option<u64> {
         if !matches!(self.details, DetailsState::Failed(_)) {
             return None;

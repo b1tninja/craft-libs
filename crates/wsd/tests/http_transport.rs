@@ -10,10 +10,12 @@ use craft_wsd::http::HttpTransport;
 use craft_wsd::testing::{Server, raw_response};
 use craft_wsd::{DeviceUrl, Error, Request, RetrySafety, Stage, Transport, TransportKind};
 
+/// The `/ws` endpoint of `server`.
 fn url(server: &Server) -> DeviceUrl {
     DeviceUrl::parse(&server.url("/ws")).unwrap()
 }
 
+/// A small SOAP request with a five-second timeout and a 64 KiB reply cap.
 fn request() -> Request {
     Request {
         content_type: "application/soap+xml".into(),
@@ -185,10 +187,12 @@ fn nothing_listening_is_refused_at_the_connect_stage() {
     assert_eq!(e.retry_safety(false), RetrySafety::Safe, "nothing was sent, so even a submit may be repeated");
 }
 
+/// A one-byte `status` reply with the extra raw `headers` (each ending in CRLF).
 fn reply_with(status: u16, headers: &str) -> Vec<u8> {
     format!("HTTP/1.1 {status} X\r\n{headers}Content-Type: text/plain\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx").into_bytes()
 }
 
+/// The `Retry-After` wait the transport reads from a 503 reply carrying `headers`.
 fn retry_after_of(headers: &'static str) -> Option<Duration> {
     let server = Server::start(move |_| reply_with(503, headers));
     HttpTransport::new().post(&url(&server), request()).unwrap().retry_after

@@ -19,6 +19,7 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
+    /// The value of the first header `name` (case-insensitive).
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
     }
@@ -33,6 +34,8 @@ pub struct Server {
 }
 
 impl Server {
+    /// Bind 127.0.0.1 on an ephemeral port and serve connections one at a time on a background thread: read one
+    /// request, write what `respond` returns, close. Panics if the port cannot be bound.
     pub fn start(respond: impl Fn(&HttpRequest) -> Vec<u8> + Send + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -57,12 +60,14 @@ impl Server {
         Self { port, stop, thread: Some(thread), hits }
     }
 
+    /// `http://127.0.0.1:{port}{path}`.
     pub fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.port)
     }
 }
 
 impl Drop for Server {
+    /// Stop accepting (a connection of our own wakes the accept loop) and join the server thread.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = TcpStream::connect(("127.0.0.1", self.port));
@@ -72,6 +77,8 @@ impl Drop for Server {
     }
 }
 
+/// A complete HTTP/1.1 response with this status, `Content-Type`, a matching `Content-Length` and
+/// `Connection: close`.
 pub fn raw_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
     let mut out =
         format!("HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
@@ -79,6 +86,8 @@ pub fn raw_response(status: u16, content_type: &str, body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Read one request: the headers, then up to `Content-Length` bytes of body. `None` if the client
+/// closes or errors before the headers end.
 fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -169,14 +178,17 @@ pub mod device {
             Self { kind, host: "127.0.0.1".into(), port, state: Mutex::new(State::default()) }
         }
 
+        /// The descriptor of the kind this device plays.
         fn descriptor(&self) -> &'static ServiceDescriptor {
             self.kind.descriptor()
         }
 
+        /// The device endpoint (`/device`), which answers metadata requests only.
         pub fn device_url(&self) -> DeviceUrl {
             DeviceUrl::parse(&format!("http://{}:{}{}", self.host, self.port, Self::DEVICE_PATH)).unwrap()
         }
 
+        /// The hosted-service endpoint (`/service`), which answers metadata and eventing requests.
         pub fn service_url(&self) -> DeviceUrl {
             DeviceUrl::parse(&format!("http://{}:{}{}", self.host, self.port, Self::SERVICE_PATH)).unwrap()
         }
@@ -266,6 +278,8 @@ pub mod device {
                 .collect()
         }
 
+        /// Log the request and answer it as the device would: metadata on either path, eventing on the
+        /// service path, and a sender fault for anything else.
         fn handle(&self, path: &str, request: &Request) -> Result<Response> {
             let text = std::str::from_utf8(&request.body)
                 .map_err(|_| Error::transport(TransportKind::InvalidResponse, "the fake device got a non-text body"))?;
@@ -359,15 +373,19 @@ pub mod device {
         }
     }
 
+    /// The subscription manager reference: `service_url` with the subscription `id` as `wse:Identifier`.
     fn manager_epr(service_url: &str, id: &str) -> EndpointRef {
         EndpointRef::new(service_url).with_parameter(ReferenceParameter::new(ns::WSE, "Identifier", id))
     }
 
+    /// A 200 reply carrying the SOAP envelope `body`.
     fn soap_ok(body: String) -> Response {
         Response { retry_after: None, status: 200, content_type: Some("application/soap+xml".into()), body: body.into_bytes() }
     }
 
     impl Transport for FakeDevice {
+        /// Answer requests to this device's host and port in memory; any other address is refused as if
+        /// nothing listened there. No network is used.
         fn post(&self, url: &DeviceUrl, request: Request) -> Result<Response> {
             if url.host().to_string() != self.host || url.port() != self.port {
                 return Err(Error::transport(TransportKind::Refused, "connection refused (this is not the fake device's address)"));

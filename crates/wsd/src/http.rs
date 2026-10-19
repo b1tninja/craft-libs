@@ -30,6 +30,8 @@ impl Default for HttpTransport {
 }
 
 impl HttpTransport {
+    /// A transport that sends straight to the device: no proxy, no redirects followed, HTTP error
+    /// statuses returned as responses rather than errors, and plain `http` allowed.
     pub fn new() -> Self {
         let config = Agent::config_builder()
             .proxy(None)
@@ -107,6 +109,9 @@ fn retry_after(headers: &ureq::http::HeaderMap, now: SystemTime) -> Option<Durat
 }
 
 impl Transport for HttpTransport {
+    /// POST `request` with only `Content-Type`, `SOAPAction` and `Accept` headers, bounded by the
+    /// request's timeout. Redirects are refused and a body larger than `max_response` is
+    /// [`Error::TooLarge`]; `Retry-After` is read into the response.
     fn post(&self, url: &DeviceUrl, request: Request) -> Result<Response, Error> {
         let mut builder = self
             .agent
@@ -145,6 +150,7 @@ mod tests {
 
     use super::*;
 
+    /// The transport kind and stage an error reports, for compact assertions.
     fn kind_stage(e: &Error) -> (Option<TransportKind>, Stage) {
         (e.transport_kind(), e.stage())
     }
@@ -204,6 +210,7 @@ mod tests {
         assert_eq!(kind_stage(&map_body_error(wrapped)), (Some(T::Timeout), Stage::Reply));
     }
 
+    /// A header map with one `Retry-After` per value (an unrepresentable value becomes empty).
     fn headers(values: &[&str]) -> ureq::http::HeaderMap {
         let mut map = ureq::http::HeaderMap::new();
         for v in values {

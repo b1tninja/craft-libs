@@ -120,6 +120,8 @@ pub fn read_ack_hinted<E: From<Error>>(bytes: &[u8], action: &str, message_id: &
     Ok(())
 }
 
+/// The `Body` and optional `Header` of a SOAP 1.2 envelope; anything else, or a missing `Body`, is a
+/// protocol error.
 fn open<'a, 'i>(envelope: Node<'a, 'i>) -> Result<(Node<'a, 'i>, Option<Node<'a, 'i>>)> {
     if !xml::is(envelope, ns::SOAP, "Envelope") {
         return Err(Error::Protocol("the reply is not a SOAP 1.2 envelope".into()));
@@ -128,6 +130,8 @@ fn open<'a, 'i>(envelope: Node<'a, 'i>) -> Result<(Node<'a, 'i>, Option<Node<'a,
     Ok((body, xml::child(envelope, ns::SOAP, "Header")))
 }
 
+/// Check that the reply's `Action` and `RelatesTo`, where present, match the request. A missing
+/// header or missing blocks are accepted.
 fn check_header(header: Option<Node<'_, '_>>, action: &str, message_id: &str) -> Result<()> {
     let Some(header) = header else { return Ok(()) };
     if let Some(a) = addressing(header, "Action")
@@ -157,6 +161,7 @@ mod tests {
     const ACT: &str = "urn:example:service/DoIt";
     const ACT_RESP: &str = "urn:example:service/DoItResponse";
 
+    /// A reply envelope with `action`, an optional `RelatesTo` of `urn:uuid:{relates}`, and `body`.
     fn reply(action: &str, relates: Option<&str>, body: &str) -> String {
         let rel = relates.map(|r| format!("<wsa:RelatesTo>urn:uuid:{r}</wsa:RelatesTo>")).unwrap_or_default();
         format!(
@@ -166,10 +171,12 @@ mod tests {
         )
     }
 
+    /// What a `DoItResponse` answering the request `id` must look like.
     fn expect(id: &str) -> Expect<'_> {
         Expect { action: ACT_RESP, message_id: id, body_ns: SVC, body_local: "DoItResponse" }
     }
 
+    /// Read `bytes` as the reply to request `id`, ignoring the body content.
     fn read(bytes: &[u8], id: &str) -> Result<()> {
         read_reply(bytes, expect(id), |_| Ok(()))
     }

@@ -75,6 +75,8 @@ impl Expiry {
     }
 }
 
+/// Seconds in a non-negative `xs:duration` (`P1DT2H`, `PT0.5S`); years count 365 days, months 30.
+/// Components out of order, fractions anywhere but seconds, and totals of 1e10 seconds or more are `None`.
 fn parse_duration(t: &str) -> Option<Duration> {
     let rest = t.strip_prefix('P')?;
     let (date, time) = match rest.split_once('T') {
@@ -118,6 +120,7 @@ fn parse_duration(t: &str) -> Option<Duration> {
     (secs.is_finite() && secs < 1e10).then(|| Duration::from_secs_f64(secs))
 }
 
+/// `d` as `PT{secs}S`, with milliseconds as a three-digit fraction when there are any.
 fn format_duration(d: Duration) -> String {
     let ms = d.subsec_millis();
     if ms == 0 { format!("PT{}S", d.as_secs()) } else { format!("PT{}.{ms:03}S", d.as_secs()) }
@@ -133,6 +136,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// The `(year, month, day)` of a day count from 1970-01-01; the inverse of [`days_from_civil`].
 fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
@@ -145,6 +149,8 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
+/// Seconds since the Unix epoch of an `xs:dateTime` with a `Z`, `+hh:mm`/`-hh:mm` or no zone (taken
+/// as UTC). Fractional seconds are accepted and dropped; invalid dates and times are `None`.
 fn parse_datetime(t: &str) -> Option<i64> {
     let (date, time) = t.split_once('T')?;
     let mut d = date.split('-');
@@ -197,6 +203,7 @@ fn parse_datetime(t: &str) -> Option<i64> {
     Some(days_from_civil(y, mo, da) * 86_400 + h * 3600 + mi * 60 + s - offset)
 }
 
+/// `secs` since the Unix epoch as `YYYY-MM-DDThh:mm:ssZ`.
 fn format_datetime(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
@@ -242,6 +249,7 @@ pub struct SubscribeRequest {
 }
 
 impl SubscribeRequest {
+    /// A request delivering to `notify_to`, with no `EndTo`, expiry, filter or extensions.
     pub fn new(notify_to: EndpointRef) -> Self {
         Self { notify_to, end_to: None, expires: None, filter: None, extensions: Vec::new() }
     }
@@ -273,6 +281,7 @@ impl SubscribeRequest {
         Ok(out)
     }
 
+    /// The `Subscribe` call: its actions, expected reply element and body. Fails as [`Self::to_body`] does.
     fn call(&self) -> Result<Call<'static>> {
         Ok(Call::new(ACTION_SUBSCRIBE, ACTION_SUBSCRIBE_RESPONSE)
             .reply_element(ns::WSE, "SubscribeResponse")
@@ -425,6 +434,7 @@ pub struct SubscriptionEnd {
 }
 
 impl SubscriptionEnd {
+    /// The `wse:Identifier` the subscription manager's reference carries, if any.
     pub fn identifier(&self) -> Option<&str> {
         self.manager.parameter(ns::WSE, "Identifier")
     }
@@ -505,6 +515,8 @@ pub fn parse_incoming(bytes: &[u8]) -> Result<Incoming> {
     }))
 }
 
+/// Read a `wse:SubscriptionEnd` body. The manager and `Status` are required; a status that is not one
+/// of the three WS-Eventing values is kept as [`EndStatus::Other`].
 fn read_end(node: Node<'_, '_>) -> Result<SubscriptionEnd> {
     let manager =
         xml::child(node, ns::WSE, "SubscriptionManager").ok_or_else(|| Error::Protocol("SubscriptionEnd has no SubscriptionManager".into()))?;
@@ -545,6 +557,7 @@ pub struct CollectingSink {
 }
 
 impl CollectingSink {
+    /// An empty sink.
     pub fn new() -> Self {
         Self::default()
     }
@@ -554,6 +567,7 @@ impl CollectingSink {
         self.items.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
+    /// Keep `i`; dropped if the lock is poisoned.
     fn push(&self, i: Incoming) {
         if let Ok(mut g) = self.items.lock() {
             g.push(i);
@@ -562,11 +576,13 @@ impl CollectingSink {
 }
 
 impl NotificationSink for CollectingSink {
+    /// Keep a clone of the event; never refuses.
     fn notification(&self, n: &Notification) -> Result<()> {
         self.push(Incoming::Event(n.clone()));
         Ok(())
     }
 
+    /// Keep a clone of the end notice; never refuses.
     fn subscription_end(&self, e: &SubscriptionEnd) -> Result<()> {
         self.push(Incoming::SubscriptionEnd(e.clone()));
         Ok(())
@@ -632,10 +648,12 @@ mod tests {
         }
     }
 
+    /// A subscribe request to a loopback sink carrying one reference parameter.
     fn req() -> SubscribeRequest {
         SubscribeRequest::new(EndpointRef::new("http://127.0.0.1:9000/sink").with_parameter(ReferenceParameter::new("urn:x", "Ctx", "c1")))
     }
 
+    /// `body` inside a root element that declares `wse` and `wsa`, so it parses on its own.
     fn wrap(body: &str) -> String {
         format!("<r xmlns:wse=\"{}\" xmlns:wsa=\"{}\">{body}</r>", ns::WSE, ns::WSA)
     }
@@ -724,6 +742,7 @@ mod tests {
         assert_eq!(EventingFault::from_subcode(&SubCode::default()), None);
     }
 
+    /// An incoming envelope addressed to the test sink with `action`, extra header blocks and `body`.
     fn envelope(action: &str, header_extra: &str, body: &str) -> String {
         format!(
             "<s:Envelope xmlns:s=\"{}\" xmlns:wsa=\"{}\" xmlns:wse=\"{}\"><s:Header><wsa:To>http://127.0.0.1:9000/sink</wsa:To><wsa:Action>{action}</wsa:Action><wsa:MessageID>urn:uuid:m1</wsa:MessageID>{header_extra}</s:Header><s:Body>{body}</s:Body></s:Envelope>",
@@ -814,6 +833,7 @@ mod tests {
         // A sink that refuses makes dispatch fail so the listener can answer with an error status.
         struct Refuse;
         impl NotificationSink for Refuse {
+            /// Refuse every event.
             fn notification(&self, _: &Notification) -> Result<()> {
                 Err(Error::Invalid("full".into()))
             }

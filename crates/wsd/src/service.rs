@@ -52,6 +52,7 @@ const SCAN: ServiceDescriptor = ServiceDescriptor {
 impl ServiceKind {
     pub const ALL: [ServiceKind; 2] = [ServiceKind::Print, ServiceKind::Scan];
 
+    /// The namespace, prefix and type names of this service kind.
     pub const fn descriptor(self) -> &'static ServiceDescriptor {
         match self {
             Self::Print => &PRINT,

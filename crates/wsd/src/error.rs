@@ -178,6 +178,7 @@ pub enum Error {
     NotFound(String),
 }
 
+/// The display text of [`Error::Http`], with the `Retry-After` wait in whole seconds when there is one.
 fn http_text(status: u16, retry_after: Option<Duration>) -> String {
     match retry_after {
         Some(wait) => format!("the device answered HTTP {status} (retry after {}s)", wait.as_secs()),
@@ -336,10 +337,12 @@ mod tests {
     use super::*;
     use crate::fault::{Role, SubCode};
 
+    /// A receiver `Busy` fault in the `urn:x` namespace.
     fn fault() -> Fault {
         Fault::new(Role::Receiver, SubCode::new(Some("urn:x"), "Busy"), "busy", "")
     }
 
+    /// One error of every variant, for tests that must cover them all.
     fn all() -> Vec<Error> {
         let mut all = vec![
             Error::Policy(String::new()),

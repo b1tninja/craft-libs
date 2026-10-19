@@ -621,8 +621,8 @@ impl Backend for WsdBackend {
         JobQueryCaps { list: true, created_time: false, user: true, tag: true, history: true }
     }
 
-    /// `GetActiveJobs` and `GetJobHistory` (two idempotent reads; a printer that refuses the
-    /// history with a fault gives the active jobs alone), and for up to a few summaries that lack a
+    /// `GetActiveJobs` and `GetJobHistory` (two idempotent reads; a service without
+    /// `GetJobHistory` gives the active jobs alone, any other fault is an error), and for up to a few summaries that lack a
     /// name one `GetJobElements` to fill in the name and user. Newest first (highest job id).
     fn list_jobs(&self, printer_native: &str, filter: &JobFilter) -> Result<Vec<RemoteJob>, PrintError> {
         let entry = self.entry(printer_native)?;
@@ -705,16 +705,23 @@ pub struct JobMatch {
     pub status: JobStatus,
 }
 
+/// The printer's job history, or none when it does not offer one (`wsa:ActionNotSupported`: the
+/// service has no GetJobHistory). Any other fault, a busy or broken printer included, is an error:
+/// read as "no history", it would make a finished job look unknown and invite a second print.
+fn history_or_none(history: Result<Vec<model::JobSummary>, WsdError>) -> Result<Vec<model::JobSummary>, PrintError> {
+    match history {
+        Ok(rows) => Ok(rows),
+        Err(WsdError::Fault(f)) if f.code == FaultCode::ActionNotSupported => Ok(Vec::new()),
+        Err(e) => Err(e.print_error(Op::Query)),
+    }
+}
+
 impl WsdBackend {
     /// Every job the printer lists, neutral, newest first.
     fn remote_jobs(&self, entry: &Entry) -> Result<Vec<RemoteJob>, PrintError> {
         let client = self.client(entry);
         let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
-        let history = match client.get_job_history() {
-            Ok(rows) => rows,
-            Err(WsdError::Fault(_)) => Vec::new(),
-            Err(e) => return Err(e.print_error(Op::Query)),
-        };
+        let history = history_or_none(client.get_job_history())?;
         let url = entry.url.as_url();
         let mut seen: Vec<u32> = Vec::new();
         let mut lookups = 0usize;
@@ -794,12 +801,7 @@ impl WsdBackend {
         };
         let user = self.config.user_name.as_str();
         let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
-        // History is best effort when the printer refuses it (a fault), not when the wire fails.
-        let history = match client.get_job_history() {
-            Ok(rows) => rows,
-            Err(WsdError::Fault(_)) => Vec::new(),
-            Err(e) => return Err(e.print_error(Op::Query)),
-        };
+        let history = history_or_none(client.get_job_history())?;
         let url = entry.url.as_url();
         let mut found: Vec<(u32, JobMatch)> = Vec::new();
         for row in active.into_iter().chain(history) {

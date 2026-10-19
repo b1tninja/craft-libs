@@ -69,6 +69,9 @@ pub struct FakeConfig {
     pub fail_send: bool,
     /// CancelJob on a finished job answers `OperationFailed` (as fakeprint does) instead of `JobIdNotFound`.
     pub cancel_ended_is_operation_failed: bool,
+    /// GetJobHistory answers a fault with this sub-code (`prefix:Local`, e.g.
+    /// `wsa:ActionNotSupported` or `wprt:ServerErrorTemporaryError`) instead of the history.
+    pub history_fault: Option<&'static str>,
     /// `PrinterState` and its reasons.
     pub state: &'static str,
     pub state_reasons: Vec<&'static str>,
@@ -93,6 +96,7 @@ impl Default for FakeConfig {
             http_error: None,
             fail_send: false,
             cancel_ended_is_operation_failed: false,
+            history_fault: None,
             state: "Idle",
             state_reasons: Vec::new(),
             media: vec!["iso_a4_210x297mm"],
@@ -429,6 +433,7 @@ impl FakePrinter {
                     _ => flt("Sender", "wprt:ClientErrorJobIdNotFound", "nothing to cancel"),
                 }
             }
+            "GetJobHistory" if cfg.history_fault.is_some() => flt("Receiver", cfg.history_fault.unwrap_or_default(), "the history is not available"),
             "GetActiveJobs" | "GetJobHistory" => {
                 let active = op == "GetActiveJobs";
                 let rows: String = st

@@ -894,6 +894,24 @@ fn reconcile_reports_not_found_and_ambiguity_and_only_matches_this_backends_user
 }
 
 #[test]
+fn a_history_the_printer_cannot_give_right_now_is_an_error_not_an_empty_history() {
+    // A finished job is only in the history. If a busy printer's fault there read as "no history",
+    // reconcile would call the job unknown and a caller would print it again.
+    for busy in ["wprt:ServerErrorTemporaryError", "wprt:ServerErrorInternalError", "wprt:OperationFailed"] {
+        let (_p, b, r) = setup(FakeConfig { history_fault: Some(busy), ..FakeConfig::default() });
+        let submitted = r.submit_job(request(job(URL))).unwrap();
+        let outcome = wait_for_job(&r, &submitted.job.unwrap(), fast()).unwrap();
+        assert!(matches!(outcome, WatchOutcome::Terminal(ref s) if s.state == JobState::Completed), "{outcome:?}");
+        assert!(b.reconcile(URL, "Report").is_err(), "{busy}: an error, not NotFound");
+    }
+    // A service with no GetJobHistory at all: the active jobs are all there is to look at.
+    let (_p, b, r) = setup(FakeConfig { history_fault: Some("wsa:ActionNotSupported"), ending: Ending::Hangs, ..FakeConfig::default() });
+    r.submit_job(request(job(URL))).unwrap();
+    assert!(matches!(b.reconcile(URL, "Report").unwrap(), Reconciled::Found(_)), "the active job is still found");
+    assert_eq!(b.reconcile(URL, "Other").unwrap(), Reconciled::NotFound);
+}
+
+#[test]
 fn an_unknown_outcome_submit_is_never_retried_automatically_but_a_safe_refusal_is() {
     let policy = RetryPolicy::default();
     let cancel = CancelToken::new();

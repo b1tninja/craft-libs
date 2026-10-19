@@ -82,6 +82,8 @@ impl PageLength {
         }
     }
 
+    /// Reads a request value, ignoring case: `driver` (or `default`), `size` (`match`), `auto`, `infer` (`auto-infer`,
+    /// `auto_infer`). Anything else is `None`.
     pub fn parse(text: &str) -> Option<Self> {
         match text.to_ascii_lowercase().as_str() {
             "driver" | "default" => Some(Self::Driver),
@@ -130,6 +132,7 @@ impl LengthSource {
         }
     }
 
+    /// The variant whose wire string (see [`Self::as_str`]) is exactly `text`, or `None`.
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|value| value.as_str() == text)
     }
@@ -160,10 +163,12 @@ impl LengthRecord {
         Self { source, length_mils: mils_of(height, dpi_y), approximate: source == LengthSource::Inferred }
     }
 
+    /// The length in inches, or `None` when it could not be worked out (no rows or no vertical resolution).
     pub fn length_inches(&self) -> Option<f64> {
         self.length_mils.map(|mils| f64::from(mils) / 1000.0)
     }
 
+    /// The length in millimetres, or `None` when it could not be worked out.
     pub fn length_mm(&self) -> Option<f64> {
         self.length_mils.map(|mils| f64::from(mils) * 0.0254)
     }
@@ -244,6 +249,8 @@ impl InferOptions {
 }
 
 impl Default for InferOptions {
+    /// The measured defaults: no tolerance, a 10 mil margin, a 40 mil band, noise floor 200, 5 % noise and a 1 inch
+    /// minimum.
     fn default() -> Self {
         Self { tolerance: 0, margin_mils: 10, band_mils: 40, noise_floor: 200, min_noise_permille: 50, min_length_mils: 1000 }
     }
@@ -279,6 +286,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
+    /// A short sentence saying why nothing was inferred, for logs and error text.
     pub fn describe(self) -> &'static str {
         match self {
             Self::Unreadable => "the page is not an image that can be measured",
@@ -347,6 +355,8 @@ pub fn crop_bottom_bytes(bytes: &[u8], rows: u32) -> Option<Vec<u8>> {
     crop_encoded(bytes, rows)
 }
 
+/// Cuts an uncompressed BMP to its top `rows` rows, rewriting the size, height and (when set) image-size fields.
+/// `None` for compressed or unreadable BMPs and when `rows` is 0 or not less than the height.
 fn crop_bmp(bytes: &[u8], info: &crate::bmp::BmpInfo, rows: u32) -> Option<Vec<u8>> {
     if info.compression != crate::bmp::Compression::Rgb || rows == 0 || rows >= info.height {
         return None;
@@ -376,6 +386,8 @@ fn crop_bmp(bytes: &[u8], info: &crate::bmp::BmpInfo, rows: u32) -> Option<Vec<u
     Some(out)
 }
 
+/// Cuts a PNG, JPEG or TIFF to its top `rows` rows by decoding and re-encoding it in the same format, keeping its
+/// resolution. `None` when it cannot be decoded or `rows` is 0 or not less than the height.
 fn crop_encoded(bytes: &[u8], rows: u32) -> Option<Vec<u8>> {
     use image::ImageEncoder;
     let format = crate::image_format(bytes);
@@ -454,6 +466,8 @@ fn write_tiff(image: &image::DynamicImage, density: Option<crate::density::Densi
     Some(out.into_inner())
 }
 
+/// Writes one TIFF image of colour type `C` to `out`, with the density (dots per inch, two decimals) as inch
+/// resolution tags when known.
 fn tiff_image<C>(
     out: &mut std::io::Cursor<Vec<u8>>,
     width: u32,

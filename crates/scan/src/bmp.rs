@@ -41,10 +41,12 @@ pub struct BmpInfo {
     pub offset_field: usize,
 }
 
+/// The little-endian `u16` at `at`, or `None` when it runs past the end of `bytes`.
 fn le16(bytes: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(bytes.get(at..at.checked_add(2)?)?.try_into().ok()?))
 }
 
+/// The little-endian `u32` at `at`, or `None` when it runs past the end of `bytes`.
 fn le32(bytes: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.get(at..at.checked_add(4)?)?.try_into().ok()?))
 }

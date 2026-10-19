@@ -5,6 +5,7 @@ use crate::bw;
 struct Lcg(u64);
 
 impl Lcg {
+    /// The next 31-bit pseudo-random value.
     fn next(&mut self) -> u32 {
         self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         (self.0 >> 33) as u32
@@ -30,6 +31,7 @@ struct Sheet {
     noisy: bool,
 }
 
+/// The luminance rows of `sheet`: white fill, with the paper area (optionally noisy) and the ink bars drawn in.
 fn luma(sheet: Sheet) -> Vec<u8> {
     let mut rng = Lcg(7);
     let mut pixels = vec![255u8; sheet.width * sheet.height];
@@ -50,6 +52,7 @@ fn luma(sheet: Sheet) -> Vec<u8> {
     pixels
 }
 
+/// An 8-bit grey BMP (identity palette) of `pixels`, with `dpi` in both resolution fields, stored top-down or bottom-up.
 fn bmp_gray(width: usize, height: usize, pixels: &[u8], dpi: u32, top_down: bool) -> Vec<u8> {
     let stride = (width * 8).div_ceil(32) * 4;
     let data_at = 14 + 40 + 1024;
@@ -80,6 +83,7 @@ fn bmp_gray(width: usize, height: usize, pixels: &[u8], dpi: u32, top_down: bool
     out
 }
 
+/// A `Page` around `bytes` that was delivered at `dpi`, with the driver's length record.
 fn page_of(bytes: Vec<u8>, width: usize, height: usize, dpi: u32) -> Page {
     Page {
         bytes,
@@ -252,6 +256,7 @@ fn png_and_tiff_pages_are_inferred_and_cut_in_their_own_format() {
     }
 }
 
+/// `pixels` (8-bit luminance) encoded as a JPEG at `quality`.
 fn jpeg_of(width: usize, height: usize, pixels: &[u8], quality: u8) -> Vec<u8> {
     use image::ImageEncoder;
     let mut out = std::io::Cursor::new(Vec::new());

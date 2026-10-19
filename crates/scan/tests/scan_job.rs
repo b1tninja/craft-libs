@@ -18,14 +18,17 @@ use common::escl_like::{AdfState, ESCL_ID, EsclLike};
 use common::sane_like::SaneLike;
 use common::wia_like::{WIA_ID, WiaLike};
 
+/// A timestamp `secs` seconds in.
 fn t(secs: u64) -> Timestamp {
     Timestamp::from_secs(secs)
 }
 
+/// A feeder request for `pages` pages.
 fn feeder_request(pages: u32) -> ScanSettings {
     ScanSettings { source: Source::Feeder, pages, ..ScanSettings::default() }
 }
 
+/// A 16 by 8 JPEG page whose data is `bytes` zero bytes.
 fn page(bytes: usize) -> Page {
     Page {
         bytes: vec![0; bytes],
@@ -58,6 +61,7 @@ fn scripted(plan: &AttemptPlan, push: usize, source: Source, end: Option<ScanErr
     }
 }
 
+/// An error of `kind` with a native code, as a backend would raise it.
 fn native(kind: InterruptKind) -> ScanError {
     ScanError::native_error(kind, NativeCode::new("test", 1, None), kind.sentence())
 }
@@ -636,6 +640,7 @@ fn a_job_runs_through_a_registry_and_reports_no_tag_support() {
 
 // ---- device_view -------------------------------------------------------------------------------------
 
+/// The state of the indicator `key` in `view`.
 fn state_of(view: &craft_job::DeviceView, key: craft_job::IndicatorKey) -> Option<Tri> {
     view.indicators.iter().find(|i| i.key == key).map(|i| i.state)
 }

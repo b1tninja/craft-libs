@@ -20,6 +20,7 @@ pub struct SaneLike {
 }
 
 impl SaneLike {
+    /// A scanner with `loaded` sheets in the feeder.
     pub fn new(loaded: usize) -> Self {
         Self { loaded, fail_listing: false }
     }

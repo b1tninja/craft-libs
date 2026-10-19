@@ -37,19 +37,23 @@ pub fn image_density(bytes: &[u8]) -> Option<Density> {
     found.and_then(sane)
 }
 
+/// `density` when both axes are finite and within `MIN_DPI..=MAX_DPI`, otherwise `None`.
 fn sane((x, y): Density) -> Option<Density> {
     let ok = |v: f64| v.is_finite() && (MIN_DPI..=MAX_DPI).contains(&v);
     (ok(x) && ok(y)).then_some((x, y))
 }
 
+/// The big-endian `u16` at `at`, or `None` when it runs past the end of `b`.
 fn be16(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes(b.get(at..at.checked_add(2)?)?.try_into().ok()?))
 }
 
+/// The big-endian `u32` at `at`, or `None` when it runs past the end of `b`.
 fn be32(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes(b.get(at..at.checked_add(4)?)?.try_into().ok()?))
 }
 
+/// A resolution in pixels per metre as dots per inch; `None` when either axis is zero.
 fn per_metre((x, y): (u32, u32)) -> Option<Density> {
     (x != 0 && y != 0).then(|| (f64::from(x) * 0.0254, f64::from(y) * 0.0254))
 }
@@ -181,6 +185,7 @@ fn tiff_density(t: &[u8]) -> Option<Density> {
 mod tests {
     use super::*;
 
+    /// A minimal BMP with the given pixel-per-metre fields and info-header size.
     fn bmp(x: i32, y: i32, header: u32) -> Vec<u8> {
         let mut b = vec![0u8; 62];
         b[..2].copy_from_slice(b"BM");
@@ -192,6 +197,7 @@ mod tests {
         b
     }
 
+    /// A minimal PNG; `phys` selects whether it carries a pHYs chunk (with the given unit and x/y values).
     fn png(unit: u8, x: u32, y: u32, phys: bool) -> Vec<u8> {
         let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
         b.extend_from_slice(&13u32.to_be_bytes());
@@ -233,6 +239,8 @@ mod tests {
         b
     }
 
+    /// A minimal TIFF whose first IFD holds XResolution and YResolution (numerator, denominator) and, when given, a
+    /// ResolutionUnit.
     fn tiff(little: bool, unit: Option<u16>, x: (u32, u32), y: (u32, u32)) -> Vec<u8> {
         let w16 = |v: u16| if little { v.to_le_bytes() } else { v.to_be_bytes() };
         let w32 = |v: u32| if little { v.to_le_bytes() } else { v.to_be_bytes() };
@@ -263,6 +271,7 @@ mod tests {
         b
     }
 
+    /// Asserts that `found` is a density within 0.05 dpi of `x` by `y`.
     fn near(found: Option<Density>, x: f64, y: f64) {
         let (fx, fy) = found.expect("a density");
         assert!((fx - x).abs() < 0.05 && (fy - y).abs() < 0.05, "{fx} x {fy}, wanted {x} x {y}");
@@ -342,6 +351,7 @@ mod tests {
 
     use crate::bw::{PageRule, page_for};
 
+    /// A page rule at `dpi`, thresholding to 1 bit when `bw` is set, with no length plan.
     fn rule(dpi: u32, bw: bool) -> PageRule {
         PageRule { dpi, bw_threshold: bw.then_some(128), length: Default::default() }
     }

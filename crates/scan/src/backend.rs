@@ -158,10 +158,12 @@ fn valid_name(name: &str) -> bool {
 }
 
 impl Registry {
+    /// An empty registry; backends are added with [`Self::register`].
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// The registered backends as cloned handles, so callers do not hold the lock while a backend blocks.
     fn snapshot(&self) -> Vec<Arc<dyn Backend>> {
         // Clone the handles out so no lock is held while a backend blocks.
         self.backends.read().unwrap_or_else(PoisonError::into_inner).clone()
@@ -192,10 +194,14 @@ impl Registry {
         !self.snapshot().is_empty()
     }
 
+    /// The backend names joined with ", ", for error messages.
     fn names_text(backends: &[Arc<dyn Backend>]) -> String {
         backends.iter().map(|backend| backend.name()).collect::<Vec<_>>().join(", ")
     }
 
+    /// Runs `ask` on every backend and gathers the results, calling `namespace` on each item with its backend's name.
+    /// A backend that fails is recorded in [`Listing::errors`] and does not stop the others; `Unsupported` only when
+    /// the registry is empty.
     fn aggregate<T>(
         &self,
         ask: impl Fn(&dyn Backend) -> Result<Vec<T>, ScanError>,
@@ -231,6 +237,8 @@ impl Registry {
         self.aggregate(|backend| backend.scanners(), |item, name| item.id = namespaced_id(name, &item.id))
     }
 
+    /// Picks the backend named by the `<backend>:` prefix of `id` and returns it with the native id that follows.
+    /// `Unsupported` for an empty registry; `Failed` when the prefix is missing or names no registered backend.
     fn by_prefix<'a>(backends: &'a [Arc<dyn Backend>], id: &'a str) -> Result<(&'a Arc<dyn Backend>, &'a str), ScanError> {
         if backends.is_empty() {
             return Err(ScanError::Unsupported);

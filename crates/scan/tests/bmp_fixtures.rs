@@ -7,6 +7,8 @@
 use craft_scan::{bmp, bmp_size, bw};
 use std::path::PathBuf;
 
+/// Every `<name>.bmp` in the fixtures folder with its `<name>.rgba` oracle picture, as (name, bmp bytes, rgba bytes),
+/// sorted by name. Empty when the folder is missing.
 fn fixtures() -> Vec<(String, Vec<u8>, Vec<u8>)> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("bmp");
     let mut out = Vec::new();
@@ -23,6 +25,7 @@ fn fixtures() -> Vec<(String, Vec<u8>, Vec<u8>)> {
     out
 }
 
+/// BT.601 luma of an RGB pixel, rounded.
 fn luma(r: u8, g: u8, b: u8) -> u8 {
     u8::try_from((299 * u32::from(r) + 587 * u32::from(g) + 114 * u32::from(b) + 500) / 1000).unwrap_or(255)
 }

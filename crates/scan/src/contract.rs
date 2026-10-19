@@ -61,6 +61,8 @@ macro_rules! wire_text {
 
         #[cfg(feature = "serde")]
         impl<'de> serde::Deserialize<'de> for $ty {
+            /// Reads the wire string; an unknown string is an error unless the type was declared `unknown_reads_as`, in which
+            /// case it reads as that fallback.
             fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
                 let text = <String as serde::Deserialize>::deserialize(deserializer)?;
                 match text.parse::<$ty>() {
@@ -189,6 +191,7 @@ impl InterruptKind {
         }
     }
 
+    /// The variant whose wire string (see `as_str`) is exactly `text`, or `None`.
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|value| value.as_str() == text)
     }
@@ -319,6 +322,7 @@ impl ListDetails {
         }
     }
 
+    /// The variant whose wire string (see `as_str`) is exactly `text`, or `None`.
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|value| value.as_str() == text)
     }
@@ -348,6 +352,7 @@ impl Phase {
         }
     }
 
+    /// The variant whose wire string (see `as_str`) is exactly `text`, or `None`.
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|value| value.as_str() == text)
     }
@@ -476,6 +481,8 @@ pub struct ScanErrorInfo {
 }
 
 impl ScanErrorInfo {
+    /// The wire description of `error`. The phase comes from the larger of `context.pages_received` and the pages the
+    /// error itself reports; `Unsupported` is neither retryable nor resumable.
     pub fn new(error: &ScanError, context: ErrorContext) -> Self {
         let pages = context.pages_received.max(pages_in_error(error));
         let phase = Phase::classify(pages, context.mid_page);
@@ -526,6 +533,7 @@ impl NativeCodeExt for NativeCode {
     }
 }
 
+/// `text` as a JSON string literal, escaped.
 fn json_string(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
@@ -570,6 +578,7 @@ impl ProgressToken {
 
 // ---- one JSON dump of every list (read by the binding drift tests) ------------------------------------
 
+/// The strings as a JSON array of string literals.
 fn list_json(values: impl Iterator<Item = &'static str>) -> String {
     let items: Vec<String> = values.map(json_string).collect();
     format!("[{}]", items.join(","))
@@ -604,6 +613,8 @@ mod tests {
     use super::*;
     use crate::interrupt_kind;
 
+    /// Checks that `as_str` gives every value in `all` a unique non-empty wire string that parses back to the value and
+    /// matches its `Display`.
     fn round_trips<T: Copy + PartialEq + fmt::Debug + FromStr<Err = ParseWireError> + fmt::Display>(all: &[T], as_str: fn(T) -> &'static str) {
         let mut seen = Vec::new();
         for value in all {

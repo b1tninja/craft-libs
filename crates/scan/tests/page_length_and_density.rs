@@ -59,6 +59,7 @@ fn only_an_inferred_length_is_approximate() {
 
 // ---- containers ----------------------------------------------------------------------------------
 
+/// A grey image whose pixel at (x, y) is `value(x, y)`.
 fn gray(width: u32, height: u32, value: impl Fn(u32, u32) -> u8) -> image::GrayImage {
     image::GrayImage::from_fn(width, height, |x, y| image::Luma([value(x, y)]))
 }
@@ -93,6 +94,7 @@ fn bmp_at(width: u32, height: u32, dpi_x: u32, dpi_y: u32, value: impl Fn(u32, u
     out
 }
 
+/// `image` as a JPEG at quality 95 with the given density in dots per inch.
 fn jpeg_at(image: &image::GrayImage, dpi_x: u16, dpi_y: u16) -> Vec<u8> {
     use image::ImageEncoder;
     let mut out = Vec::new();
@@ -102,6 +104,7 @@ fn jpeg_at(image: &image::GrayImage, dpi_x: u16, dpi_y: u16) -> Vec<u8> {
     out
 }
 
+/// CRC-32 (IEEE) of `bytes`, as PNG chunks use.
 fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for byte in bytes {
@@ -146,6 +149,7 @@ fn tiff_at(image: &image::GrayImage, dpi_x: u32, dpi_y: u32) -> Vec<u8> {
     out.into_inner()
 }
 
+/// A rule at `dpi` that leaves the page as delivered.
 fn plain_rule(dpi: u32) -> PageRule {
     PageRule { dpi, bw_threshold: None, length: LengthPlan::default() }
 }
@@ -203,6 +207,7 @@ fn feeder_page(width: u32, height: u32, sheet_rows: u32) -> impl Fn(u32, u32) ->
     }
 }
 
+/// A rule at `dpi` that infers the sheet end with the default options.
 fn infer_rule(dpi: u32) -> PageRule {
     PageRule { dpi, bw_threshold: None, length: LengthPlan { source: LengthSource::Driver, infer: Some(InferOptions::default()) } }
 }

@@ -66,6 +66,7 @@ static NEXT_LOCAL_ID: AtomicU64 = AtomicU64::new(1);
 pub struct LocalJobId(u64);
 
 impl LocalJobId {
+    /// The numeric id, for logs and bindings; [`Display`](fmt::Display) prints it as `local-<n>`.
     pub const fn get(self) -> u64 {
         self.0
     }
@@ -278,6 +279,7 @@ pub struct ScanJobConfig {
 }
 
 impl Default for ScanJobConfig {
+    /// A job titled "Scan" with the default retry policy, a feeder and a glass, no tag support and a 32-record timeline.
     fn default() -> Self {
         Self {
             title: "Scan".to_string(),
@@ -295,12 +297,14 @@ impl Default for ScanJobConfig {
 }
 
 impl ScanJobConfig {
+    /// Sets the title shown for the job.
     #[must_use]
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = title.into();
         self
     }
 
+    /// Sets the retry budget.
     #[must_use]
     pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
@@ -317,30 +321,35 @@ impl ScanJobConfig {
         self
     }
 
+    /// Sets which sources the scanner has and, when known, whether the feeder holds paper.
     #[must_use]
     pub fn with_capabilities(mut self, has_feeder: bool, has_glass: bool, feeder_ready: Option<bool>) -> Self {
         (self.has_feeder, self.has_glass, self.feeder_ready) = (has_feeder, has_glass, feeder_ready);
         self
     }
 
+    /// Sets how the device accepts job tags.
     #[must_use]
     pub fn with_tag_support(mut self, support: TagSupport) -> Self {
         self.tag_support = support;
         self
     }
 
+    /// Sets the seed for the retry delay jitter, so delays are reproducible.
     #[must_use]
     pub fn with_jitter_seed(mut self, seed: u64) -> Self {
         self.jitter_seed = seed;
         self
     }
 
+    /// Sets the creation time reported for the job.
     #[must_use]
     pub fn with_created(mut self, created: Timestamp) -> Self {
         self.created = created;
         self
     }
 
+    /// Sets how many attempt records the timeline keeps (at least 1; older ones are dropped).
     #[must_use]
     pub fn with_timeline_len(mut self, len: usize) -> Self {
         self.timeline_len = len.max(1);
@@ -596,6 +605,7 @@ impl ScanJobJournal {
         }
     }
 
+    /// The schema version a snapshot is written with by this build.
     #[cfg(feature = "serde")]
     fn current_version() -> u32 {
         Self::VERSION
@@ -700,6 +710,8 @@ struct Reading {
     unknown: bool,
 }
 
+/// Classifies `kind` for the retry rules: whether a person can cure it, whether the transfer may have done more
+/// than reported (`kept` pages in hand, `mid_page` set when one was part-way), and whether waiting alone may clear it.
 fn read_failure(kind: InterruptKind, kept: usize, mid_page: bool) -> Reading {
     use InterruptKind as K;
     let person = matches!(
@@ -714,6 +726,7 @@ fn read_failure(kind: InterruptKind, kept: usize, mid_page: bool) -> Reading {
     Reading { transient, person, unknown }
 }
 
+/// The page count the job expects, or `None` when it is open-ended (`pages` is 0) or two-sided.
 fn expected_from(settings: &ScanSettings) -> Option<u32> {
     (settings.pages > 0 && !settings.duplex).then_some(settings.pages)
 }
@@ -803,14 +816,17 @@ impl ScanJob {
         job
     }
 
+    /// The id of this job; it does not change across attempts.
     pub fn id(&self) -> LocalJobId {
         self.id
     }
 
+    /// The current state.
     pub fn state(&self) -> ScanJobState {
         self.state
     }
 
+    /// The request the job was created with.
     pub fn settings(&self) -> &ScanSettings {
         &self.settings
     }
@@ -848,6 +864,8 @@ impl ScanJob {
         self.begin(at, how)
     }
 
+    /// Shared body of the two `begin_attempt` entry points. Refuses with [`ScanJobError::NotStartable`] unless the job
+    /// is waiting, interrupted, needs attention or failed; resolves the source and applies `how` to the kept pages.
     fn begin(&mut self, at: Timestamp, how: Continuation) -> Result<AttemptPlan, ScanJobError> {
         match self.state {
             ScanJobState::Preparing | ScanJobState::Interrupted | ScanJobState::NeedsAttention | ScanJobState::Terminal(Outcome::Failed) => {}
@@ -938,6 +956,7 @@ impl ScanJob {
         })
     }
 
+    /// Ends the job as failed for an error found before any scan was attempted (nothing was sent to the scanner).
     fn fail_without_attempt(&mut self, at: Timestamp, error: &ScanError) {
         let info = ScanErrorInfo::new(error, ErrorContext::default());
         self.last_error = Some(AttemptFailure { info, safety: RetrySafety::Safe, transient: false });
@@ -970,6 +989,8 @@ impl ScanJob {
         self.absorb(pages, source)
     }
 
+    /// Keeps `pages` as the next numbered pages of the running attempt, tagged with `source`, and returns how many.
+    /// 0 when no attempt is running.
     fn absorb(&mut self, pages: Vec<Page>, source: Option<Source>) -> usize {
         let Some(running) = self.running.as_mut() else { return 0 };
         let n = pages.len();
@@ -1074,6 +1095,8 @@ impl ScanJob {
         }
     }
 
+    /// Settles an attempt that returned `Ok` with `kept` pages: failed when none arrived, completed with a warning when
+    /// fewer than expected, otherwise completed.
     fn settle_ok(&mut self, kept: usize) -> (AttemptOutcome, ScanJobState, RetryAdvice, Option<AttemptFailure>) {
         if kept == 0 {
             let error = ScanError::Failed("the scanner transferred no pages".into());
@@ -1090,6 +1113,8 @@ impl ScanJob {
         }
     }
 
+    /// Settles an attempt that ended in `error` with `kept` pages in hand (`gained` of them from this attempt): reads the
+    /// failure, chooses between the terminal outcomes, the glass fallback and an interruption, and sets the advice.
     fn settle_error(
         &mut self,
         error: &ScanError,
@@ -1205,6 +1230,7 @@ impl ScanJob {
         Ok(outcome)
     }
 
+    /// Ends the job in `outcome` at `at`, dropping the running attempt and clearing the error only for a clean completion.
     fn finish_with(&mut self, at: Timestamp, outcome: Outcome) {
         self.running = None;
         self.state = ScanJobState::Terminal(outcome);
@@ -1318,6 +1344,7 @@ impl ScanJob {
         view
     }
 
+    /// Appends an attempt record, dropping the oldest ones beyond the configured timeline length.
     fn push_record(&mut self, record: AttemptRecord) {
         self.timeline.push(record);
         let over = self.timeline.len().saturating_sub(self.config.timeline_len.max(1));
@@ -1326,6 +1353,7 @@ impl ScanJob {
         }
     }
 
+    /// Applies `change` to the newest record of attempt `number`, if the timeline still holds it.
     fn update_record(&mut self, number: u32, change: impl FnOnce(&mut AttemptRecord)) {
         if let Some(record) = self.timeline.iter_mut().rev().find(|r| r.number == number) {
             change(record);
@@ -1336,14 +1364,18 @@ impl ScanJob {
 /// The [`JobView`] reason while the latest attempt is one where the backend used the glass instead of the feeder.
 pub const AUTO_FELL_BACK_REASON: &str = "auto: used the glass because the feeder gave no pages";
 
+/// `n` as `u32`, saturating at `u32::MAX`.
 fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+/// The warning for a job that kept fewer pages than it was asked for.
 fn shortfall(kept: usize, wanted: u32) -> String {
     format!("{kept} of {wanted} pages were scanned")
 }
 
+/// The per-page record kept for `page` as the `number`th page of the job, scanned in `attempt`. `Auto` is not a
+/// source a page can come from, so it is recorded as `None`.
 fn info_of(page: &Page, number: u32, attempt: u32, source: Option<Source>) -> PageInfo {
     PageInfo {
         number,

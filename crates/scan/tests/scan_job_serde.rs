@@ -14,10 +14,12 @@ use serde::de::DeserializeOwned;
 
 use common::sane_like::SaneLike;
 
+/// A timestamp `secs` seconds in.
 fn t(secs: u64) -> Timestamp {
     Timestamp::from_secs(secs)
 }
 
+/// Serialises `value`, checks it reads back equal, and returns the JSON.
 fn round<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: &T) -> String {
     let text = serde_json::to_string(value).expect("serialise");
     let back: T = serde_json::from_str(&text).expect("deserialise");
@@ -51,10 +53,12 @@ fn job_state_names_are_stable() {
     assert_eq!(round(&ExitClass::NeedsAttention), "\"needs_attention\"");
 }
 
+/// A request for `pages` pages from the feeder of the SANE-like device.
 fn feeder(pages: u32) -> ScanSettings {
     ScanSettings { device: "sane:x".into(), source: Source::Feeder, pages, ..ScanSettings::default() }
 }
 
+/// A 40-page job that was interrupted after the SANE-like device ran out of paper.
 fn interrupted_job() -> ScanJob {
     let mut job = ScanJob::new(feeder(40), ScanJobConfig::default().with_title("Archive").with_created(t(5)));
     let plan = job.begin_attempt(t(10)).expect("attempt");
@@ -125,6 +129,7 @@ fn an_unknown_outcome_survives_the_journal() {
     assert_eq!(again.page_count(), 3);
 }
 
+/// A 16 by 8 JPEG page with 8 bytes of data.
 fn page() -> craft_scan::Page {
     craft_scan::Page {
         bytes: vec![0; 8],

@@ -76,6 +76,7 @@ pub enum Color {
 }
 
 impl Source {
+    /// The wire name: `auto`, `feeder` or `glass`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -84,6 +85,7 @@ impl Source {
         }
     }
 
+    /// Reads a source name; `glass` also accepts `flatbed` and `bed`. Case-sensitive; unknown text is `None`.
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "auto" => Some(Self::Auto),
@@ -114,16 +116,19 @@ impl Source {
         }
     }
 
+    /// Whether this is the document feeder (false for `Auto`).
     pub fn is_feeder(self) -> bool {
         matches!(self, Self::Feeder)
     }
 
+    /// Whether this is the glass (false for `Auto`).
     pub fn is_glass(self) -> bool {
         matches!(self, Self::Glass)
     }
 }
 
 impl Color {
+    /// The wire name: `gray`, `rgb` or `bw`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Gray => "gray",
@@ -141,6 +146,7 @@ impl Color {
         }
     }
 
+    /// Bits per pixel of the delivered image: 1, 8 or 24.
     pub fn depth(self) -> u32 {
         match self {
             Self::BlackAndWhite => 1,
@@ -149,6 +155,7 @@ impl Color {
         }
     }
 
+    /// The colour for a driver `WIA_IPA_DATATYPE` value (0, 2 or 3); `None` for any other value.
     pub fn from_data_type(value: i32) -> Option<Self> {
         match value {
             0 => Some(Self::BlackAndWhite),
@@ -170,6 +177,7 @@ pub enum Rotation {
 }
 
 impl Rotation {
+    /// The wire name: `portrait`, `landscape`, `180` or `270`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Portrait => "portrait",
@@ -179,6 +187,7 @@ impl Rotation {
         }
     }
 
+    /// Reads a rotation name or angle (`portrait`/`0`, `landscape`/`90`, `180`/`upside-down`, `270`/`left`); otherwise `None`.
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "portrait" | "0" => Some(Self::Portrait),
@@ -189,6 +198,7 @@ impl Rotation {
         }
     }
 
+    /// The driver's rotation code (0 to 3), not an angle in degrees.
     pub fn driver(self) -> i32 {
         match self {
             Self::Portrait => 0,
@@ -198,6 +208,7 @@ impl Rotation {
         }
     }
 
+    /// The rotation for a driver code (0 to 3); `None` for any other value.
     pub fn from_driver(value: i32) -> Option<Self> {
         match value {
             0 => Some(Self::Portrait),
@@ -218,6 +229,7 @@ pub struct ValueSpan {
 }
 
 impl ValueSpan {
+    /// Whether `value` lies in `min..=max` and is a whole number of steps above `min` (a `step` of 0 counts as 1).
     pub fn contains(self, value: i32) -> bool {
         if value < self.min || value > self.max {
             return false;
@@ -241,6 +253,7 @@ pub enum Intent {
 }
 
 impl Intent {
+    /// The wire name, e.g. `preview` for [`Self::BestPreview`].
     pub fn name(self) -> &'static str {
         match self {
             Self::None => "none",
@@ -253,6 +266,8 @@ impl Intent {
         }
     }
 
+    /// Reads an intent name, accepting the aliases `rgb`, `grey`, `grayscale`, `ocr`, `best-preview`, `max-quality` and
+    /// `min-size`. Unknown text is `None`.
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "none" => Some(Self::None),
@@ -266,6 +281,7 @@ impl Intent {
         }
     }
 
+    /// The driver's `WIA_IPS_CUR_INTENT` bit value for this intent.
     pub fn driver(self) -> i32 {
         match self {
             Self::None => 0,
@@ -278,6 +294,7 @@ impl Intent {
         }
     }
 
+    /// The intent for a driver bit value; `None` for a combination or any value that is not a single intent.
     pub fn from_driver(value: i32) -> Option<Self> {
         match value {
             0 => Some(Self::None),
@@ -304,6 +321,7 @@ pub enum PageSize {
 }
 
 impl PageSize {
+    /// The wire name, e.g. `business-card`.
     pub fn name(self) -> &'static str {
         match self {
             Self::A4 => "a4",
@@ -315,6 +333,7 @@ impl PageSize {
         }
     }
 
+    /// Reads a page size name; `card` is accepted for `business-card`. Unknown text is `None`.
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "a4" => Some(Self::A4),
@@ -327,6 +346,7 @@ impl PageSize {
         }
     }
 
+    /// The driver's `WIA_IPS_PAGE_SIZE` code, which is not in the order of the variants.
     pub fn driver(self) -> i32 {
         match self {
             Self::A4 => 0,
@@ -338,6 +358,7 @@ impl PageSize {
         }
     }
 
+    /// The page size for a driver code; `None` for a code this crate does not name.
     pub fn from_driver(value: i32) -> Option<Self> {
         match value {
             0 => Some(Self::A4),
@@ -366,6 +387,7 @@ pub enum Connection {
 }
 
 impl Connection {
+    /// The wire name: `usb`, `wsd`, `other` or `unknown`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Usb => "usb",
@@ -469,6 +491,7 @@ pub fn preflight(source: Source, status: Option<HandlingStatus>) -> Result<(), S
 /// [`InterruptKind::BusyOrFeederEmpty`] and report [`InterruptKind::FeederEmpty`] instead.
 pub const BUSY_OR_FEEDER_EMPTY: &str = "The scanner is busy, or the feeder has no paper.";
 
+/// The code [`ProgressToken`] stores for a source: 0 unknown or auto, 1 feeder, 2 glass.
 fn source_code(source: Source) -> u8 {
     match source {
         Source::Auto => 0,
@@ -477,6 +500,7 @@ fn source_code(source: Source) -> u8 {
     }
 }
 
+/// The source for a stored code; `None` for 0 and for any value that is not a source.
 fn source_from_code(code: u8) -> Option<Source> {
     match code {
         1 => Some(Source::Feeder),
@@ -603,10 +627,13 @@ impl PartialEq for CancelToken {
 impl Eq for CancelToken {}
 
 impl CancelToken {
+    /// A token that has not been cancelled and has no canceller registered.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Marks the token cancelled and, when a transfer has registered a canceller, calls it on this thread. Safe to call
+    /// repeatedly and from any thread.
     pub fn request(&self) {
         self.requested.store(true, Ordering::SeqCst);
         // Clone out of the lock so a slow cancel never blocks the worker that clears it.
@@ -616,6 +643,7 @@ impl CancelToken {
         }
     }
 
+    /// Whether [`Self::request`] has been called on this token or a clone of it.
     pub fn is_requested(&self) -> bool {
         self.requested.load(Ordering::SeqCst)
     }
@@ -671,10 +699,12 @@ impl PartialEq for ProgressToken {
 impl Eq for ProgressToken {}
 
 impl ProgressToken {
+    /// A token with no pages, no progress and no source.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Pages pushed so far, including any already taken with [`Self::take_pages`].
     pub fn pages_done(&self) -> usize {
         self.done.load(Ordering::SeqCst)
     }
@@ -687,10 +717,12 @@ impl ProgressToken {
         }
     }
 
+    /// Bytes of the page in flight that have arrived; 0 between pages.
     pub fn bytes_received(&self) -> u64 {
         self.bytes_received.load(Ordering::SeqCst)
     }
 
+    /// The size the page in flight is expected to reach, or `None` when unknown.
     pub fn bytes_expected(&self) -> Option<u64> {
         match self.bytes_expected.load(Ordering::SeqCst) {
             0 => None,
@@ -704,6 +736,7 @@ impl ProgressToken {
         source_from_code(self.source_used.load(Ordering::SeqCst))
     }
 
+    /// Records the source the transfer is using; [`Source::Auto`] is stored as unknown.
     pub fn set_source(&self, source: Source) {
         self.source_used.store(source_code(source), Ordering::SeqCst);
     }
@@ -751,6 +784,8 @@ impl ProgressToken {
         }
     }
 
+    /// Queues a finished page for [`Self::take_pages`] and resets the in-flight percentage and byte count for the next
+    /// page.
     pub fn push_page(&self, page: Page) {
         self.done.fetch_add(1, Ordering::SeqCst);
         self.page_percent.store(0, Ordering::SeqCst);
@@ -905,6 +940,7 @@ pub struct Reported {
 }
 
 impl ImageChoices {
+    /// Whether this item lists any value for `field`.
     fn has(&self, field: ChoiceField) -> bool {
         match field {
             ChoiceField::Dpi => !self.dpi.is_empty(),
@@ -922,6 +958,7 @@ impl ImageChoices {
 }
 
 impl Scanner {
+    /// `Present` when the unit exists, `Absent` when the capability bits were read without it, otherwise `Unknown`.
     fn unit_presence(&self, present: bool) -> Presence {
         match (present, self.reported.units) {
             (true, _) => Presence::Present,
@@ -935,6 +972,7 @@ impl Scanner {
         self.unit_presence(self.feeder)
     }
 
+    /// Flatbed (glass): present, absent (the capability bits were read without it) or unknown.
     pub fn flatbed_presence(&self) -> Presence {
         self.unit_presence(self.flatbed)
     }
@@ -983,6 +1021,7 @@ pub struct ScannerRef {
 }
 
 impl ScannerRef {
+    /// A reference whose `connection` is classified from `port` ([`Connection::Unknown`] without one).
     pub fn new(id: String, name: String, port: Option<String>) -> Self {
         let connection = port.as_deref().map(Connection::from_port).unwrap_or(Connection::Unknown);
         Self { id, name, port, connection }
@@ -1122,6 +1161,7 @@ pub const MIN_DPI: u32 = 50;
 pub const MAX_DPI: u32 = 1200;
 
 impl Default for ScanSettings {
+    /// 200 dpi grey, one page from `Auto`, no device name, no region or other optional setting, and the driver's page length.
     fn default() -> Self {
         Self {
             device: String::new(),
@@ -1180,6 +1220,8 @@ pub enum ScanError {
 }
 
 impl PartialEq for ScanError {
+    /// Errors are equal when they say the same thing: `Failed` and `Native` compare by message alone (a native code
+    /// does not change the sentence), `Incomplete` by its message, and `Unsupported` only to itself.
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Unsupported, Self::Unsupported) => true,
@@ -1196,6 +1238,7 @@ impl PartialEq for ScanError {
 impl Eq for ScanError {}
 
 impl ScanError {
+    /// The message of a `Failed` or `Native` error; `None` for the other variants.
     fn plain_message(&self) -> Option<&str> {
         match self {
             Self::Failed(message) | Self::Native { message, .. } => Some(message),
@@ -1344,6 +1387,9 @@ impl ScanError {
 }
 
 impl ScanSettings {
+    /// `self` when the resolution, page count and region are within the crate's limits (`MIN_DPI`..=`MAX_DPI`,
+    /// `MAX_PAGES`, a region with a size); otherwise `Failed` naming the first one that is not. Nothing is sent to a
+    /// scanner.
     pub fn checked(&self) -> Result<&Self, ScanError> {
         if !(MIN_DPI..=MAX_DPI).contains(&self.dpi) {
             return Err(ScanError::Failed(format!("dpi is {MIN_DPI} to {MAX_DPI}")));
@@ -1403,6 +1449,8 @@ pub fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
     image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_dimensions().ok()
 }
 
+/// The container named by the first bytes of `bytes`: `png`, `jpeg`, `tiff`, `bmp`, or `bin` when unrecognised.
+/// Only the signature is checked, not that the rest is valid.
 pub fn image_format(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(b"\x89PNG") {
         "png"
@@ -1417,6 +1465,7 @@ pub fn image_format(bytes: &[u8]) -> &'static str {
     }
 }
 
+/// The file written for page number `index` (1-based) in `folder`: `page-001.<format>`.
 pub fn page_path(folder: &Path, index: usize, format: &str) -> PathBuf {
     folder.join(format!("page-{index:03}.{format}"))
 }
@@ -1591,10 +1640,12 @@ pub fn planned_frame(
     })
 }
 
+/// `pixels` at `dpi` in thousandths of an inch, rounded down; saturates at `u32::MAX`. `dpi` must not be 0.
 fn thousandths_down(pixels: u32, dpi: u32) -> u32 {
     u32::try_from(u64::from(pixels) * 1000 / u64::from(dpi)).unwrap_or(u32::MAX)
 }
 
+/// `pixels` at `dpi` in thousandths of an inch, rounded up; saturates at `u32::MAX`. `dpi` must not be 0.
 fn thousandths_up(pixels: u32, dpi: u32) -> u32 {
     u32::try_from((u64::from(pixels) * 1000).div_ceil(u64::from(dpi))).unwrap_or(u32::MAX)
 }
@@ -1624,6 +1675,7 @@ pub fn region_from_preview(x0: u32, y0: u32, x1: u32, y1: u32, dpi: u32) -> Resu
     Ok(Some(Region { left, top, width, height }))
 }
 
+/// Inches as thousandths of an inch, rounded; `Failed` for a negative, non-finite or too large value.
 fn thousandths_from_inches(inches: f64) -> Result<u32, ScanError> {
     if !inches.is_finite() || inches < 0.0 {
         return Err(ScanError::Failed("the scan region cannot be negative".into()));

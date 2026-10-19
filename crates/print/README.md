@@ -640,8 +640,9 @@ paper matching, job file names, and the PDF sheet reader and its update (classic
 cross-references, turning, reframing, refusal, and thousands of truncated and corrupted files
 that must fail without a panic). On Windows it also submits a mixed-orientation exact-size job
 and a shrink-to-fit job to a temporary paused queue (inbox "Generic / Text Only" driver on
-`LPT1:`) and checks each arrives as one job with all its sheets. The queue portion explicitly
-skips if the driver or administrative rights are absent. Windows CI installs the inbox test
+`LPT1:`) and checks each arrives as one job with all its sheets. Adding a printer changes the
+machine, so that test runs only with `CRAFT_PRINT_TEST_QUEUE=1` (or `CRAFT_PRINT_REQUIRE_QUEUE=1`),
+and it skips if the driver or administrative rights are absent. Windows CI installs the inbox test
 driver and sets `CRAFT_PRINT_REQUIRE_QUEUE=1`, making queue preparation/submission mandatory on
 its runner. Two ignored tests check a real printer by hand: `an_installed_driver_validates_the_ticket`
 (`CRAFT_PRINT_TEST_PRINTER`; sends no job) and `an_installed_printer_prints_a_file`

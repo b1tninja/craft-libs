@@ -39,6 +39,12 @@ jobs:
           CRAFT_PRINT_REQUIRE_QUEUE: ${{ runner.os == 'Windows' && '1' || '0' }}
       - run: cargo test -p craft-print --all-features --locked
         timeout-minutes: 10
+      - run: cargo doc -p craft-print --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo doc -p craft-print --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
   wasm:
     # The PWG raster encoder and the document types build for the browser (no spooler, no sockets there).
     timeout-minutes: 15

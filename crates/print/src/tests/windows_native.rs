@@ -426,9 +426,17 @@ fn windows_powershell(script: &str, printer: &str) -> Result<String, String> {
 /// them; the test uses PowerShell only to add, inspect and remove the printer. Its driver is the
 /// inbox "Generic / Text Only"; a machine that cannot add one (no rights, no driver) skips the
 /// test, unless `CRAFT_PRINT_REQUIRE_QUEUE=1` (CI) makes it mandatory.
+///
+/// Adding a printer changes the machine's configuration, so a plain `cargo test` skips it: it runs
+/// with `CRAFT_PRINT_TEST_QUEUE=1` (best effort) or `CRAFT_PRINT_REQUIRE_QUEUE=1`.
 #[cfg(windows)]
 #[test]
 fn windows_jobs_reach_the_spooler() {
+    let required = std::env::var("CRAFT_PRINT_REQUIRE_QUEUE").as_deref() == Ok("1");
+    if !required && std::env::var("CRAFT_PRINT_TEST_QUEUE").as_deref() != Ok("1") {
+        eprintln!("skipping the real print: set CRAFT_PRINT_TEST_QUEUE=1 to add a temporary paused printer and print to it");
+        return;
+    }
     let name = format!("Craft Test Print {}", std::process::id());
     let name = name.as_str();
     // The printer goes on LPT1:, one of the ports every Windows install has, so the test adds no
@@ -441,7 +449,7 @@ fn windows_jobs_reach_the_spooler() {
         name,
     );
     if let Err(why) = added {
-        assert_ne!(std::env::var("CRAFT_PRINT_REQUIRE_QUEUE").as_deref(), Ok("1"), "CI requires a prepared paused printer: {why}");
+        assert!(!required, "CI requires a prepared paused printer: {why}");
         eprintln!("skipping the real print: the test printer could not be prepared: {why}");
         return;
     }

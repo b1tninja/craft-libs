@@ -49,7 +49,7 @@ use craft_job::{
 };
 
 use crate::{
-    Acquired, CancelToken, ErrorContext, HandlingStatus, InterruptKind, LengthRecord, Page, Phase, ProgressToken, ScanError, ScanErrorInfo,
+    Acquired, CancelToken, ErrorContext, HandlingStatus, InterruptKind, LengthRecord, Page, Phase, Presence, ProgressToken, ScanError, ScanErrorInfo,
     ScanSettings, Scanner, Source, auto_fallback_to_glass, split_id,
 };
 
@@ -315,8 +315,10 @@ impl ScanJobConfig {
     #[must_use]
     pub fn with_scanner(mut self, scanner: &Scanner) -> Self {
         self.device_name = Some(scanner.name.clone());
-        self.has_feeder = scanner.feeder;
-        self.has_glass = scanner.flatbed;
+        // A plain `false` means "absent" only when the backend read the handling bits (`Reported::units`); otherwise the unit
+        // is unknown and may exist: `Auto` then tries the feeder and falls back to the glass, rather than finding no source.
+        self.has_feeder = scanner.feeder_presence() != Presence::Absent;
+        self.has_glass = scanner.flatbed_presence() != Presence::Absent;
         self.feeder_ready = scanner.feeder_ready;
         self
     }

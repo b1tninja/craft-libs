@@ -202,8 +202,7 @@ per status bit.
 * Indicators for hardware the scanner lacks (no feeder, flatbed or duplexer) are left out unless the status asserts
   them. The lamp bit is an error flag: `LampError` is `On` or "no error reported".
 * `From<Connection> for DeviceConnection`: `Usb` to `Usb`, `Wsd` to `Network`, `Other` to `Other`, `Unknown` to
-  `Unknown`. (craft-job's README describes a different mapping that fits craft-print's wider set; this is what
-  craft-scan's four variants are.)
+  `Unknown`, as in craft-job's README. `DeviceConnection::Local` has no scan counterpart.
 
 ### The source actually used
 

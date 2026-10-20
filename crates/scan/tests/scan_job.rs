@@ -11,7 +11,8 @@ use craft_scan::job::{
     AttemptOutcome, AttemptPlan, Continuation, ExitClass, Outcome, PageInfo, ScanJob, ScanJobConfig, ScanJobError, ScanJobState, device_view,
 };
 use craft_scan::{
-    Acquired, Backend, Cause, HandlingStatus, InterruptKind, NativeCode, Page, Registry, ScanError, ScanSettings, Source, feeder_shortfall_message,
+    Acquired, Backend, Cause, HandlingStatus, InterruptKind, NativeCode, Page, Presence, Registry, ScanError, ScanSettings, Source,
+    feeder_shortfall_message,
 };
 
 use common::escl_like::{AdfState, ESCL_ID, EsclLike};
@@ -636,6 +637,37 @@ fn a_job_runs_through_a_registry_and_reports_no_tag_support() {
     assert_eq!(job.state(), ScanJobState::Terminal(Outcome::Completed));
     assert_eq!(job.view().device_name.as_deref(), Some("Fake WIA scanner"));
     assert_eq!(job.view().id.backend(), "wia");
+}
+
+#[test]
+fn a_scanner_whose_units_were_not_read_may_still_have_a_feeder_or_glass() {
+    // A backend that never read the handling bits leaves feeder and flatbed false: unknown, not absent.
+    let mut unread = common::scanner("x:1", "Unread");
+    unread.flatbed = false;
+    assert_eq!((unread.feeder_presence(), unread.flatbed_presence()), (Presence::Unknown, Presence::Unknown));
+    let config = ScanJobConfig::default().with_scanner(&unread);
+    assert!(config.has_feeder && config.has_glass, "unknown is not absent");
+    let mut job = ScanJob::new(ScanSettings { device: "x:1".into(), source: Source::Auto, ..ScanSettings::default() }, config);
+    let plan = job.begin_attempt(t(1)).expect("Auto finds a source to try");
+    assert_eq!(plan.source_guess, Some(Source::Feeder), "the feeder is tried first; an empty one is learned from the failure");
+
+    // The bits were read and there is no feeder: the glass.
+    let mut read = common::scanner("x:2", "Read");
+    read.reported.units = true;
+    assert_eq!((read.feeder_presence(), read.flatbed_presence()), (Presence::Absent, Presence::Present));
+    let config = ScanJobConfig::default().with_scanner(&read);
+    assert!(!config.has_feeder && config.has_glass);
+    let mut job = ScanJob::new(ScanSettings { device: "x:2".into(), source: Source::Auto, ..ScanSettings::default() }, config);
+    assert_eq!(job.begin_attempt(t(1)).expect("attempt").source_guess, Some(Source::Glass));
+
+    // The bits were read and the scanner has neither: nothing to scan from, reported at the start.
+    let mut neither = common::scanner("x:3", "Neither");
+    neither.flatbed = false;
+    neither.reported.units = true;
+    let config = ScanJobConfig::default().with_scanner(&neither);
+    assert!(!config.has_feeder && !config.has_glass);
+    let mut job = ScanJob::new(ScanSettings { device: "x:3".into(), source: Source::Auto, ..ScanSettings::default() }, config);
+    assert!(job.begin_attempt(t(1)).is_err() || job.state().is_terminal());
 }
 
 // ---- device_view -------------------------------------------------------------------------------------

@@ -325,6 +325,32 @@ fn an_auto_that_the_backend_answered_from_the_glass_is_recorded_as_a_fallback() 
 }
 
 #[test]
+fn an_auto_that_the_backend_answered_from_the_glass_completes_with_the_one_page_the_glass_gives() {
+    // Five pages wanted, the backend resolves Auto to the glass itself and returns one page: that is the whole scan,
+    // exactly as when the job's own fallback sends the retry to the glass.
+    let wia = WiaLike { bits: 0x3, fail_listing: false };
+    let request = ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
+    let mut job = ScanJob::new(request, ScanJobConfig::default().with_capabilities(true, true, None));
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(wia.acquire(&plan.settings), t(2)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!(snap.state, ScanJobState::Terminal(Outcome::Completed), "{:?}", snap.state);
+    assert_eq!(snap.pages.len(), 1);
+    assert_eq!(snap.expected_pages, Some(1));
+    assert!(snap.warnings.is_empty(), "{:?}", snap.warnings);
+    assert_ne!(snap.state.exit_class(), ExitClass::NeedsAttention);
+
+    // An explicit glass request for several pages keeps its expectation: one page is a shortfall there.
+    let glass = ScanSettings { source: Source::Glass, pages: 5, ..ScanSettings::default() };
+    let mut job = ScanJob::new(glass, ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(wia.acquire(&plan.settings), t(2)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!(snap.expected_pages, Some(5));
+    assert_eq!(snap.state, ScanJobState::Terminal(Outcome::CompletedWithWarnings));
+}
+
+#[test]
 fn auto_does_not_fall_back_without_a_glass_or_after_pages_or_for_a_jam() {
     let auto = || ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
 

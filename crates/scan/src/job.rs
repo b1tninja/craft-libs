@@ -1044,6 +1044,11 @@ impl ScanJob {
         if let Some(acquired) = acquired {
             self.merge_result(&mut running, acquired.pages, used);
         }
+        // An Auto request that was answered from the glass (the backend chose it, or switched inside the call) can get
+        // one page: the same expectation the job's own fallback sets, so one glass page is a complete scan.
+        if running.requested == Source::Auto && used == Some(Source::Glass) && self.expected.is_some() {
+            self.expected = Some(count(self.infos.len()).max(1));
+        }
         self.in_flight = None;
         if used.is_some() {
             self.source_in_use = used;

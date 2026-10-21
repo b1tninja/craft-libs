@@ -24,7 +24,11 @@ pub const DEFAULT_THRESHOLD: u8 = 128;
 /// What the page builder needs to know about a request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageRule {
+    /// The requested resolution (horizontal, and vertical too unless `dpi_y` is set).
     pub dpi: u32,
+    /// The requested vertical resolution when it differs from `dpi` (`ScanSettings::dpi_y`). Used, like `dpi`, only as the
+    /// fallback for a delivered file that carries no usable density.
+    pub dpi_y: Option<u32>,
     /// `Some` for a black-and-white request: pages deeper than 1 bit are thresholded at this value.
     pub bw_threshold: Option<u8>,
     /// How the page's length was decided and whether to infer it from the pixels ([`LengthPlan`]).
@@ -44,10 +48,10 @@ pub struct LengthPlan {
 }
 
 impl PageRule {
-    /// The rule a request implies: its dpi, a threshold byte only for black-and-white, and no length plan.
+    /// The rule a request implies: its dpi (both axes), a threshold byte only for black-and-white, and no length plan.
     pub fn for_settings(settings: &ScanSettings) -> Self {
         let bw_threshold = (settings.color == Color::BlackAndWhite).then(|| threshold_byte(settings.threshold));
-        Self { dpi: settings.dpi, bw_threshold, length: LengthPlan::default() }
+        Self { dpi: settings.dpi, dpi_y: settings.dpi_y, bw_threshold, length: LengthPlan::default() }
     }
 
     /// The same rule with the backend's length decision.
@@ -141,7 +145,7 @@ fn threshold_with_pels(bytes: &[u8], threshold: u8, pels: (u32, u32)) -> Thresho
 /// the fallback for a file that carries nothing usable, and is recorded as [`Page::requested_dpi`].
 pub fn page_for(delivered: &[u8], rule: PageRule) -> (Page, Option<u32>) {
     let found = density::image_density(delivered);
-    let (dx, dy) = found.unwrap_or((f64::from(rule.dpi), f64::from(rule.dpi)));
+    let (dx, dy) = found.unwrap_or((f64::from(rule.dpi), f64::from(rule.dpi_y.unwrap_or(rule.dpi))));
     let (dpi, dpi_y) = (round_dpi(dx), round_dpi(dy));
     let mut source = rule.length.source;
     let mut cut = None;
@@ -551,7 +555,7 @@ mod tests {
         for palette in [[[0, 0, 0], [255, 255, 255]], [[255, 255, 255], [0, 0, 0]]] {
             let bytes = bmp(13, 1, &palette, false, &[vec![0b1010_1010, 0b1010_0000]]);
             assert_eq!(threshold_to_one_bit(&bytes, 128, 300), Thresholded::AlreadyOneBit);
-            let (page, from) = page_for(&bytes, PageRule { dpi: 300, bw_threshold: Some(128), length: LengthPlan::default() });
+            let (page, from) = page_for(&bytes, PageRule { dpi: 300, dpi_y: None, bw_threshold: Some(128), length: LengthPlan::default() });
             assert_eq!(page.bytes, bytes);
             assert!(!page.thresholded);
             assert_eq!((page.format, page.width, page.height, from), ("bmp", 13, 1, None));
@@ -626,7 +630,7 @@ mod tests {
         assert_eq!(threshold_to_one_bit(&bytes, 128, 300), Thresholded::Unreadable);
         assert_eq!(threshold_to_one_bit(b"not an image", 128, 300), Thresholded::Unreadable);
         assert_eq!(threshold_to_one_bit(b"", 128, 300), Thresholded::Unreadable);
-        let (page, from) = page_for(&bytes, PageRule { dpi: 100, bw_threshold: Some(128), length: LengthPlan::default() });
+        let (page, from) = page_for(&bytes, PageRule { dpi: 100, dpi_y: None, bw_threshold: Some(128), length: LengthPlan::default() });
         assert!(!page.thresholded && from.is_none());
         assert_eq!(page.bytes, bytes);
     }
@@ -635,11 +639,11 @@ mod tests {
     fn page_for_converts_only_a_black_and_white_request() {
         let rows = rgb_rows(&[&[0, 255, 0]]);
         let bytes = bmp(3, 24, &[], true, &rows);
-        let (gray, from) = page_for(&bytes, PageRule { dpi: 150, bw_threshold: None, length: LengthPlan::default() });
+        let (gray, from) = page_for(&bytes, PageRule { dpi: 150, dpi_y: None, bw_threshold: None, length: LengthPlan::default() });
         assert!(!gray.thresholded && from.is_none());
         assert_eq!((gray.bytes.as_slice(), gray.width, gray.height), (bytes.as_slice(), 3, 1));
 
-        let (bw, from) = page_for(&bytes, PageRule { dpi: 150, bw_threshold: Some(128), length: LengthPlan::default() });
+        let (bw, from) = page_for(&bytes, PageRule { dpi: 150, dpi_y: None, bw_threshold: Some(128), length: LengthPlan::default() });
         assert!(bw.thresholded);
         assert_eq!(from, Some(24));
         assert_eq!((bw.format, bw.width, bw.height, bw.dpi), ("bmp", 3, 1, 150));
@@ -661,7 +665,7 @@ mod tests {
         let gray = ScanSettings { color: Color::Gray, ..ScanSettings::default() };
         assert_eq!(PageRule::for_settings(&gray).bw_threshold, None);
         let bw = ScanSettings { color: Color::BlackAndWhite, threshold: Some(77), dpi: 300, ..ScanSettings::default() };
-        assert_eq!(PageRule::for_settings(&bw), PageRule { dpi: 300, bw_threshold: Some(77), length: LengthPlan::default() });
+        assert_eq!(PageRule::for_settings(&bw), PageRule { dpi: 300, dpi_y: None, bw_threshold: Some(77), length: LengthPlan::default() });
     }
 
     #[test]

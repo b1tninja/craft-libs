@@ -151,7 +151,7 @@ fn tiff_at(image: &image::GrayImage, dpi_x: u32, dpi_y: u32) -> Vec<u8> {
 
 /// A rule at `dpi` that leaves the page as delivered.
 fn plain_rule(dpi: u32) -> PageRule {
-    PageRule { dpi, bw_threshold: None, length: LengthPlan::default() }
+    PageRule { dpi, dpi_y: None, bw_threshold: None, length: LengthPlan::default() }
 }
 
 #[test]
@@ -189,6 +189,40 @@ fn a_fax_resolution_keeps_its_two_axes_through_every_container() {
     }
 }
 
+/// A request with two resolutions, answered by a file that records none, still has two resolutions on the page.
+#[test]
+fn a_non_square_request_keeps_its_vertical_resolution_when_the_file_carries_no_density() {
+    use image::ImageEncoder;
+    let picture = gray(16, 8, |x, y| ((x * 13 + y * 7) % 200) as u8 + 30);
+    let mut no_density_jpeg = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut no_density_jpeg, 95);
+    encoder.set_pixel_density(image::codecs::jpeg::PixelDensity { density: (1, 1), unit: image::codecs::jpeg::PixelDensityUnit::PixelAspectRatio });
+    encoder.write_image(picture.as_raw(), 16, 8, image::ExtendedColorType::L8).expect("jpeg");
+    let mut no_phys_png = Vec::new();
+    picture.write_to(&mut std::io::Cursor::new(&mut no_phys_png), image::ImageFormat::Png).expect("png");
+    assert_eq!(image_density(&no_density_jpeg), None);
+    assert_eq!(image_density(&no_phys_png), None);
+
+    let settings = craft_scan::ScanSettings { dpi: 200, dpi_y: Some(100), ..craft_scan::ScanSettings::default() };
+    for (format, bytes) in [("jpeg", &no_density_jpeg), ("png", &no_phys_png)] {
+        let (page, _) = page_for(bytes, PageRule::for_settings(&settings));
+        assert_eq!((page.dpi, page.dpi_y, page.requested_dpi), (200, 100, 200), "{format}");
+        // The length runs down the page, so it uses the vertical resolution.
+        assert_eq!(page.length.length_mils, mils_of(page.height, 100), "{format}");
+
+        // A thresholded page writes the same two resolutions into its BMP.
+        let bw = craft_scan::ScanSettings { color: craft_scan::Color::BlackAndWhite, ..settings.clone() };
+        let (page, _) = page_for(bytes, PageRule::for_settings(&bw));
+        assert!(page.thresholded, "{format}");
+        assert_eq!(image_density(&page.bytes).map(|(x, y)| (x.round(), y.round())), Some((200.0, 100.0)), "{format} bmp");
+    }
+
+    // A square request is unchanged.
+    let square = craft_scan::ScanSettings { dpi: 200, ..craft_scan::ScanSettings::default() };
+    let (page, _) = page_for(&no_density_jpeg, PageRule::for_settings(&square));
+    assert_eq!((page.dpi, page.dpi_y), (200, 200));
+}
+
 // ---- inference through the page builder ----------------------------------------------------------
 
 /// A sheet on a 14 in feeder scan: noisy paper to `sheet_rows`, pure white fill below, a thin fill frame on the
@@ -209,7 +243,7 @@ fn feeder_page(width: u32, height: u32, sheet_rows: u32) -> impl Fn(u32, u32) ->
 
 /// A rule at `dpi` that infers the sheet end with the default options.
 fn infer_rule(dpi: u32) -> PageRule {
-    PageRule { dpi, bw_threshold: None, length: LengthPlan { source: LengthSource::Driver, infer: Some(InferOptions::default()) } }
+    PageRule { dpi, dpi_y: None, bw_threshold: None, length: LengthPlan { source: LengthSource::Driver, infer: Some(InferOptions::default()) } }
 }
 
 #[test]
@@ -262,7 +296,7 @@ fn without_inference_the_page_is_never_cut_and_keeps_the_plans_source() {
     let value = feeder_page(width, height, rows_for_mils(11_000, dpi));
     let bytes = bmp_at(width, height, dpi, dpi, &value);
     for source in [LengthSource::Driver, LengthSource::Size, LengthSource::Device] {
-        let rule = PageRule { dpi, bw_threshold: None, length: LengthPlan { source, infer: None } };
+        let rule = PageRule { dpi, dpi_y: None, bw_threshold: None, length: LengthPlan { source, infer: None } };
         let (page, _) = page_for(&bytes, rule);
         assert_eq!((page.height, page.length.source, page.length.approximate), (height, source, false), "{source:?}");
         assert_eq!(page.length.length_mils, Some(14_000), "{source:?}");

@@ -353,7 +353,7 @@ mod tests {
 
     /// A page rule at `dpi`, thresholding to 1 bit when `bw` is set, with no length plan.
     fn rule(dpi: u32, bw: bool) -> PageRule {
-        PageRule { dpi, bw_threshold: bw.then_some(128), length: Default::default() }
+        PageRule { dpi, dpi_y: None, bw_threshold: bw.then_some(128), length: Default::default() }
     }
 
     #[test]

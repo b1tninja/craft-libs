@@ -145,10 +145,15 @@ fn split_authority<'a>(authority: &'a str, noun: &str) -> Result<(&'a str, Optio
             None => refuse(format!("unexpected text after the address in the {noun} URL")),
         };
     }
-    match authority.rsplit_once(':') {
-        Some((h, p)) => Ok((h, Some(p))),
-        None => Ok((authority, None)),
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, Some(p)),
+        None => (authority, None),
+    };
+    // RFC 3986 puts an IPv6 address in brackets; without them the split above would cut it at its last colon.
+    if host.contains(':') {
+        return refuse(format!("an IPv6 address in the {noun} URL must be in brackets: http://[addr]:port/"));
     }
+    Ok((host, port))
 }
 
 /// Numbers every transport honours.
@@ -237,6 +242,8 @@ mod tests {
             "http://127.0.0.1/a b",
             "http://[::1/",
             "http://[::1]x/",
+            "http://fd00::1:8080/",
+            "http://fe80::1/",
             "http://127.0.0.1/\u{e9}",
             "",
             "http://",
@@ -245,6 +252,16 @@ mod tests {
             no(s);
         }
         no(&format!("http://127.0.0.1/{}", "a".repeat(600)));
+    }
+
+    #[test]
+    fn an_unbracketed_ipv6_address_is_refused_and_says_why() {
+        for s in ["http://fd00::1:8080/", "http://fe80::1/", "http://::1/"] {
+            let why = DeviceUrl::parse(s).unwrap_err().to_string();
+            assert!(why.contains("brackets"), "{s}: {why}");
+        }
+        let u = ok("http://[fd00::1]:8080/");
+        assert_eq!((u.host(), u.port()), ("fd00::1".parse().unwrap(), 8080));
     }
 
     #[test]

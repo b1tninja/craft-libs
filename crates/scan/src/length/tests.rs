@@ -358,7 +358,7 @@ fn named_sizes_have_extents_except_auto_and_custom() {
 fn a_page_built_by_the_page_builder_starts_as_a_driver_length() {
     let pixels = vec![255u8; 40 * 20];
     let bytes = bmp_gray(40, 20, &pixels, 100, false);
-    let (page, _) = bw::page_for(&bytes, bw::PageRule { dpi: 100, bw_threshold: None, length: Default::default() });
+    let (page, _) = bw::page_for(&bytes, bw::PageRule { dpi: 100, dpi_y: None, bw_threshold: None, length: Default::default() });
     assert_eq!(page.length, LengthRecord { source: LengthSource::Driver, length_mils: Some(200), approximate: false });
 }
 
@@ -382,20 +382,20 @@ fn the_page_builder_infers_before_thresholding_so_black_and_white_pages_keep_the
     let bytes = bmp_gray(width, height, &pixels, dpi, true);
     let plan = bw::LengthPlan { source: LengthSource::Driver, infer: Some(InferOptions::default()) };
     // Gray: cropped and recorded.
-    let (gray, _) = bw::page_for(&bytes, bw::PageRule { dpi, bw_threshold: None, length: plan });
+    let (gray, _) = bw::page_for(&bytes, bw::PageRule { dpi, dpi_y: None, bw_threshold: None, length: plan });
     assert_eq!((gray.height, gray.length.source, gray.length.approximate), (1402, LengthSource::Inferred, true));
     assert_eq!(gray.length.length_mils, Some(7010));
     // Black and white: the threshold turns the noise white, so inference must have run first.
-    let (bw1, from) = bw::page_for(&bytes, bw::PageRule { dpi, bw_threshold: Some(128), length: plan });
+    let (bw1, from) = bw::page_for(&bytes, bw::PageRule { dpi, dpi_y: None, bw_threshold: Some(128), length: plan });
     assert_eq!((bw1.height, bw1.thresholded, from), (1402, true, Some(8)));
     assert_eq!(bw1.length.source, LengthSource::Inferred);
     // No inference requested: untouched, and the plan's source is what is recorded.
     let sized = bw::LengthPlan { source: LengthSource::Size, infer: None };
-    let (kept, _) = bw::page_for(&bytes, bw::PageRule { dpi, bw_threshold: None, length: sized });
+    let (kept, _) = bw::page_for(&bytes, bw::PageRule { dpi, dpi_y: None, bw_threshold: None, length: sized });
     assert_eq!((kept.height, kept.length.source, kept.length.approximate), (1800, LengthSource::Size, false));
     // A refusal keeps the page and the plan's source.
     let blank = bmp_gray(width, height, &vec![255u8; width * height], dpi, true);
-    let (refused, _) = bw::page_for(&blank, bw::PageRule { dpi, bw_threshold: None, length: plan });
+    let (refused, _) = bw::page_for(&blank, bw::PageRule { dpi, dpi_y: None, bw_threshold: None, length: plan });
     assert_eq!((refused.height, refused.length.source), (1800, LengthSource::Driver));
 }
 
@@ -418,7 +418,7 @@ fn the_page_builder_gives_a_jpeg_the_formats_tolerance_even_with_default_options
     }
     let bytes = jpeg_of(width, height, &pixels, 90);
     let plan = bw::LengthPlan { source: LengthSource::Driver, infer: Some(InferOptions::default()) };
-    let (page, _) = bw::page_for(&bytes, bw::PageRule { dpi, bw_threshold: None, length: plan });
+    let (page, _) = bw::page_for(&bytes, bw::PageRule { dpi, dpi_y: None, bw_threshold: None, length: plan });
     assert_eq!(page.length.source, LengthSource::Inferred, "{:?}", page.length);
     assert!(page.length.approximate && page.height < 940 && page.height > 880, "{}", page.height);
     assert_eq!((page.format, page.width), ("jpeg", 320));

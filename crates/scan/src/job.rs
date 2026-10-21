@@ -863,6 +863,14 @@ impl ScanJob {
 
     /// Plan the next attempt after an interruption, with the person's choice for the kept pages.
     pub fn begin_attempt_with(&mut self, at: Timestamp, how: Continuation) -> Result<AttemptPlan, ScanJobError> {
+        // A person who starts over gets the original request back, not the glass-and-one-page that an earlier `Auto` fallback
+        // narrowed it to. Only here: the job's own fallback attempt goes through `begin_attempt`, which must keep them.
+        if how == Continuation::Restart
+            && matches!(self.state, ScanJobState::Interrupted | ScanJobState::NeedsAttention | ScanJobState::Terminal(Outcome::Failed))
+        {
+            self.forced_source = None;
+            self.expected = expected_from(&self.settings);
+        }
         self.begin(at, how)
     }
 

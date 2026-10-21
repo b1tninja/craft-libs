@@ -1171,6 +1171,9 @@ impl State {
                         sheets: 0,
                         notes: Vec::new(),
                     }),
+                    // Still sending: the document may already be on the printer (the reply was lost, or the
+                    // worker died after the send), so the person is told to look before sending again.
+                    JobView::Running { .. } => JobView::Failed(Failure::new(FailureKind::Stopped, "").with_outcome_unknown(true)),
                     _ => JobView::Failed(Failure::new(FailureKind::Stopped, "")),
                 }),
                 Err(TryRecvError::Empty) => None,

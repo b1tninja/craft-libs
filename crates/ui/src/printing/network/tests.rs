@@ -425,7 +425,11 @@ fn a_job_worker_that_stops_or_fails_is_reported() {
     assert!(state.start_job(&send, true, true, &[PDF], None));
     drop(tx);
     state.poll(&ctx);
-    assert_eq!(state.draft.job, JobView::Failed(Failure::new(FailureKind::Stopped, "")));
+    assert_eq!(
+        state.draft.job,
+        JobView::Failed(Failure::new(FailureKind::Stopped, "").with_outcome_unknown(true)),
+        "a worker that ended while sending may have delivered the document"
+    );
     let (tx, rx) = mpsc::channel();
     let slot = std::cell::RefCell::new(Some(rx));
     let send: SendJob = Box::new(move |_, _| JobHandle::new(slot.borrow_mut().take().unwrap_or_else(|| mpsc::channel().1), Box::new(|| {})));
@@ -659,11 +663,15 @@ fn a_worker_that_stops_after_the_acceptance_is_sent_outcome_unknown_not_a_failur
     drop(worker);
     state.poll(&ctx);
     assert_eq!(state.draft.job, JobView::Finished(Report { outcome: Outcome::AcceptedUnknown, printer: "Office".into(), sheets: 0, notes: vec![] }));
-    // Before the acceptance it is still a failure: nothing is known to have been sent.
+    // Before the acceptance it is a failure, but one that may have delivered the document: the worker
+    // was sending, so the person is told to check the printer before sending again.
     let (mut state, worker, ctx) = running_job();
     drop(worker);
     state.poll(&ctx);
-    assert_eq!(state.draft.job, JobView::Failed(Failure::new(FailureKind::Stopped, "")));
+    assert_eq!(state.draft.job, JobView::Failed(Failure::new(FailureKind::Stopped, "").with_outcome_unknown(true)));
+    // The warning is what the person sees.
+    let JobView::Failed(failure) = &state.draft.job else { panic!("a failure") };
+    assert!(failure.outcome_unknown);
 }
 
 #[test]

@@ -107,8 +107,15 @@ impl RetryPolicy {
     /// with `unit` in `[0, 1]` (out of range is clamped, a non-finite `unit` counts as the middle,
     /// no spread). Never longer than `max_delay`.
     pub fn delay(&self, attempt: u32, unit: f64) -> Duration {
-        let doublings = attempt.saturating_sub(1).min(30);
-        let backoff = self.base.saturating_mul(1u32 << doublings).min(self.max_delay);
+        // Double with saturation until the cap is reached, so a tiny base still gets there however many attempts
+        // there were, and a huge attempt count costs no more than the doublings that are needed (a zero base stays zero).
+        let mut backoff = self.base.min(self.max_delay);
+        for _ in 1..attempt {
+            if backoff.is_zero() || backoff >= self.max_delay {
+                break;
+            }
+            backoff = backoff.saturating_mul(2).min(self.max_delay);
+        }
         let unit = if unit.is_finite() { unit.clamp(0.0, 1.0) } else { 0.5 };
         let spread = f64::from(self.jitter_percent.min(100)) / 100.0;
         let factor = 1.0 + (unit * 2.0 - 1.0) * spread;
@@ -244,6 +251,20 @@ mod tests {
         assert_eq!(ms, [100, 200, 400, 800, 1000, 1000]);
         assert_eq!(p.delay(0, 0.5), MS(100), "attempt 0 is treated like 1");
         assert_eq!(p.delay(u32::MAX, 0.5), MS(1000), "no overflow");
+    }
+
+    #[test]
+    fn a_tiny_base_still_reaches_the_cap_after_many_attempts() {
+        let p = RetryPolicy { base: Duration::from_micros(1), max_delay: Duration::from_secs(3600), jitter_percent: 0, ..policy() };
+        // 1 us doubled 31 times is about 36 minutes: past the old 30-doubling limit, short of the cap.
+        assert_eq!(p.delay(1, 0.5), Duration::from_micros(1));
+        assert_eq!(p.delay(11, 0.5), Duration::from_micros(1024));
+        for attempt in [35, 40, 100, u32::MAX] {
+            assert_eq!(p.delay(attempt, 0.5), Duration::from_secs(3600), "attempt {attempt}");
+            assert_eq!(p.delay(attempt, 1.0), Duration::from_secs(3600), "attempt {attempt}, jitter at the top");
+        }
+        let zero = RetryPolicy { base: Duration::ZERO, ..p };
+        assert_eq!(zero.delay(u32::MAX, 0.5), Duration::ZERO, "a zero base stays zero and is cheap");
     }
 
     #[test]

@@ -403,13 +403,18 @@ fn crop_encoded(bytes: &[u8], rows: u32) -> Option<Vec<u8>> {
         "tiff" => return write_tiff(&cropped, density),
         "jpeg" => {
             let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92);
-            if let Some((dx, dy)) = crate::density::image_density(bytes) {
+            if let Some((dx, dy)) = density {
                 let (dx, dy) = (dx.round().clamp(1.0, 65535.0) as u16, dy.round().clamp(1.0, 65535.0) as u16);
                 encoder
                     .set_pixel_density(image::codecs::jpeg::PixelDensity { density: (dx, dy), unit: image::codecs::jpeg::PixelDensityUnit::Inches });
             }
-            let rgb = cropped.to_rgb8();
-            encoder.write_image(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8).ok()?;
+            // A grey scan stays grey (one component); everything else is written as RGB.
+            if let image::DynamicImage::ImageLuma8(grey) = &cropped {
+                encoder.write_image(grey.as_raw(), grey.width(), grey.height(), image::ExtendedColorType::L8).ok()?;
+            } else {
+                let rgb = cropped.to_rgb8();
+                encoder.write_image(rgb.as_raw(), rgb.width(), rgb.height(), image::ExtendedColorType::Rgb8).ok()?;
+            }
         }
         _ => return None,
     }

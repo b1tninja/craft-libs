@@ -79,7 +79,10 @@ fn map_error(e: ureq::Error) -> Error {
         U::Protocol(_) | U::LargeResponseHeader(..) => Error::transport_at(TransportKind::InvalidResponse, Stage::Reply, message),
         // Our own request could not be built (nothing was sent; the url and headers are fixed by
         // the policy, so this is a bug or a ureq limit rather than the device).
-        U::Http(_) | U::BadUri(_) | U::InvalidProxyUrl | U::BodyExceedsLimit(_) | U::RequireHttpsOnly(_) => Error::Invalid(message),
+        U::Http(_) | U::BadUri(_) | U::InvalidProxyUrl | U::RequireHttpsOnly(_) => Error::Invalid(message),
+        // The reply body was larger than ureq's own limit. That is raised while the body is read, so the request was
+        // delivered: a reply failure, the same as our own size cap, never "nothing was sent".
+        U::BodyExceedsLimit(limit) => Error::TooLarge("the device's reply", usize::try_from(limit).unwrap_or(usize::MAX)),
         // Anything ureq adds later or that fits nothing above: a transient, unclassified failure.
         _ => Error::transport_at(TransportKind::Io, Stage::Reply, message),
     }
@@ -149,6 +152,18 @@ mod tests {
     use std::io::{Error as IoError, ErrorKind as K};
 
     use super::*;
+
+    #[test]
+    fn a_reply_body_over_ureqs_limit_is_a_reply_failure_not_an_unsent_request() {
+        let e = map_error(ureq::Error::BodyExceedsLimit(1024));
+        assert!(matches!(e, Error::TooLarge("the device's reply", 1024)), "{e:?}");
+        assert_eq!(e.stage(), Stage::Reply);
+        // The request was delivered, so a send is outcome-unknown, never safe to repeat (it would print twice).
+        assert_ne!(e.retry_safety(false), crate::retry::RetrySafety::Safe);
+        // The same limit reached while reading the body takes the same road.
+        let from_body = map_body_error(IoError::other(ureq::Error::BodyExceedsLimit(7)));
+        assert!(matches!(from_body, Error::TooLarge(..)), "{from_body:?}");
+    }
 
     /// The transport kind and stage an error reports, for compact assertions.
     fn kind_stage(e: &Error) -> (Option<TransportKind>, Stage) {

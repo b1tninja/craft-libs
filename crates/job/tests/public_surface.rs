@@ -29,11 +29,12 @@ fn the_names_print_imports_exist_and_have_the_methods_it_calls() {
     assert_eq!(advise(&facts, &RetryPolicy::default()), RetryAdvice::CheckDeviceFirst);
     let _ = Jitter::new(7);
 
-    let tag = Tag::parse("0123456789abcdef0123456789abcdef").or_else(|_: TagError| Tag::parse("0123456789abcdef")).ok();
-    let mut fingerprint = Fingerprint::new("title", Timestamp::from_millis(1)).with_user("user").with_window(Duration::from_secs(5));
-    if let Some(tag) = tag {
-        fingerprint = fingerprint.with_tag(tag);
-    }
+    // A tag is exactly 8 lowercase hex characters; anything else is a `TagError`.
+    let tag = Tag::parse("01234567").expect("a valid tag");
+    assert_eq!(tag.as_str(), "01234567");
+    let _: TagError = Tag::parse("0123456789abcdef").unwrap_err();
+    let _: TagError = Tag::parse("0123456G").unwrap_err();
+    let fingerprint = Fingerprint::new("title", Timestamp::from_millis(1)).with_user("user").with_window(Duration::from_secs(5)).with_tag(tag);
     let _ = (TagPlacement::None, TagSupport::None, fingerprint, JobTimes::default());
 
     let summary = ErrorSummary::new("jammed", "jam");

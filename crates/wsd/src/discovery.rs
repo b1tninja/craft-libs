@@ -14,13 +14,14 @@
 //! * a datagram is considered only if its source address passes the same private-network policy as
 //!   device URLs ([`crate::policy::address_allowed`]);
 //! * advertised `XAddrs` become usable [`DeviceUrl`]s only through that policy, so a public address
-//!   or host name in an announcement is dropped (and counted), never connected to;
+//!   or host name in an announcement is dropped (and counted), never connected to, and a loopback
+//!   address is kept only when the announcement came from loopback;
 //! * everything parsed is bounded (datagram size, list lengths, device count), and a message with a
 //!   duplicated singular element is refused rather than guessed at;
 //! * replies are accepted only if they correlate (`RelatesTo`) with the probe or resolve we sent,
 //!   and an `AppSequence` that goes backwards for a known device is ignored.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use roxmltree::Node;
@@ -111,11 +112,17 @@ impl Target {
 
     /// The advertised addresses that pass the connection policy (numeric loopback, link-local or
     /// private `http` URLs), without duplicates, and how many were dropped.
-    pub fn device_urls(&self) -> (Vec<DeviceUrl>, usize) {
+    ///
+    /// `from` is the source of the announcement. A loopback address names this machine, so it is
+    /// kept only when the announcement itself came from loopback: a device on the network cannot
+    /// point the caller at a local service.
+    pub fn device_urls(&self, from: IpAddr) -> (Vec<DeviceUrl>, usize) {
         let mut urls: Vec<DeviceUrl> = Vec::new();
         let mut dropped = 0;
+        let local_source = from.to_canonical().is_loopback();
         for x in &self.xaddrs {
             match DeviceUrl::parse(x) {
+                Ok(u) if u.host().is_loopback() && !local_source => dropped += 1,
                 Ok(u) if !urls.contains(&u) => urls.push(u),
                 Ok(_) => {}
                 Err(_) => dropped += 1,
@@ -653,7 +660,7 @@ impl Collector<'_> {
             self.report.ignored.stale += 1;
             return;
         }
-        let (urls, dropped_xaddrs) = target.device_urls();
+        let (urls, dropped_xaddrs) = target.device_urls(from.ip());
         if let Some(existing) = self.report.devices.iter_mut().find(|d| d.target.address.eq_ignore_ascii_case(&target.address)) {
             let newer_seq = match (&seq, &existing.app_sequence) {
                 (Some(n), Some(o)) => n.supersedes(o),
@@ -1072,9 +1079,40 @@ mod tests {
                 "garbage",
             ],
         );
-        let (urls, dropped) = t.device_urls();
+        let (urls, dropped) = t.device_urls(peer(5).ip());
         assert_eq!(urls.iter().map(DeviceUrl::as_url).collect::<Vec<_>>(), ["http://10.0.0.5:80/a", "http://[fe80::2]:80/f"]);
         assert_eq!(dropped, 5);
+    }
+
+    #[test]
+    fn loopback_addresses_are_kept_only_from_a_loopback_source() {
+        let t = target("a", print_dev(), &["http://127.0.0.1:631/", "http://[::1]:631/", "http://10.0.0.5/p"]);
+        for from in ["10.0.0.9", "fe80::9"] {
+            let (urls, dropped) = t.device_urls(from.parse().unwrap());
+            assert_eq!(urls.iter().map(DeviceUrl::as_url).collect::<Vec<_>>(), ["http://10.0.0.5:80/p"], "from {from}");
+            assert_eq!(dropped, 2, "from {from}");
+        }
+        for from in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            let (urls, dropped) = t.device_urls(from.parse().unwrap());
+            assert_eq!(urls.len(), 3, "from {from}");
+            assert_eq!(dropped, 0, "from {from}");
+        }
+    }
+
+    #[test]
+    fn an_announcement_from_the_network_cannot_aim_the_client_at_this_machine() {
+        let t = target("a", print_dev(), &["http://127.0.0.1:631/", "http://[::1]:631/", "http://10.0.0.5/p"]);
+        let opts = DiscoverOptions { probe_sends: 1, accept_announcements: true, ..Default::default() };
+        let run = |from: SocketAddr| {
+            let socket = FakeSocket::new();
+            socket.push(Datagram { from, payload: hello("m1", &AppSequence::new(1, 1), &t).into_bytes() });
+            discover(&socket, &opts).unwrap().devices.remove(0)
+        };
+        let remote = run(peer(5));
+        assert_eq!(remote.urls.iter().map(DeviceUrl::as_url).collect::<Vec<_>>(), ["http://10.0.0.5:80/p"]);
+        assert_eq!(remote.dropped_xaddrs, 2);
+        let local = run("127.0.0.1:3702".parse().unwrap());
+        assert_eq!((local.urls.len(), local.dropped_xaddrs), (3, 0));
     }
 
     #[test]

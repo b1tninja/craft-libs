@@ -267,6 +267,31 @@ fn jpeg_of(width: usize, height: usize, pixels: &[u8], quality: u8) -> Vec<u8> {
 }
 
 #[test]
+fn cutting_a_grey_jpeg_keeps_it_grey_and_an_rgb_jpeg_stays_rgb() {
+    use image::ImageEncoder;
+    let (width, height) = (64usize, 40usize);
+    let grey: Vec<u8> = (0..width * height).map(|i| (i * 7 % 200) as u8 + 20).collect();
+    let bytes = jpeg_of(width, height, &grey, 90);
+    assert_eq!(image::load_from_memory(&bytes).expect("decode").color(), image::ColorType::L8);
+
+    let cut = crop_bottom_bytes(&bytes, 25).expect("cut");
+    let decoded = image::load_from_memory(&cut).expect("decode the cut");
+    assert_eq!(crate::image_format(&cut), "jpeg");
+    assert_eq!((decoded.width(), decoded.height()), (64, 25));
+    assert_eq!(decoded.color(), image::ColorType::L8, "a grey scan is still one component after the cut");
+
+    // The same picture as RGB stays RGB, and is larger than the grey one.
+    let rgb: Vec<u8> = grey.iter().flat_map(|v| [*v, *v, *v]).collect();
+    let mut rgb_bytes = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut rgb_bytes, 90)
+        .write_image(&rgb, width as u32, height as u32, image::ExtendedColorType::Rgb8)
+        .expect("jpeg");
+    let rgb_cut = crop_bottom_bytes(&rgb_bytes.into_inner(), 25).expect("cut");
+    assert_eq!(image::load_from_memory(&rgb_cut).expect("decode").color(), image::ColorType::Rgb8);
+    assert!(cut.len() < rgb_cut.len(), "{} grey bytes against {} rgb bytes", cut.len(), rgb_cut.len());
+}
+
+#[test]
 fn a_jpeg_with_visible_paper_noise_is_inferred_with_a_tolerance_and_cropped() {
     let (dpi, width, height) = (200u32, 320usize, 1200usize);
     // Stronger noise than the lossless fixtures: JPEG smooths small amplitudes away.

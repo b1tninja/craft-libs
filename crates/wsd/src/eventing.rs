@@ -521,10 +521,11 @@ fn read_end(node: Node<'_, '_>) -> Result<SubscriptionEnd> {
     let manager =
         xml::child(node, ns::WSE, "SubscriptionManager").ok_or_else(|| Error::Protocol("SubscriptionEnd has no SubscriptionManager".into()))?;
     let status = xml::child_text(node, ns::WSE, "Status").ok_or_else(|| Error::Protocol("SubscriptionEnd has no Status".into()))?;
-    let status = match status.rsplit('/').next().unwrap_or("") {
-        "DeliveryFailure" if status.starts_with(ns::WSE) => EndStatus::DeliveryFailure,
-        "SourceShuttingDown" if status.starts_with(ns::WSE) => EndStatus::SourceShuttingDown,
-        "SourceCancelling" if status.starts_with(ns::WSE) => EndStatus::SourceCancelling,
+    // Only the exact `{WSE}/<Name>` URI is a standard status; look-alikes stay `Other`.
+    let status = match status.strip_prefix(ns::WSE).and_then(|rest| rest.strip_prefix('/')) {
+        Some("DeliveryFailure") => EndStatus::DeliveryFailure,
+        Some("SourceShuttingDown") => EndStatus::SourceShuttingDown,
+        Some("SourceCancelling") => EndStatus::SourceCancelling,
         _ => EndStatus::Other(status),
     };
     Ok(SubscriptionEnd { manager: EndpointRef::parse(manager)?, status, reason: xml::child_text(node, ns::WSE, "Reason").unwrap_or_default() })
@@ -780,6 +781,9 @@ mod tests {
             ("urn:vendor/Odd".to_owned(), EndStatus::Other("urn:vendor/Odd".into())),
             // A look-alike under another namespace is not the standard status.
             ("urn:other/DeliveryFailure".to_owned(), EndStatus::Other("urn:other/DeliveryFailure".into())),
+            // Neither a longer namespace nor a deeper path is the standard status.
+            (format!("{}X/DeliveryFailure", ns::WSE), EndStatus::Other(format!("{}X/DeliveryFailure", ns::WSE))),
+            (format!("{}/DeliveryModes/DeliveryFailure", ns::WSE), EndStatus::Other(format!("{}/DeliveryModes/DeliveryFailure", ns::WSE))),
         ] {
             let body = format!(
                 "<wse:SubscriptionEnd><wse:SubscriptionManager><wsa:Address>http://127.0.0.1:5357/s</wsa:Address><wsa:ReferenceParameters><wse:Identifier>id1</wse:Identifier></wsa:ReferenceParameters></wse:SubscriptionManager><wse:Status>{status}</wse:Status><wse:Reason xml:lang=\"en\">gone</wse:Reason></wse:SubscriptionEnd>"

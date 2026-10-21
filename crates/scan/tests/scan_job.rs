@@ -245,6 +245,30 @@ fn a_short_stack_under_a_counted_request_is_an_interruption_the_person_resolves(
 // ---- Auto ---------------------------------------------------------------------------------------------
 
 #[test]
+fn a_restart_after_an_auto_fallback_asks_for_the_original_request_again() {
+    // Auto, 5 pages wanted, the feeder is empty: the job falls back to the glass for one page by itself.
+    let request = ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
+    let mut job = ScanJob::new(request, ScanJobConfig::default().with_capabilities(true, true, None));
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(SaneLike::new(0).acquire(&plan.settings), t(2)).expect("finish");
+    assert_eq!(job.snapshot().attempts[0].outcome, AttemptOutcome::FellBackToGlass);
+    let plan = job.begin_attempt(t(3)).expect("the fallback attempt");
+    assert_eq!((plan.settings.source, plan.settings.pages), (Source::Glass, 1), "the fallback is the glass, one page");
+
+    // The glass attempt stops with the cover open: a person has to act.
+    let cover = ScanError::native_error(InterruptKind::CoverOpen, NativeCode::new("test", 1, None), InterruptKind::CoverOpen.sentence());
+    job.finish_attempt(Err(cover), t(4)).expect("finish");
+    assert_eq!(job.state(), ScanJobState::Interrupted);
+
+    // They close it, reload the feeder and start over: that is the whole job again, not the glass fallback.
+    let plan = job.begin_attempt_with(t(5), Continuation::Restart).expect("restart");
+    assert_eq!((plan.settings.source, plan.settings.pages), (Source::Auto, 5), "the original request");
+    assert_eq!(plan.source_guess, Some(Source::Feeder));
+    assert_eq!(job.snapshot().expected_pages, Some(5), "the view's total is the original count again");
+    assert!(!plan.fell_back_to_glass);
+}
+
+#[test]
 fn an_empty_feeder_with_no_pages_under_auto_falls_back_to_the_glass_and_records_it() {
     let sane_empty = SaneLike::new(0);
     let request = ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };

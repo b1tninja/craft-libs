@@ -194,10 +194,10 @@ per status bit.
   the feeder unreported (`HandlingStatus::default()`) is what a driver that reports nothing looks like (the inbox
   WSD scan driver), so **every** indicator is `NotReported`, never `Off`. `None` (the backend cannot preflight) is
   the same. Once any bit says something, the others are read as given, except the **ready** bits (see next).
-* The ready bits (`flat_ready`, `duplex_ready`, and `feeder_ready` when `None`) depend on the scanner's
-  `Connection`. On `Usb` a clear ready bit is `Off`. On a network scanner (`Wsd`, `Other`) or `Unknown`, a clear
-  ready bit is `NotReported` even when other bits are set, because those drivers publish no usable tray or ready
-  state; a set bit is a positive reading (`On`) everywhere, and an explicit `feeder_ready: Some(false)` stays `Off`.
+* The ready bits `flat_ready` and `duplex_ready` depend on the scanner's `Connection`. On `Usb` a clear ready bit is
+  `Off`. On a network scanner (`Wsd`, `Other`) or `Unknown`, a clear ready bit is `NotReported` even when other bits are
+  set, because those drivers publish no usable tray or ready state; a set bit is a positive reading (`On`) everywhere.
+  `feeder_ready` does not depend on the connection: it is taken as given, and an explicit `Some(false)` stays `Off`.
   Fault bits (jam, covers, multi-feed, attention, lamp) are not ready bits and are read as given.
 * Indicators for hardware the scanner lacks (no feeder, flatbed or duplexer) are left out unless the status asserts
   them. The lamp bit is an error flag: `LampError` is `On` or "no error reported".

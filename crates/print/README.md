@@ -250,7 +250,9 @@ Renamed relative to the earlier drafts of this crate: `JobTag` is `Tag` (and is 
   overrides `Job::grayscale` unless `Auto`) and `expected_pages`. Build with `JobOptions::new()` and
   the `with_*` methods; the struct is `#[non_exhaustive]`. A backend applies what it can;
   `PrinterDetails::honoured` lists the `JobHint`s it applies (`Media`, `Orientation`, `Quality`,
-  `Resolution` and `Colour` joined `Copies`, ...). The built-in spooler honours the colour choice only.
+  `Resolution` and `Colour` joined `Copies`, ...). The built-in spooler honours `Copies`, `Collate`, `Duplex`,
+  `Colour` and `Scaling` everywhere, `Quality` and `Resolution` on Windows (the resolution the PDF is drawn at),
+  and driver keywords on CUPS.
   `Quality` is `Draft`, `Normal`, `High` or `Photo` (hint only; `Quality::from_name`/`ALL`). A backend
   maps it to the printer's own setting when the printer offers a matching value and drops it with a
   warning otherwise.
@@ -373,7 +375,10 @@ let submitted = craft_print::submit_job(request)?; // returns when the printer h
   (`printer-state`) tells a forgotten job (the printer answers) from a printer at a wrong address or path (it
   answers not-found too: `ErrorKind::NotFound` saying the printer was not found) or "could not tell" (the extra
   read failed: `Failed`, `Idempotent`). Never repeated; see [docs/ipp.md](docs/ipp.md).
-* **Not implemented:** TLS, authentication, IPP subscriptions (events) and discovery.
+* **Not implemented:** TLS, authentication, IPP subscriptions (events) and discovery. Documents and job requests
+  therefore travel unencrypted: another device on the same network segment can read them. The consent and
+  local-address checks limit where a document is sent, not who can read it on the way, so use these backends only on
+  a network you trust. `ipps://` and `https://` are refused rather than quietly sent in the clear.
 * **Tests.** Printer-free: the codec on static byte vectors (round trips, truncations, hostile input), request
   builders against expected bytes, canned replies through a small scripted transport (a mock transport,
   not a printer), the status and retry tables, and registry-level tests (routing, consent, format

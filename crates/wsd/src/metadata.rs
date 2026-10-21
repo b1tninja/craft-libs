@@ -127,7 +127,7 @@ impl DeviceMetadata {
                 DIALECT_THIS_DEVICE if out.device.is_none() => out.device = xml::child(section, ns::WSDP, "ThisDevice").map(read_device),
                 DIALECT_RELATIONSHIP => {
                     for rel in xml::children(section, ns::WSDP, "Relationship").filter(|r| r.attribute("Type") == Some(RELATIONSHIP_HOST)) {
-                        out.read_relationship(rel)?;
+                        out.read_relationship(rel);
                     }
                 }
                 _ => {}
@@ -138,18 +138,23 @@ impl DeviceMetadata {
     }
 
     /// Take a `Relationship`'s `Host` (the first one seen wins) and up to `MAX_SERVICES` `Hosted` entries.
-    fn read_relationship(&mut self, rel: Node<'_, '_>) -> Result<()> {
+    ///
+    /// An entry that is ambiguous (two addresses in one reference, two `Types`, an oversized address) is
+    /// dropped, so the client never guesses where to connect; it does not make the whole document
+    /// unreadable, and the well-formed entries beside it stay usable.
+    fn read_relationship(&mut self, rel: Node<'_, '_>) {
         if let Some(h) = xml::child(rel, ns::WSDP, "Host")
             && self.host.is_none()
         {
-            self.host = Some(read_entry(h)?);
+            self.host = read_entry(h).ok();
         }
         for h in xml::children(rel, ns::WSDP, "Hosted").take(MAX_SERVICES) {
-            if self.hosted.len() < MAX_SERVICES {
-                self.hosted.push(read_entry(h)?);
+            if let Ok(entry) = read_entry(h)
+                && self.hosted.len() < MAX_SERVICES
+            {
+                self.hosted.push(entry);
             }
         }
-        Ok(())
     }
 
     /// The first hosted service that lists `service_type`.
@@ -382,15 +387,15 @@ mod tests {
         assert!(matches!(read("not xml"), Err(Error::Xml(_))));
         let empty = read(&format!("<wsx:Metadata xmlns:wsx=\"{}\"/>", ns::WSX)).unwrap();
         assert_eq!(empty, DeviceMetadata::default());
-        // Two Types on one hosted entry, and two addresses in one reference, are refused.
+        // Two Types on one hosted entry, and two addresses in one reference, drop that entry only.
         let base = document(scan_ns(), "wscn", "ScannerService", "http://127.0.0.1:1/x");
         let two_types = base.replace("<wsdp:ServiceId>uri:svc</wsdp:ServiceId>", "<wsdp:Types>wsdp:Device</wsdp:Types>");
-        assert!(matches!(read(&two_types), Err(Error::Protocol(m)) if m.contains("more than one Types")));
+        assert!(read(&two_types).unwrap().hosted.is_empty());
         let two_addr = base.replace(
             "<wsa:Address>http://127.0.0.1:1/x</wsa:Address>",
             "<wsa:Address>http://127.0.0.1:1/x</wsa:Address><wsa:Address>http://127.0.0.1:2/y</wsa:Address>",
         );
-        assert!(matches!(read(&two_addr), Err(Error::Protocol(_))));
+        assert!(read(&two_addr).unwrap().hosted.is_empty());
         // Duplicate descriptive sections: the first wins.
         let dup = base.replacen("<wsx:MetadataSection Dialect=\"http://schemas.xmlsoap.org/ws/2006/02/devprof/ThisDevice\">", "<wsx:MetadataSection Dialect=\"http://schemas.xmlsoap.org/ws/2006/02/devprof/ThisDevice\"><wsdp:ThisDevice><wsdp:FriendlyName>first</wsdp:FriendlyName></wsdp:ThisDevice></wsx:MetadataSection><wsx:MetadataSection Dialect=\"http://schemas.xmlsoap.org/ws/2006/02/devprof/ThisDevice\">", 1);
         assert_eq!(read(&dup).unwrap().device.unwrap().friendly_name, "first");
@@ -415,6 +420,25 @@ mod tests {
         assert_eq!(read(&big).unwrap().hosted.len(), MAX_SERVICES);
         let sections: String = (0..200).map(|_| "<wsx:MetadataSection Dialect=\"urn:x\"/>").collect();
         assert!(read(&format!("<wsx:Metadata xmlns:wsx=\"{}\">{sections}</wsx:Metadata>", ns::WSX)).is_ok());
+    }
+
+    #[test]
+    fn one_ambiguous_hosted_entry_does_not_hide_the_well_formed_ones() {
+        let print_ns = ServiceKind::Print.descriptor().namespace;
+        let good = document(print_ns, "svc", "PrinterServiceType", "http://127.0.0.1:5357/print");
+        let two_types = "<wsdp:Hosted><wsdp:Types>wsdp:Device</wsdp:Types><wsdp:Types>wsdp:Device</wsdp:Types></wsdp:Hosted>";
+        let two_addr = "<wsdp:Hosted><wsa:EndpointReference><wsa:Address>http://127.0.0.1:1/a</wsa:Address><wsa:Address>http://127.0.0.1:2/b</wsa:Address></wsa:EndpointReference></wsdp:Hosted>";
+        for bad in [two_types, two_addr] {
+            let text = good.replacen("<wsdp:Hosted>", &format!("{bad}<wsdp:Hosted>"), 1);
+            let m = read(&text).unwrap();
+            assert_eq!(m.hosted.len(), 1, "only the well-formed entry is kept");
+            assert_eq!(m.endpoint_for(ServiceKind::Print).unwrap().as_url(), "http://127.0.0.1:5357/print");
+        }
+        // An ambiguous Host entry is dropped the same way and leaves the services readable.
+        let text = good.replacen("<wsdp:Host>", "<wsdp:Host><wsdp:Types>wsdp:Device</wsdp:Types><wsdp:Types>wsdp:Device</wsdp:Types>", 1);
+        let m = read(&text).unwrap();
+        assert!(m.host.is_none());
+        assert_eq!(m.kinds(), [ServiceKind::Print]);
     }
 
     #[test]

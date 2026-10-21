@@ -134,6 +134,10 @@ pub struct RetryFacts {
 
 impl RetryFacts {
     /// Facts for the first failure (`attempts_so_far` is 1) with no device hint and seed 0.
+    ///
+    /// The jitter is a function of the seed and the attempt number only, so with the default seed every caller gets the same
+    /// wait for the same attempt and retries are not spread out. When several jobs can fail together (the same busy device,
+    /// many processes), give each its own value with [`Self::with_jitter_seed`], for example a hash of its job id.
     pub const fn new(retryable: bool, safety: RetrySafety) -> Self {
         Self { retryable, safety, retry_after: None, attempts_so_far: 1, jitter_seed: 0 }
     }
@@ -152,7 +156,8 @@ impl RetryFacts {
         self
     }
 
-    /// Sets the seed of the jitter; the same facts and seed always give the same advice.
+    /// Sets the seed of the jitter; the same facts and seed always give the same advice. Use a different seed per job or client
+    /// (a hash of the job id, a counter) so that retries that start together do not all come back together.
     #[must_use]
     pub const fn with_jitter_seed(mut self, seed: u64) -> Self {
         self.jitter_seed = seed;

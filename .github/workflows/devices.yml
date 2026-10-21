@@ -26,6 +26,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy -p craft-devices --all-targets --locked -- -D warnings
       - run: cargo test -p craft-devices --locked
@@ -43,4 +44,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
       - run: cargo check -p craft-devices --target wasm32-unknown-unknown --locked

@@ -795,13 +795,16 @@ impl ScanJob {
     /// outcome was unknown, or was cut off mid-scan ([`ScanJobJournal::effective_state`]), and stays
     /// `CheckDeviceFirst`, with or without kept pages; else `Interrupted`. The last error, the warnings and the
     /// attempt count carry over. `settings` is the original request; when its `pages` is `0` and the journal
-    /// knows the wanted count, that count is used, so `--continue DIR` needs no `--pages`.
+    /// knows the wanted count, that count is used, so `--continue DIR` needs no `--pages`. A journal written with a
+    /// [`ScanJobJournal::version`] newer than [`ScanJobJournal::VERSION`] may mean something this reader cannot
+    /// tell, so its outcome is treated as unknown too: `NeedsAttention` and `CheckDeviceFirst`, whatever its state.
     pub fn continuing_from(settings: ScanSettings, config: ScanJobConfig, journal: ScanJobJournal) -> Self {
         let mut settings = settings;
         if settings.pages == 0 && !settings.duplex {
             settings.pages = journal.expected_pages.unwrap_or(0);
         }
-        let unknown = journal.effective_state() == ScanJobState::NeedsAttention;
+        // A journal from a newer format may mean something this reader cannot tell: never resume it automatically.
+        let unknown = journal.version > ScanJobJournal::VERSION || journal.effective_state() == ScanJobState::NeedsAttention;
         let attempts = journal.attempts_total;
         let mut job = Self::continuing(settings, config, journal.pages);
         // An unknown outcome is never a fresh job, even with nothing kept: the scanner may have moved.

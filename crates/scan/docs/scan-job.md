@@ -291,5 +291,6 @@ timeline of earlier runs beyond the count and the last error.
 defaulted. A page `format` this version does not know reads as `bin`; an unknown `InterruptKind` reads as `other`
 (craft-job's `Unknown` fallbacks cover job and device state). Other enums fail on an unknown value rather than
 guess. `version` is written as `ScanJobJournal::VERSION` (1); additions keep it, a change that cannot be read by
-an older reader raises it. Durations and timestamps are milliseconds (craft-job README, "Wire format").
+an older reader raises it. A reader that meets a `version` newer than its own does not trust `state`: the job
+seeds as an unknown outcome (`NeedsAttention`, `CheckDeviceFirst`) so nothing is resent on a guess. Durations and timestamps are milliseconds (craft-job README, "Wire format").
 

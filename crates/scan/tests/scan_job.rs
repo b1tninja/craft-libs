@@ -351,6 +351,26 @@ fn an_auto_that_the_backend_answered_from_the_glass_completes_with_the_one_page_
 }
 
 #[test]
+fn an_append_answered_from_the_glass_after_a_feeder_stop_is_not_a_complete_scan() {
+    // Auto wants 20 pages, the feeder stops after 12. The person chooses Append without reloading it, the backend
+    // answers Auto from the glass and gives one page: 13 of 20 is a shortfall, never a quiet Completed.
+    let request = ScanSettings { source: Source::Auto, pages: 20, ..ScanSettings::default() };
+    let mut job = ScanJob::new(request, ScanJobConfig::default().with_capabilities(true, true, None));
+    let plan = job.begin_attempt(t(1)).expect("first attempt");
+    job.finish_attempt(SaneLike::new(12).acquire(&plan.settings), t(40)).expect("finish");
+    assert_eq!(job.snapshot().state, ScanJobState::Interrupted);
+    assert_eq!(job.snapshot().pages.len(), 12);
+
+    let plan = job.begin_attempt_with(t(90), Continuation::Append).expect("append");
+    let wia = WiaLike { bits: 0x3, fail_listing: false };
+    job.finish_attempt(wia.acquire(&plan.settings), t(120)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!(snap.pages.len(), 13);
+    assert_eq!(snap.expected_pages, Some(20), "the glass answer to an append does not shrink what was asked for");
+    assert_ne!(snap.state, ScanJobState::Terminal(Outcome::Completed), "{:?}", snap.state);
+}
+
+#[test]
 fn auto_does_not_fall_back_without_a_glass_or_after_pages_or_for_a_jam() {
     let auto = || ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
 

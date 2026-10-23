@@ -295,9 +295,8 @@ fn cancelling_while_watching_sends_cancel_job_and_reports_canceled() {
 
 #[test]
 fn a_cancel_that_loses_the_race_with_the_end_of_the_job_reports_the_real_outcome() {
-    let ticket = craft_print::wsd::ticket::PrintTicket { job_name: "j".into(), user_name: "u".into(), ..Default::default() };
     let cfg = FakeConfig { cancel_ended_is_operation_failed: true, ..Default::default() };
-    let p = FakePrinter::new(cfg.clone());
+    let p = FakePrinter::new(cfg);
     let c = client(&p);
     let id = print_document(&c, &PassThrough::pdf(PDF.to_vec()), &opts(), yes(), &CancelToken::new()).unwrap().job_id;
     // Explicit cancel of a finished job: tolerated, and the job stays Completed.
@@ -311,13 +310,22 @@ fn a_cancel_that_loses_the_race_with_the_end_of_the_job_reports_the_real_outcome
     let (outcome, status) = watch_job(&c, id, quick(), &token).unwrap();
     assert_eq!(outcome, JobOutcome::Completed);
     assert_eq!(status.unwrap().state, JobState::Completed);
-    // A still-running job refused with the same fault is a real failure and not hidden: with a
-    // transport that fails the status read, the fault is kept.
-    let hang = FakePrinter::new(FakeConfig { ending: Ending::Hangs, ..cfg });
-    let hc = client(&hang);
-    let hid = hc.create_print_job(&ticket).unwrap();
-    craft_print::wsd::job::cancel_job_tolerant(&hc, hid).unwrap(); // cancels normally
-    assert_eq!(hc.job_status(hid).unwrap().state, JobState::Canceled);
+    // A refusal the status cannot confirm as "already ended" is a real failure and not hidden: with
+    // a transport that fails the status read, the OperationFailed fault is kept.
+    use craft_print::wsd::adapter::{DeviceUrl, Request, Response, Transport, TransportKind, WireError};
+    struct StatusDown(std::sync::Arc<FakePrinter>);
+    impl Transport for StatusDown {
+        fn post(&self, _: &DeviceUrl, request: Request) -> Result<Response, WireError> {
+            if request.soap_action.ends_with("GetJobElements") {
+                return Err(WireError::transport(TransportKind::ConnectionClosed, "closed without a reply"));
+            }
+            let (status, content_type, body) = self.0.handle(&request.content_type, &request.body);
+            Ok(Response::new(status, Some(content_type), body))
+        }
+    }
+    let blind = Client::new(StatusDown(p.clone()), PrinterUrl::parse("http://127.0.0.1:5357/print").unwrap());
+    let err = craft_print::wsd::job::cancel_job_tolerant(&blind, id).unwrap_err();
+    assert_eq!(err.fault().map(|f| f.code.clone()), Some(FaultCode::OperationFailed), "{err:?}");
 }
 
 #[test]

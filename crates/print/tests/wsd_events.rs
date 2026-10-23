@@ -490,6 +490,18 @@ fn a_flood_is_rate_limited_and_a_slow_sender_does_not_stop_the_listener() {
     assert!(rig.stats().rejected_rate >= 7);
 }
 
+#[test]
+fn a_connection_deadline_too_large_to_add_is_no_deadline_and_not_a_panic() {
+    // `Duration::MAX` as "no limit" overflows `Instant + Duration`; the listener must survive it.
+    let tuning = EventTuning { connection_deadline: Duration::MAX, ..EventTuning::default() };
+    let rig = rig_with(tuning, FakeConfig::default());
+    let rx = rig.subscribed(1);
+    assert_eq!(rig.send_event("JobStatusEvent", 1, "huge-deadline"), Some(202));
+    assert_eq!(rx.take(), 1);
+    // And the listener is still there for the next one.
+    assert_eq!(rig.send_event("JobStatusEvent", 1, "huge-deadline-2"), Some(202));
+}
+
 // ---------------------------------------------------------------- lease, trust and fallback
 
 #[test]

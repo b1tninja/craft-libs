@@ -20,6 +20,17 @@ fn the_comparison_looks_at_every_byte_and_the_length() {
 }
 
 #[test]
+fn a_huge_lease_still_has_a_renewal_point() {
+    use std::time::Duration;
+    assert_eq!(renew_after(Duration::from_secs(600), 50), Duration::from_secs(300));
+    assert_eq!(renew_after(Duration::from_secs(600), 500), Duration::from_secs(600), "more than all of it is all of it");
+    // Duration::MAX times 50 does not fit; this must not panic and must stay below the lease.
+    let r = renew_after(Duration::MAX, 50);
+    assert!(r > Duration::from_secs(1 << 40) && r < Duration::MAX);
+    assert_eq!(renew_after(Duration::MAX, 100), Duration::MAX / 100 * 100);
+}
+
+#[test]
 fn tokens_are_long_hex_and_never_repeat() {
     let tokens: Vec<String> = (0..64).map(|_| new_token()).collect();
     for t in &tokens {

@@ -591,7 +591,7 @@ impl Events {
                         let granted = granted_lease(subscription.expires, tuning.lease);
                         sub.handle = Some(Handle { subscription });
                         sub.expires_at = now.saturating_add(granted);
-                        sub.renew_at = now.saturating_add(granted * tuning.renew_percent.min(100) / 100);
+                        sub.renew_at = now.saturating_add(renew_after(granted, tuning.renew_percent));
                         sub.degraded = false;
                         sub.failures = 0;
                         sub.last_event = None;
@@ -612,7 +612,7 @@ impl Events {
                     Ok(expires) => {
                         let granted = granted_lease(expires, tuning.lease);
                         sub.expires_at = now.saturating_add(granted);
-                        sub.renew_at = now.saturating_add(granted * tuning.renew_percent.min(100) / 100);
+                        sub.renew_at = now.saturating_add(renew_after(granted, tuning.renew_percent));
                         sub.degraded = false;
                     }
                     Err(WsdError::Fault(_)) => {
@@ -675,6 +675,13 @@ impl Drop for Events {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// The share of `granted` (percent, at most 100) after which a lease is renewed. A lease so long
+/// that the multiplication overflows (an app can set a huge `lease`) is cut by the percentage first.
+fn renew_after(granted: Duration, percent: u32) -> Duration {
+    let percent = percent.min(100);
+    granted.checked_mul(percent).map_or_else(|| (granted / 100).saturating_mul(percent), |d| d / 100)
 }
 
 /// The lease the printer granted, or what we asked for when it said nothing we can use. An

@@ -40,6 +40,8 @@ enum Step {
 struct Script {
     steps: Arc<Mutex<VecDeque<Step>>>,
     seen: Arc<Mutex<Vec<Message>>>,
+    /// The time limit each request was sent with, in order.
+    timeouts: Arc<Mutex<Vec<Duration>>>,
 }
 
 impl Script {
@@ -99,6 +101,7 @@ impl Transport for Script {
         assert_eq!(op.attributes[2].name, "printer-uri");
         assert_ne!(message.request_id, 0);
         self.seen.lock().unwrap().push(message.clone());
+        self.timeouts.lock().unwrap().push(request.timeout);
         let step = self.steps.lock().unwrap().pop_front().unwrap_or_else(|| panic!("no reply queued for operation {:#06x}", message.code));
         match step {
             Step::Reply(f) => Ok(Response::new(200, Some("application/ipp".into()), f(&message).encode().unwrap())),
@@ -107,6 +110,29 @@ impl Transport for Script {
             Step::Fail(kind, stage) => Err(WireError::transport_at(kind, stage, "scripted")),
         }
     }
+}
+
+#[test]
+fn a_large_document_gets_upload_time_on_top_of_the_limit() {
+    // 64 KiB/s is the slowest upload the limit allows for: 6.4 MiB of document is 100 s more.
+    let base = Duration::from_secs(30);
+    assert_eq!(super::client::with_upload_allowance(base, 0), base, "a small request keeps its limit");
+    assert_eq!(super::client::with_upload_allowance(base, 10 * 1024), base);
+    assert_eq!(super::client::with_upload_allowance(base, 6_553_600), base + Duration::from_secs(100));
+    assert_eq!(super::client::with_upload_allowance(Duration::MAX, usize::MAX), Duration::MAX, "no overflow");
+
+    // Through the client: a Print-Job carrying a big document is sent with the longer limit, a
+    // Get-Printer-Attributes with the plain one.
+    let script = Script::new();
+    script.ok(vec![printer_group()]).ok(accepted(7));
+    let client = Client::new(script.clone(), PrinterUri::parse(URI).unwrap())
+        .with_limits(super::NetworkLimits { timeout: base, ..super::NetworkLimits::default() });
+    client.get_printer_attributes(&[]).unwrap();
+    let document = vec![0u8; 6_553_600];
+    client.print_job(&super::client::JobRequest::default(), &document).unwrap();
+    let timeouts = script.timeouts.lock().unwrap().clone();
+    assert_eq!(timeouts[0], base, "a short request keeps the limit");
+    assert!(timeouts[1] >= base + Duration::from_secs(100), "the document's upload is allowed for: {:?}", timeouts[1]);
 }
 
 /// The operation group every reply starts with: UTF-8 charset and English.

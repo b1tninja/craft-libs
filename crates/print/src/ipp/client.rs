@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
+use std::time::Duration;
 
 use super::adapter::{NetworkLimits, Request, Transport};
 use super::codec::{Attribute, Group, GroupTag, Limits, Message, Value};
@@ -13,6 +14,18 @@ use super::error::{IppError, Result};
 use super::model::{JobAttrs, PrinterAttrs};
 use super::policy::PrinterUri;
 use super::protocol::{Operation, StatusCode};
+
+/// The slowest upload the time limit allows for, in bytes a second. The limit covers the whole
+/// request, body included, so a large document (`Print-Job`, `Send-Document`) over a slow link
+/// must not use up the budget meant for the printer's reply: that would end as an outcome-unknown
+/// timeout with the job possibly half made. The same floor as the WS-Print client's
+/// (`craft_wsd::SoapClient`).
+const UPLOAD_FLOOR_BYTES_PER_SEC: u64 = 64 * 1024;
+
+/// `timeout` for the exchange plus the time to send `body_len` bytes at the upload floor.
+pub(super) fn with_upload_allowance(timeout: Duration, body_len: usize) -> Duration {
+    timeout.saturating_add(Duration::from_secs(body_len as u64 / UPLOAD_FLOOR_BYTES_PER_SEC))
+}
 
 /// The media type of every request.
 pub const CONTENT_TYPE: &str = "application/ipp";
@@ -322,13 +335,11 @@ impl<T: Transport> Client<T> {
         if body.len() > self.limits.max_request {
             return Err(IppError::TooLarge("the request", self.limits.max_request));
         }
-        let request = Request {
-            content_type: CONTENT_TYPE.to_owned(),
-            soap_action: String::new(),
-            body,
-            timeout: self.limits.timeout,
-            max_response: self.limits.max_response,
-        };
+        // The limit covers the whole exchange, upload included: a document must not use up the time
+        // meant for the printer's answer (see `with_upload_allowance`).
+        let timeout = with_upload_allowance(self.limits.timeout, body.len());
+        let request =
+            Request { content_type: CONTENT_TYPE.to_owned(), soap_action: String::new(), body, timeout, max_response: self.limits.max_response };
         let response = self.transport.post(self.uri.as_device(), request)?;
         if response.status != 200 {
             return Err(IppError::Http { status: response.status, retry_after: response.retry_after });

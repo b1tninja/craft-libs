@@ -154,11 +154,17 @@ impl JobFilter {
     }
 }
 
+/// The fewest characters a listed title needs to count as a printer's cut-short version of a longer
+/// one. A printer cuts a title at its own limit, which is tens of characters; a one or two letter
+/// title that happens to begin the wanted one is some other job (matching it could make a
+/// reconcile accept a foreign job and never resend the lost document).
+const MIN_CUT_CHARS: usize = 8;
+
 /// Whether a listed title is the title that was sent: equal without tag suffixes, or a printer's
-/// cut-short version of it.
+/// cut-short version of it (at least [`MIN_CUT_CHARS`] characters of it).
 pub(crate) fn title_matches(listed: &str, wanted: &str) -> bool {
     let (listed, wanted) = (Tag::strip(listed), Tag::strip(wanted));
-    listed == wanted || (!listed.is_empty() && wanted.starts_with(listed))
+    listed == wanted || (listed.chars().count() >= MIN_CUT_CHARS && wanted.starts_with(listed))
 }
 
 /// Apply a filter to a listing: marks [`RemoteJob::ours`] from [`JobFilter::tag`] and drops what the
@@ -345,6 +351,11 @@ mod tests {
     fn a_title_the_printer_cut_short_still_matches() {
         assert!(title_matches("Quarterly", "Quarterly report"));
         assert!(!title_matches("", "Quarterly report"));
+        // A tiny prefix is another job's title, not a cut-short one; an exact short title still matches.
+        assert!(!title_matches("Q", "Quarterly report"));
+        assert!(!title_matches("Quarter", "Quarterly report"));
+        assert!(title_matches("Report", "Report"));
+        assert!(title_matches("Quarterl", "Quarterly report"));
         assert!(!title_matches("Quarterly reports", "Quarterly report"));
         assert!(title_matches("Report [ref abc123de]", "Report"));
     }

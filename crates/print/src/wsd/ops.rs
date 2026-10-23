@@ -321,12 +321,26 @@ fn read_ticket(n: Node<'_, '_>) -> PrintTicket {
 }
 
 /// GetActiveJobs (`container` = `ActiveJobs`) and GetJobHistory (`JobHistory`).
+///
+/// More than [`MAX_ITEMS`] active jobs is [`WsdError::TooLarge`]: the list is a queue, and a
+/// partial one would hide jobs. A history, which a busy printer can make as long as it likes, is
+/// not refused: it is cut to the [`MAX_ITEMS`] rows with the highest job ids. WS-Print does not
+/// say in which order a history is listed, and job ids grow with submission, so the newest jobs
+/// (the ones a caller looking for a job it just sent needs) are kept whatever the order; the rows
+/// kept stay in the order the printer gave them.
 pub fn parse_job_list(response: Node<'_, '_>, container: &str) -> Result<Vec<JobSummary>> {
     let list = child(response, ns::WPRT, container).ok_or_else(|| WsdError::Protocol(format!("no {container} in the reply")))?;
+    let history = container == "JobHistory";
     let mut out = Vec::new();
     for s in list.children().filter(|c| is(*c, ns::WPRT, "JobSummary")) {
         if out.len() >= MAX_ITEMS {
-            return Err(WsdError::TooLarge("the job list", MAX_ITEMS));
+            if !history {
+                return Err(WsdError::TooLarge("the job list", MAX_ITEMS));
+            }
+            // Keep memory bounded: trim whenever the buffer has doubled.
+            if out.len() >= 2 * MAX_ITEMS {
+                keep_newest(&mut out);
+            }
         }
         out.push(JobSummary {
             status: read_job_status(s)?,
@@ -334,7 +348,20 @@ pub fn parse_job_list(response: Node<'_, '_>, container: &str) -> Result<Vec<Job
             user_name: child(s, ns::WPRT, "JobOriginatingUserName").map(text).unwrap_or_default(),
         });
     }
+    if out.len() > MAX_ITEMS {
+        keep_newest(&mut out);
+    }
     Ok(out)
+}
+
+/// Cut `rows` to the [`MAX_ITEMS`] with the highest job ids, in their present order.
+fn keep_newest(rows: &mut Vec<JobSummary>) {
+    let mut ids: Vec<u32> = rows.iter().map(|r| r.status.job_id).collect();
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    if let Some(&cut) = ids.get(MAX_ITEMS - 1) {
+        rows.retain(|r| r.status.job_id >= cut);
+    }
+    rows.truncate(MAX_ITEMS);
 }
 
 #[cfg(test)]
@@ -540,11 +567,26 @@ mod tests {
         assert_eq!((list[1].job_name.as_str(), list[0].status.state.clone()), ("n2", JobState::Processing));
         assert!(with("<wprt:ActiveJobs/>", |n| parse_job_list(n, "ActiveJobs")).unwrap().is_empty());
         assert!(with("", |n| parse_job_list(n, "ActiveJobs")).is_err());
+        // An active list over the cap is refused: a partial queue would hide jobs.
         let flood: String = (1..=(MAX_ITEMS as u32 + 5)).map(one).collect();
         assert!(matches!(
-            with(&format!("<wprt:JobHistory>{flood}</wprt:JobHistory>"), |n| parse_job_list(n, "JobHistory")),
+            with(&format!("<wprt:ActiveJobs>{flood}</wprt:ActiveJobs>"), |n| parse_job_list(n, "ActiveJobs")),
             Err(WsdError::TooLarge(..))
         ));
+        // A history over the cap is cut to the newest MAX_ITEMS, not refused, whatever its order.
+        let total = 300u32;
+        let ids = |rows: &[JobSummary]| rows.iter().map(|r| r.status.job_id).collect::<Vec<_>>();
+        let ascending: String = (1..=total).map(one).collect();
+        let kept = with(&format!("<wprt:JobHistory>{ascending}</wprt:JobHistory>"), |n| parse_job_list(n, "JobHistory")).unwrap();
+        assert_eq!(kept.len(), MAX_ITEMS);
+        assert_eq!(ids(&kept), (total - MAX_ITEMS as u32 + 1..=total).collect::<Vec<_>>(), "oldest-first: the newest are kept");
+        let descending: String = (1..=total).rev().map(one).collect();
+        let kept = with(&format!("<wprt:JobHistory>{descending}</wprt:JobHistory>"), |n| parse_job_list(n, "JobHistory")).unwrap();
+        assert_eq!(ids(&kept), (total - MAX_ITEMS as u32 + 1..=total).rev().collect::<Vec<_>>(), "newest-first: same rows, same order");
+        // Far over the cap still ends at MAX_ITEMS.
+        let many: String = (1..=(MAX_ITEMS as u32 * 5)).map(one).collect();
+        let kept = with(&format!("<wprt:JobHistory>{many}</wprt:JobHistory>"), |n| parse_job_list(n, "JobHistory")).unwrap();
+        assert_eq!((kept.len(), kept[0].status.job_id), (MAX_ITEMS, MAX_ITEMS as u32 * 4 + 1));
     }
 
     #[test]

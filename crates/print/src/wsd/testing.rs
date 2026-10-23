@@ -72,6 +72,11 @@ pub struct FakeConfig {
     /// GetJobHistory answers a fault with this sub-code (`prefix:Local`, e.g.
     /// `wsa:ActionNotSupported` or `wprt:ServerErrorTemporaryError`) instead of the history.
     pub history_fault: Option<&'static str>,
+    /// Extra finished jobs of other people, older than any real job, listed first in GetJobHistory
+    /// (a busy printer's long history).
+    pub history_filler: u32,
+    /// The id of the first job the printer creates (after the filler's).
+    pub first_job_id: u32,
     /// `PrinterState` and its reasons.
     pub state: &'static str,
     pub state_reasons: Vec<&'static str>,
@@ -97,6 +102,8 @@ impl Default for FakeConfig {
             fail_send: false,
             cancel_ended_is_operation_failed: false,
             history_fault: None,
+            history_filler: 0,
+            first_job_id: 1,
             state: "Idle",
             state_reasons: Vec::new(),
             media: vec!["iso_a4_210x297mm"],
@@ -219,7 +226,8 @@ fn unbase64(s: &str) -> Vec<u8> {
 
 impl FakePrinter {
     pub fn new(config: FakeConfig) -> Arc<Self> {
-        Arc::new(Self { config: Mutex::new(config), state: Mutex::new(State { next_id: 1, ..Default::default() }) })
+        let next_id = config.first_job_id;
+        Arc::new(Self { config: Mutex::new(config), state: Mutex::new(State { next_id, ..Default::default() }) })
     }
 
     pub fn log(&self) -> Vec<Recorded> {
@@ -436,12 +444,16 @@ impl FakePrinter {
             "GetJobHistory" if cfg.history_fault.is_some() => flt("Receiver", cfg.history_fault.unwrap_or_default(), "the history is not available"),
             "GetActiveJobs" | "GetJobHistory" => {
                 let active = op == "GetActiveJobs";
-                let rows: String = st
+                let filler: String = (0..if active { 0 } else { cfg.history_filler })
+                    .map(|i| format!("<wprt:JobSummary><wprt:JobId>{}</wprt:JobId><wprt:JobState>Completed</wprt:JobState><wprt:JobName>old{i}</wprt:JobName><wprt:JobOriginatingUserName>other</wprt:JobOriginatingUserName><wprt:KOctetsProcessed>0</wprt:KOctetsProcessed><wprt:MediaSheetsCompleted>0</wprt:MediaSheetsCompleted><wprt:NumberOfDocuments>1</wprt:NumberOfDocuments></wprt:JobSummary>", i + 1))
+                    .collect();
+                let live: String = st
                     .jobs
                     .iter()
                     .filter(|(_, j)| active != matches!(j.state, "Completed" | "Canceled" | "Aborted"))
                     .map(|(id, j)| format!("<wprt:JobSummary><wprt:JobId>{id}</wprt:JobId><wprt:JobState>{}</wprt:JobState><wprt:JobName>{}</wprt:JobName><wprt:JobOriginatingUserName>{}</wprt:JobOriginatingUserName><wprt:KOctetsProcessed>0</wprt:KOctetsProcessed><wprt:MediaSheetsCompleted>0</wprt:MediaSheetsCompleted><wprt:NumberOfDocuments>1</wprt:NumberOfDocuments></wprt:JobSummary>", j.state, j.name, j.user))
                     .collect();
+                let rows = filler + &live;
                 let wrap = if active { "ActiveJobs" } else { "JobHistory" };
                 ok(&op, &format!("<wprt:{wrap}>{rows}</wprt:{wrap}>"))
             }

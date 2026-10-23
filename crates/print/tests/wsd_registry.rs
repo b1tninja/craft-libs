@@ -941,6 +941,22 @@ fn a_history_the_printer_cannot_give_right_now_is_an_error_not_an_empty_history(
 }
 
 #[test]
+fn a_history_longer_than_the_cap_still_finds_the_job_just_sent() {
+    // A busy printer lists far more finished jobs than the backend will hold. The reply to
+    // SendDocument is lost, so the job can only be found by listing; the list must not be an error.
+    let cfg = FakeConfig { history_filler: 300, first_job_id: 1000, ending: Ending::Hangs, ..FakeConfig::default() };
+    let (_p, b, r) = setup(cfg.clone());
+    let submitted = r.submit_job(request(job(URL))).unwrap();
+    // Finish the job so that it is in the history, behind 300 older rows.
+    let job_id = submitted.job.unwrap();
+    r.cancel_job(&job_id).unwrap();
+    assert!(matches!(b.reconcile(URL, "Report").unwrap(), Reconciled::Found(_)), "found among the newest 256");
+    let fingerprint = craft_print::Fingerprint::new("Report", craft_print::Timestamp::default());
+    assert!(matches!(r.find_job(&id(URL), &fingerprint).unwrap(), craft_print::Reconciled::Found(_)));
+    assert!(r.list_jobs(&id(URL), &craft_print::JobFilter::new()).unwrap().iter().any(|j| j.id == job_id));
+}
+
+#[test]
 fn an_unknown_outcome_submit_is_never_retried_automatically_but_a_safe_refusal_is() {
     let policy = RetryPolicy::default();
     let cancel = CancelToken::new();

@@ -288,6 +288,7 @@ adapters do in this change.
 | States | `Pending`, `PendingHeld`, `Processing`/`Started`/`Terminating`, `ProcessingStopped`, `Completed` (refined by reasons), `Canceled`, `Aborted` map to the neutral states, as `job_status` already does. |
 | Cancel | `CancelJob` ("too late" is success). |
 | Forgetting | the history window is device-dependent and often short; `history: true` with that caveat, and `NotFound` therefore means "not listed", not "never printed". |
+| Long lists | `GetJobHistory` has no stated order and a busy printer can list thousands of finished jobs. The backend keeps the 256 rows with the highest job ids (ids grow with submission, so a job just sent is among them) and in the printer's own order, so a long history is no error and a lost `SendDocument` reply can still be reconciled. A `GetActiveJobs` list over 256 is still refused (`TooLarge`): a partial queue would hide jobs. |
 | Today | `WsdBackend` implements `list_jobs` (active + history, `ours` from the suffix), `tag_support`, `job_query_caps`. The older `WsdBackend::reconcile(printer, title)` is unchanged; `Registry::find_job` is the neutral form of it. |
 
 ## 8. What this change does not do

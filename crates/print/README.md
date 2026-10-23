@@ -122,7 +122,7 @@ next is asked for, one request at a time, with the job's id:
 use craft_print::{Document, Job, JobWatch, SubmitRequest, WaitPolicy, WatchStep};
 
 let registry = craft_print::registry();
-let job = Job { printer: Some("wsd:http://192.0.2.1:5357/p".into()), ..Job::default() };
+let job = Job { printer: Some("wsd:http://10.0.0.20:5357/print".into()), ..Job::default() };
 let request = SubmitRequest::new(Document::pdf(&pdf_bytes), job).with_consent(craft_print::UserConfirmed::interactive());
 let submitted = registry.submit_job(request)?;            // accepted; not printed yet
 let Some(mut watch) = JobWatch::for_submitted(&submitted, WaitPolicy::default()) else { return Ok(()) };
@@ -181,7 +181,7 @@ timer or runtime, waits on an injectable `Clock` and keeps everything in memory.
 use craft_print::{BytesSource, DocumentFormat, Job, PrintJob, UserConfirmed};
 
 let registry = craft_print::registry();
-let job = Job { printer: Some("wsd:http://192.0.2.1:5357/p".into()), title: "Quarterly report".into(), ..Job::default() };
+let job = Job { printer: Some("wsd:http://10.0.0.20:5357/print".into()), title: "Quarterly report".into(), ..Job::default() };
 let mut print = PrintJob::new(job, BytesSource::new(DocumentFormat::Pdf, pdf_bytes)).with_consent(UserConfirmed::interactive());
 // In a worker loop or a frame loop. Each advance makes at most ONE bounded request, and only when one is due:
 let step = print.advance(registry);          // step.next_in: when to come back; None: nothing happens on its own

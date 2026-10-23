@@ -380,7 +380,8 @@ settings with preset buttons, and returns `Response { changed, refresh, retry }`
 duplex flows, document handling, commands, theme and any pill styling. Wrap `show` in
 `add_enabled_ui` while a scan runs. `Settings::apply_preset` and `Settings::clamp` are pure: a
 colour mode the scanner lacks falls back to the first one it lists (the device default when
-published), and unknown or unsupported options leave the matching field alone.
+published). Unknown colour modes take the preset's colour. An unpublished resolution list or an
+unsupported option leaves the matching field alone.
 
 ## Device capabilities
 

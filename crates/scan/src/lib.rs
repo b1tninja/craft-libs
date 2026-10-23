@@ -648,9 +648,14 @@ impl CancelToken {
         self.requested.load(Ordering::SeqCst)
     }
 
-    /// Register the canceller for the transfer that is about to run (backends only).
+    /// Register the canceller for the transfer that is about to run (backends only). When the token was already
+    /// requested (the cancel came before the worker got here) the canceller is also called at once, on this thread
+    /// and outside the lock, so an early cancel is never lost and no backend has to re-check the flag itself.
     pub fn set_canceller(&self, canceller: Canceller) {
-        *self.canceller.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(canceller);
+        *self.canceller.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&canceller));
+        if self.is_requested() {
+            canceller();
+        }
     }
 
     /// Forget the canceller when the transfer is over (backends only).
@@ -1824,6 +1829,35 @@ mod tests {
         assert!(clone.is_requested());
         assert_eq!(token, clone);
         assert_ne!(token, CancelToken::new());
+    }
+
+    #[test]
+    fn a_cancel_requested_before_the_canceller_registers_fires_when_it_registers() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::Canceller;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let canceller = |calls: &Arc<AtomicUsize>| -> Canceller {
+            let calls = Arc::clone(calls);
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        // The cancel arrives first: request() finds nothing to call, registering then calls it once.
+        let token = CancelToken::new();
+        token.request();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        token.set_canceller(canceller(&calls));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "an early cancel must reach the backend");
+        // A later request still reaches the registered canceller.
+        token.request();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        // Registering on a token that was never cancelled calls nothing.
+        let quiet = Arc::new(AtomicUsize::new(0));
+        let fresh = CancelToken::new();
+        fresh.set_canceller(canceller(&quiet));
+        assert_eq!(quiet.load(Ordering::SeqCst), 0);
     }
 
     #[test]

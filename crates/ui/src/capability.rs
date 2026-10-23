@@ -30,7 +30,11 @@ pub enum Choices<T> {
 }
 
 /// A published answer: what is offered, and which value the device uses when none is asked for.
+///
+/// Not constructible by struct literal outside this crate (`#[non_exhaustive]`), so outside code goes
+/// through the constructors on [`Capability`]. The fields stay public and mutable.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advertised<T> {
     pub choices: Choices<T>,
     /// The device's own default, when it says. For a list built by

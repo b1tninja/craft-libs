@@ -146,6 +146,15 @@ fn format_line(phase: &str, fields: &[(&str, &str)]) -> String {
 }
 
 /// Milliseconds since the Unix epoch as text, or "0" when the clock is before it.
+///
+/// On `wasm32-unknown-unknown` there is no clock and `SystemTime::now` panics, so the same "0" is returned there.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn timestamp_ms() -> String {
+    "0".into()
+}
+
+/// Milliseconds since the Unix epoch as text, or "0" when the clock is before it.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn timestamp_ms() -> String {
     match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_millis().to_string(),
@@ -194,5 +203,13 @@ mod tests {
         assert!(line.contains("\"phase\":\"device_open\""));
         assert!(line.contains("\"connection\":\"wsd\""));
         assert!(line.contains("\"note\":\"say \\\"hi\\\"\""));
+    }
+
+    /// Runs only under a wasm test runner: there the clock is absent and the line carries the fallback.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    #[test]
+    fn timestamp_is_the_zero_fallback_without_a_clock() {
+        assert_eq!(timestamp_ms(), "0");
+        assert!(format_line("p", &[]).starts_with("{\"ts\":\"0\""));
     }
 }

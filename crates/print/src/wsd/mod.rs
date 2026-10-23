@@ -41,7 +41,8 @@
 //! # Submit, watch, retry
 //!
 //! [`WsdBackend`]'s `submit` returns a [`crate::Submitted`] as soon as the printer has accepted the
-//! document. Following the job is a separate, polled step (`job_status` is one `GetJobElements`),
+//! document. Following the job is a separate, polled step (`job_status` is one `GetJobElements`,
+//! preceded by the bounded WS-Eventing housekeeping that is due when push status is on),
 //! and failures are classified by [`WsdError::classify`]: transient or not, safe to repeat or not
 //! ([`Op`] says whether the failed request was a query or a send), and where it failed. After an
 //! outcome-unknown failure, [`WsdBackend::reconcile`] looks for the job before anything is resent.

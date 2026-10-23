@@ -168,9 +168,12 @@ never reset the stall rule (that needs a changed reading) and never affect the c
 
 The listener only receives. Everything that sends a request (`Subscribe`, `Renew`, `Unsubscribe`) is
 **caller-driven**: `WsdBackend::maintain_events()` does whatever is due, one bounded request per
-subscription per call, and returns at once when nothing is due. `Backend::job_status` calls it first, so
-a watched job keeps its subscription alive at the safety-poll cadence with no extra timer; an app that
-wants tighter control can call it from its own loop. The clock is injectable (`with_clock`), so lease,
+subscription per call, and returns at once when nothing is due or another call is already doing it.
+`Backend::job_status` calls it first, so a watched job keeps its subscription alive at the safety-poll
+cadence with no extra timer. That means a status poll can spend one bounded request per subscription on
+housekeeping before its own `GetJobElements`: poll from a worker thread, not a UI thread, when events are
+on. Without `with_events` nothing extra is sent. An app that wants tighter control can call
+`maintain_events()` from its own loop as well. The clock is injectable (`with_clock`), so lease,
 renewal, back-off and quiet-window behaviour are tested without sleeping.
 
 ## 5. The code

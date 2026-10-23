@@ -591,6 +591,13 @@ impl Backend for WsdBackend {
     /// One `GetJobElements`. A job the printer does not list is [`ErrorKind::NotFound`] and the
     /// message says what that usually means: printers forget finished jobs, so a job that was
     /// accepted and is now unknown most likely finished.
+    ///
+    /// When the app opted in to push status ([`WsdBackend::with_events`]) the call first does the
+    /// WS-Eventing housekeeping that is due ([`WsdBackend::maintain_events`]): at most one bounded
+    /// `Subscribe`, `Renew` or `Unsubscribe` request per subscription, none when nothing is due, and
+    /// it returns at once when another call is already doing it. That is time spent on the polling
+    /// thread before the `GetJobElements`, so poll from a worker thread; without events nothing extra
+    /// is sent.
     fn job_status(&self, job: &JobId) -> Result<JobStatus, PrintError> {
         self.maintain_events();
         let (entry, id) = self.job_target(job)?;

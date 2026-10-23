@@ -371,6 +371,40 @@ fn an_append_answered_from_the_glass_after_a_feeder_stop_is_not_a_complete_scan(
 }
 
 #[test]
+fn a_journal_from_a_newer_format_seeds_an_unknown_outcome() {
+    use craft_scan::job::ScanJobJournal;
+    let journal_after = |have: usize, wanted: u32| {
+        let mut job = ScanJob::new(feeder_request(wanted), ScanJobConfig::default());
+        let plan = job.begin_attempt(t(1)).expect("attempt");
+        job.finish_attempt(SaneLike::new(have).acquire(&plan.settings), t(2)).expect("finish");
+        job.snapshot().into_journal()
+    };
+    let seed = |journal: ScanJobJournal| ScanJob::continuing_from(feeder_request(20), ScanJobConfig::default(), journal);
+
+    // At our own version an interrupted journal resumes as interrupted, as before.
+    let current = journal_after(12, 20);
+    assert_eq!((current.version, current.state), (ScanJobJournal::VERSION, ScanJobState::Interrupted));
+    let job = seed(current.clone());
+    assert_eq!(job.state(), ScanJobState::Interrupted);
+    assert_ne!(job.retry_advice(), RetryAdvice::CheckDeviceFirst);
+
+    // A newer version is never trusted: Interrupted and Terminal both seed NeedsAttention, check the device first.
+    let mut newer = current;
+    newer.version = ScanJobJournal::VERSION + 1;
+    let job = seed(newer);
+    assert_eq!(job.state(), ScanJobState::NeedsAttention);
+    assert_eq!(job.retry_advice(), RetryAdvice::CheckDeviceFirst);
+    assert_eq!(job.page_count(), 12);
+
+    let mut done = journal_after(3, 3);
+    assert_eq!(done.state, ScanJobState::Terminal(Outcome::Completed));
+    done.version = ScanJobJournal::VERSION + 1;
+    let job = seed(done);
+    assert_eq!(job.state(), ScanJobState::NeedsAttention);
+    assert_eq!(job.retry_advice(), RetryAdvice::CheckDeviceFirst);
+}
+
+#[test]
 fn auto_does_not_fall_back_without_a_glass_or_after_pages_or_for_a_jam() {
     let auto = || ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
 

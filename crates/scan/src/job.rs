@@ -1153,12 +1153,12 @@ impl ScanJob {
         if matches!(error, ScanError::Unsupported) {
             return failed(failure);
         }
-        // Auto found the feeder empty before any page: the glass is the answer, no person needed.
         // The scanner itself ended the job: its own decision, not ours and not a fault.
         if kind == InterruptKind::Cancelled {
             return (AttemptOutcome::CancelledByDevice, ScanJobState::Terminal(Outcome::CancelledByDevice), RetryAdvice::DoNotRetry, Some(failure));
         }
         let resolved = used.unwrap_or(Source::Feeder);
+        // Auto found the feeder empty before any page: the glass is the answer, no person needed.
         if auto_fallback_to_glass(running.requested, resolved, self.config.has_glass, kept, error) {
             self.forced_source = Some(Source::Glass);
             self.expected = Some(1);
@@ -1209,8 +1209,11 @@ impl ScanJob {
     }
 
     /// The device ended the job itself (Cancel on the scanner's panel, the job dropped on its side): a different
-    /// end from [`Self::cancel`]. No backend reports this through [`ScanError`] today, so the app calls it when
-    /// it learns so. Pages received are kept. Needs a running attempt.
+    /// end from [`Self::cancel`]. A backend that returns [`InterruptKind::Cancelled`] in its [`ScanError`] needs no
+    /// call here: [`Self::finish_attempt`] already ends the job `Terminal(CancelledByDevice)` and keeps the attempt's
+    /// error and phase. Call this only for a cancel the backend cannot return as an error, learned out of band (a
+    /// status poll while the transfer runs), and then before `finish_attempt`; afterwards it returns
+    /// [`ScanJobError::NotAcquiring`]. Pages received are kept. Needs a running attempt.
     pub fn device_cancelled(&mut self, at: Timestamp) -> Result<(), ScanJobError> {
         let Some(running) = self.running.as_ref() else { return Err(ScanJobError::NotAcquiring) };
         let leftovers = running.progress.take_pages();

@@ -704,7 +704,17 @@ pub fn settings_from_request(request: &Value) -> Result<ScanSettings, String> {
     })
 }
 
-/// Milliseconds since the Unix epoch, now (0 if the clock is before 1970).
+/// Milliseconds since the Unix epoch, now (0 if the clock is before 1970, or on a target with no clock).
+///
+/// On `wasm32-unknown-unknown` `SystemTime::now` panics, so 0 ("no usable clock", read as `-` by [`iso8601`]) is
+/// returned there without touching the clock.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub fn now_millis() -> u64 {
+    0
+}
+
+/// Milliseconds since the Unix epoch, now (0 if the clock is before 1970, or on a target with no clock).
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub fn now_millis() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }

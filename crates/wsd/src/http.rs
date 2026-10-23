@@ -45,6 +45,19 @@ impl HttpTransport {
     }
 }
 
+/// The longest a connect may take, whatever the request's overall budget: a device that is off or
+/// unroutable is reported as an unsent, retry-safe connect failure after this long, not after a
+/// budget meant for a slow reply (a print upload can be given minutes).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The connect limit for a request with `global` as its whole budget. A budget that is not longer
+/// than [`CONNECT_TIMEOUT`] gets none, so its timeout stays the one global timeout and keeps its
+/// classification (a missing reply); a longer one gets a separate connect timeout, which never
+/// exceeds the budget.
+fn connect_timeout(global: Duration) -> Option<Duration> {
+    (global > CONNECT_TIMEOUT).then_some(CONNECT_TIMEOUT)
+}
+
 const CLOSED: &str = "the device closed the connection without replying";
 
 /// Classify an I/O error. A connection the peer closed or reset before any reply is
@@ -121,6 +134,7 @@ impl Transport for HttpTransport {
             .post(url.as_url())
             .config()
             .timeout_global(Some(request.timeout))
+            .timeout_connect(connect_timeout(request.timeout))
             .build()
             .header("Content-Type", &request.content_type)
             .header("SOAPAction", format!("\"{}\"", request.soap_action));
@@ -163,6 +177,29 @@ mod tests {
         // The same limit reached while reading the body takes the same road.
         let from_body = map_body_error(IoError::other(ureq::Error::BodyExceedsLimit(7)));
         assert!(matches!(from_body, Error::TooLarge(..)), "{from_body:?}");
+    }
+
+    #[test]
+    fn a_long_budget_gets_a_ten_second_connect_limit_and_a_short_one_none() {
+        let secs = Duration::from_secs;
+        assert_eq!(connect_timeout(secs(300)), Some(secs(10)));
+        assert_eq!(connect_timeout(secs(11)), Some(secs(10)));
+        // At or under ten seconds the global timeout alone applies, as before.
+        assert_eq!(connect_timeout(secs(10)), None);
+        assert_eq!(connect_timeout(secs(2)), None);
+        // The connect limit never exceeds the budget.
+        for g in [1u64, 5, 10, 11, 60] {
+            assert!(connect_timeout(secs(g)).is_none_or(|c| c <= secs(g)));
+        }
+    }
+
+    #[test]
+    fn a_connect_timeout_is_an_unsent_retry_safe_connect_failure() {
+        let e = map_error(ureq::Error::Timeout(ureq::Timeout::Connect));
+        assert_eq!(kind_stage(&e), (Some(TransportKind::ConnectTimeout), Stage::Connect));
+        // Nothing was sent, so even a send is safe to repeat.
+        assert_eq!(e.retry_safety(false), crate::retry::RetrySafety::Safe);
+        assert_eq!(e.retry_safety(true), crate::retry::RetrySafety::Safe);
     }
 
     /// The transport kind and stage an error reports, for compact assertions.

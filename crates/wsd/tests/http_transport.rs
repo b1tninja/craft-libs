@@ -57,6 +57,23 @@ fn oversized_replies_are_cut_off() {
 }
 
 #[test]
+fn an_oversized_failure_reply_keeps_its_status_and_retry_after() {
+    let big = vec![b'x'; 3 << 20];
+    let busy = Server::start(move |_| {
+        let mut r = format!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nRetry-After: 7\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            big.len()
+        )
+        .into_bytes();
+        r.extend_from_slice(&big);
+        r
+    });
+    let e = HttpTransport::new().post(&url(&busy), request()).unwrap_err();
+    assert_eq!((e.http_status(), e.retry_after()), (Some(503), Some(Duration::from_secs(7))), "{e:?}");
+    assert!(!matches!(e, Error::TooLarge(..)), "{e:?}");
+}
+
+#[test]
 fn a_silent_device_times_out() {
     let silent = Server::start(|_| {
         std::thread::sleep(Duration::from_millis(1500));

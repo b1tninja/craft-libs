@@ -19,11 +19,12 @@
 //! transport, a scripted in-memory device or a test server.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use roxmltree::Node;
 
 use crate::cancel::CancelToken;
+use crate::clock::Instant;
 use crate::envelope::{self, Expect, build_envelope_with_headers, new_uuid, read_ack_hinted, read_reply_hinted};
 use crate::error::{Error, Result};
 use crate::mtom;

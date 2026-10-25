@@ -6,7 +6,7 @@
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use roxmltree::Node;
 
@@ -15,11 +15,11 @@ use crate::fault::parse_fault;
 use crate::ns;
 use crate::xml;
 
-/// A random version-4 style UUID (std only: random hasher keys, the clock and a counter).
+/// A random version-4 style UUID (std only: random hasher keys, a clock reading that is safe on wasm32, and a counter).
 pub fn new_uuid() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let tick = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let nanos = crate::clock::entropy_nanos();
     let half = |salt: u64| {
         let mut h = RandomState::new().build_hasher();
         h.write_u64(salt ^ nanos);

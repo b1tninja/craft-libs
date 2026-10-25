@@ -870,7 +870,7 @@ fn a_job_runs_through_a_registry_and_reports_no_tag_support() {
     registry.register(Box::new(SaneLike::new(1))).expect("register");
     let device = format!("wia:{WIA_ID}");
     assert_eq!(registry.tag_support(&device), Ok(TagSupport::None));
-    assert!(matches!(registry.tag_support("nope:1"), Err(ScanError::Failed(_))));
+    assert_eq!(registry.tag_support("nope:1").err().and_then(|e| e.native()), Some(craft_scan::UNKNOWN_BACKEND));
     let scanner = registry.scanner_details(&device).expect("details");
     let config = ScanJobConfig::default().with_scanner(&scanner);
     let request = ScanSettings { device, source: Source::Glass, ..ScanSettings::default() };

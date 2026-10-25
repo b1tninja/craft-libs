@@ -10,8 +10,8 @@ use common::sane_like::{NO_DOCS, SANE_ID, SaneLike};
 use common::wia_like::{WIA_ID, WiaLike};
 use craft_scan::bw::{PageRule, page_for};
 use craft_scan::{
-    Acquired, Backend, Color, ErrorContext, InterruptKind, Phase, ProgressToken, RegisterError, Registry, ScanError, ScanSettings, ScannerRef,
-    Source, auto_fallback_to_glass, bmp, image_format, preflight,
+    AMBIGUOUS_DEVICE, Acquired, Backend, Color, ErrorContext, InterruptKind, NO_BACKEND_PREFIX, Phase, ProgressToken, RegisterError, Registry,
+    ScanError, ScanSettings, ScannerRef, Source, UNKNOWN_BACKEND, auto_fallback_to_glass, bmp, image_format, preflight,
 };
 use std::sync::{Arc, Mutex};
 
@@ -111,11 +111,17 @@ fn backends_register_side_by_side_and_listings_aggregate_with_namespaced_ids() {
 #[test]
 fn an_unknown_or_missing_prefix_is_a_clear_error() {
     let registry = all_three();
-    let unknown = registry.scanner_details("ica:whatever").expect_err("unknown prefix").to_string();
+    let error = registry.scanner_details("ica:whatever").expect_err("unknown prefix");
+    assert_eq!(error.native(), Some(UNKNOWN_BACKEND), "matchable without reading the sentence");
+    let unknown = error.to_string();
     assert!(unknown.contains("no scanner backend named \"ica\"") && unknown.contains("wia, sane, escl"), "{unknown}");
-    let bare = registry.scanner_details("pixma:libusb").expect_err("bare").to_string();
+    let error = registry.scanner_details("pixma:libusb").expect_err("bare");
+    assert_eq!(error.native(), Some(UNKNOWN_BACKEND));
+    let bare = error.to_string();
     assert!(bare.contains("no scanner backend named \"pixma\""), "{bare}");
-    let none = registry.scanner_details("no-colon-here").expect_err("no prefix").to_string();
+    let error = registry.scanner_details("no-colon-here").expect_err("no prefix");
+    assert_eq!(error.native(), Some(NO_BACKEND_PREFIX));
+    let none = error.to_string();
     assert!(none.contains("no backend prefix") && none.contains("<backend>:<id>"), "{none}");
     // A backend's own error for a native id it does not know comes through.
     assert!(registry.scanner_details("sane:missing").is_err());
@@ -211,7 +217,10 @@ fn acquire_with_no_prefix_goes_to_the_only_backend_or_the_first_that_lists() {
     skipping.register(Box::new(EsclLike::new(AdfState::Loaded, 1))).expect("escl");
     assert_eq!(skipping.acquire(&request("", Source::Glass, 1)).expect("escl").pages[0].format, "jpeg");
     // A name fragment is ambiguous across backends.
-    let ambiguous = registry.acquire(&request("Desk", Source::Glass, 1)).expect_err("ambiguous").to_string();
+    let error = registry.acquire(&request("Desk", Source::Glass, 1)).expect_err("ambiguous");
+    assert_eq!(error.native(), Some(AMBIGUOUS_DEVICE));
+    assert_eq!(error.interrupt_kind(), InterruptKind::Other);
+    let ambiguous = error.to_string();
     assert!(ambiguous.contains("does not name a registered backend") && ambiguous.contains("wia, sane, escl"), "{ambiguous}");
     let unknown = registry.acquire(&request("ica:x", Source::Glass, 1)).expect_err("unknown prefix").to_string();
     assert!(unknown.contains("ica:x"), "{unknown}");

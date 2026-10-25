@@ -35,8 +35,8 @@ pub mod length;
 pub mod trace;
 
 pub use backend::{
-    Backend, BackendError, Listing, RegisterError, Registry, acquire, backend_names, diagnostic_dump, global, page_length_support, register,
-    scanner_details, scanner_list, scanners, status, supported, tag_support,
+    AMBIGUOUS_DEVICE, Backend, BackendError, Listing, NO_BACKEND_PREFIX, REGISTRY_DOMAIN, RegisterError, Registry, UNKNOWN_BACKEND, acquire,
+    backend_names, diagnostic_dump, global, page_length_support, register, scanner_details, scanner_list, scanners, status, supported, tag_support,
 };
 pub use contract::{
     Compression, ErrorContext, ImageFormat, ListDetails, NativeCodeExt, ParseWireError, Phase, Recovery, ScanErrorInfo, contract_json, recovery,

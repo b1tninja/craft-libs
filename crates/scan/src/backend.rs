@@ -52,9 +52,24 @@ use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use craft_job::{BackendName, TagSupport, namespaced_id, split_id};
 
-use crate::{Acquired, HandlingStatus, PageLengthSupport, ScanError, ScanSettings, Scanner, ScannerRef, Source};
 #[cfg(doc)]
-use crate::{InterruptKind, NativeCode, Page};
+use crate::Page;
+use crate::{Acquired, HandlingStatus, InterruptKind, NativeCode, PageLengthSupport, ScanError, ScanSettings, Scanner, ScannerRef, Source};
+
+/// The [`NativeCode::domain`] of the errors the [`Registry`] itself raises when it cannot route a device id to a backend.
+pub const REGISTRY_DOMAIN: &str = "registry";
+/// The device id has no `<backend>:` prefix where one is required ([`Registry::scanner_details`]). Matchable with
+/// [`ScanError::native`]; the message still names the registered backends.
+pub const NO_BACKEND_PREFIX: NativeCode = NativeCode::new(REGISTRY_DOMAIN, 1, Some("NO_BACKEND_PREFIX"));
+/// The `<backend>:` prefix names no registered backend.
+pub const UNKNOWN_BACKEND: NativeCode = NativeCode::new(REGISTRY_DOMAIN, 2, Some("UNKNOWN_BACKEND"));
+/// Several backends are registered and the device (a name fragment, or an unregistered prefix) cannot tell which one is meant.
+pub const AMBIGUOUS_DEVICE: NativeCode = NativeCode::new(REGISTRY_DOMAIN, 3, Some("AMBIGUOUS_DEVICE"));
+
+/// A routing failure of the registry: [`InterruptKind::Other`], with a code a caller can match instead of the sentence.
+fn routing_error(code: NativeCode, message: String) -> ScanError {
+    ScanError::native_error(InterruptKind::Other, code, message)
+}
 
 /// The operations an app layer needs from a scanner stack. Ids passed in and returned are the
 /// backend's **native** ids; the [`Registry`] adds and strips the `"<name>:"` prefix.
@@ -238,20 +253,21 @@ impl Registry {
     }
 
     /// Picks the backend named by the `<backend>:` prefix of `id` and returns it with the native id that follows.
-    /// `Unsupported` for an empty registry; `Failed` when the prefix is missing or names no registered backend.
+    /// `Unsupported` for an empty registry; a [`NO_BACKEND_PREFIX`] or [`UNKNOWN_BACKEND`] error when the prefix is
+    /// missing or names no registered backend.
     fn by_prefix<'a>(backends: &'a [Arc<dyn Backend>], id: &'a str) -> Result<(&'a Arc<dyn Backend>, &'a str), ScanError> {
         if backends.is_empty() {
             return Err(ScanError::Unsupported);
         }
         let Some((prefix, native)) = split_id(id) else {
-            return Err(ScanError::Failed(format!(
-                "scanner id {id:?} has no backend prefix; ids look like <backend>:<id> (registered: {})",
-                Self::names_text(backends)
-            )));
+            return Err(routing_error(
+                NO_BACKEND_PREFIX,
+                format!("scanner id {id:?} has no backend prefix; ids look like <backend>:<id> (registered: {})", Self::names_text(backends)),
+            ));
         };
         match backends.iter().find(|backend| backend.name() == prefix) {
             Some(backend) => Ok((backend, native)),
-            None => Err(ScanError::Failed(format!("no scanner backend named {prefix:?} (registered: {})", Self::names_text(backends)))),
+            None => Err(routing_error(UNKNOWN_BACKEND, format!("no scanner backend named {prefix:?} (registered: {})", Self::names_text(backends)))),
         }
     }
 
@@ -321,7 +337,7 @@ impl Registry {
     /// * an empty device goes to the only backend, or, with several, to the first one that lists a
     ///   scanner (the backend then picks its own default);
     /// * anything else (a name fragment) goes to the only backend unchanged, and with several
-    ///   backends is an error that names them, since it cannot be told which one is meant.
+    ///   backends is an [`AMBIGUOUS_DEVICE`] error that names them, since it cannot be told which one is meant.
     pub fn acquire(&self, settings: &ScanSettings) -> Result<Acquired, ScanError> {
         let backends = self.snapshot();
         let Some(first) = backends.first() else { return Err(ScanError::Unsupported) };
@@ -335,10 +351,10 @@ impl Registry {
             let listed = backends.iter().find(|b| b.scanner_list().is_ok_and(|list| !list.is_empty()));
             (listed.unwrap_or(first), "")
         } else {
-            return Err(ScanError::Failed(format!(
-                "device {device:?} does not name a registered backend ({}); use <backend>:<id>",
-                Self::names_text(&backends)
-            )));
+            return Err(routing_error(
+                AMBIGUOUS_DEVICE,
+                format!("device {device:?} does not name a registered backend ({}); use <backend>:<id>", Self::names_text(&backends)),
+            ));
         };
         let mut routed = settings.clone();
         routed.device = native.to_string();

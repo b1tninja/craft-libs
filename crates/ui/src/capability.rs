@@ -76,14 +76,18 @@ impl<T> Capability<T> {
         }
     }
 
-    /// `None` is unknown; a range whose minimum is above its maximum is unsupported.
+    /// `None` is unknown; a range whose bounds are not ordered (the minimum is above the maximum, or
+    /// either bound is incomparable, such as NaN) is unsupported.
     pub fn from_option_range(range: Option<(T, T)>) -> Self
     where
         T: PartialOrd,
     {
         match range {
             None => Capability::Unknown,
-            Some((min, max)) if min > max => Capability::Unsupported,
+            // `partial_cmp` is `None` for incomparable bounds (NaN), which is the same as `!(min <= max)`.
+            Some((min, max)) if !matches!(min.partial_cmp(&max), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)) => {
+                Capability::Unsupported
+            }
             Some((min, max)) => Capability::Supported(Advertised { choices: Choices::Range { min, max }, default: None }),
         }
     }
@@ -193,13 +197,18 @@ impl<T> Capability<T> {
             Capability::Unsupported => None,
             Capability::Supported(a) => match &a.choices {
                 Choices::List(values) => values.contains(value).then(|| value.clone()),
-                Choices::Range { min, max } => Some(if value < min {
-                    min.clone()
-                } else if value > max {
-                    max.clone()
-                } else {
-                    value.clone()
-                }),
+                Choices::Range { min, max } => {
+                    if value < min {
+                        Some(min.clone())
+                    } else if value > max {
+                        Some(max.clone())
+                    } else if min <= value && value <= max {
+                        Some(value.clone())
+                    } else {
+                        // Incomparable (NaN): nothing in the range is this value.
+                        None
+                    }
+                }
             },
         }
     }
@@ -230,6 +239,26 @@ mod tests {
         assert_eq!(r.choices(), Some(&Choices::Range { min: 1, max: 5 }));
         assert!(r.list().is_empty(), "a range has no list");
         assert!(Capability::from_option_range(Some((3u32, 3))).is_supported(), "a one-value range is a range");
+    }
+
+    #[test]
+    fn a_range_with_an_incomparable_bound_is_unsupported() {
+        let nan = f64::NAN;
+        assert_eq!(Capability::from_option_range(Some((nan, 5.0))), Capability::Unsupported, "NaN minimum");
+        assert_eq!(Capability::from_option_range(Some((1.0, nan))), Capability::Unsupported, "NaN maximum");
+        assert_eq!(Capability::from_option_range(Some((nan, nan))), Capability::Unsupported, "both NaN");
+        assert_eq!(Capability::from_option_range(Some((5.0, 1.0))), Capability::Unsupported, "inverted");
+        assert!(Capability::from_option_range(Some((2.5, 2.5))).is_supported(), "equal bounds are valid");
+        assert!(Capability::from_option_range(Some((1.0, 5.0))).is_supported());
+    }
+
+    #[test]
+    fn a_nan_value_is_not_sent_into_a_range() {
+        let range = Capability::from_option_range(Some((1.0f64, 5.0)));
+        assert_eq!(range.clamp_to_supported(&f64::NAN), None);
+        assert!(!range.allows(&f64::NAN));
+        assert_eq!(range.clamp_to_supported(&9.0), Some(5.0));
+        assert_eq!(range.clamp_to_supported(&3.0), Some(3.0));
     }
 
     #[test]

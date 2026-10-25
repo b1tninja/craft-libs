@@ -39,6 +39,24 @@ impl Transport for LossyReply {
     }
 }
 
+/// As `LossyReply`, and a printer that stores a shorter job name than it was sent: the ` [ref ...]`
+/// suffix is gone from the name it lists. Also loses the first `SendDocument` reply.
+struct CutsTheName {
+    inner: LossyReply,
+}
+
+impl Transport for CutsTheName {
+    fn post(&self, url: &DeviceUrl, mut request: Request) -> Result<Response, WireError> {
+        if request.soap_action.ends_with("CreatePrintJob") {
+            let text = String::from_utf8(request.body.clone()).unwrap();
+            let at = text.find(" [ref ").expect("the ticket carries the tag");
+            let end = at + text[at..].find(']').unwrap() + 1;
+            request.body = format!("{}{}", &text[..at], &text[end..]).into_bytes();
+        }
+        self.inner.post(url, request)
+    }
+}
+
 struct Rig {
     printer: Arc<FakePrinter>,
     registry: Registry,
@@ -129,7 +147,7 @@ fn zero_copies_end_failed_with_do_not_retry_and_nothing_is_sent() {
 }
 
 #[test]
-fn a_lost_send_reply_is_reconciled_by_tag_and_nothing_is_sent_twice() {
+fn a_lost_send_reply_is_reconciled_and_nothing_is_sent_twice() {
     let printer = FakePrinter::new(FakeConfig::default());
     foreign(&registry_over(&printer, 0), "Quarterly report"); // an earlier job with the very same title
     let rig = Rig { registry: registry_over(&printer, 1), printer, clock: ManualClock::new() };
@@ -141,13 +159,18 @@ fn a_lost_send_reply_is_reconciled_by_tag_and_nothing_is_sent_twice() {
     let sends = || rig.printer.actions().iter().filter(|a| *a == "SendDocument").count();
     assert_eq!(sends(), 2);
 
+    // A printer may list a shorter job name without the tag, so a WS-Print listing is not matched
+    // by the tag alone: the earlier job with the same title is a candidate too, and the caller
+    // (not this crate) decides, newest first.
     let found = job.reconcile(&rig.registry).unwrap();
-    let Reconciled::Found(remote) = found else { panic!("{found:?}") };
-    assert!(remote.ours);
+    let Reconciled::Ambiguous(candidates) = found else { panic!("{found:?}") };
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(job.snapshot().advice, RetryAdvice::CheckDeviceFirst);
+    let remote = candidates[0].clone();
+    assert!(!remote.ours, "nothing is claimed as ours without a tag match");
     assert_eq!(remote.id.to_string(), format!("wsd:{URL}#2"));
     assert_eq!(remote.user.as_deref(), Some("craft"));
     assert_eq!(remote.created, None, "WS-Print job summaries carry no creation time");
-    assert_eq!(job.snapshot().advice, RetryAdvice::DoNotRetry);
 
     job.accept(&rig.registry, &remote.id).unwrap();
     drive(&mut job, &rig);
@@ -157,6 +180,30 @@ fn a_lost_send_reply_is_reconciled_by_tag_and_nothing_is_sent_twice() {
     // The same lookup by title alone cannot tell the two apart.
     let result = rig.registry.find_job(&format!("wsd:{URL}"), &Fingerprint::new("Quarterly report", Timestamp::default())).unwrap();
     assert!(matches!(&result, Reconciled::Ambiguous(jobs) if jobs.len() == 2 && jobs.iter().all(|j| !j.ours)), "{result:?}");
+}
+
+#[test]
+fn a_printer_that_cuts_the_tag_off_the_job_name_is_still_reconciled_by_title_and_user() {
+    let printer = FakePrinter::new(FakeConfig::default());
+    let lossy = LossyReply { printer: Arc::clone(&printer), lose: "SendDocument", remaining: AtomicU32::new(1) };
+    let backend = WsdBackend::new().with_transport(CutsTheName { inner: lossy }).with_poll_interval(Duration::from_millis(1));
+    backend.add(URL).unwrap();
+    let registry = Registry::new();
+    registry.register(Box::new(backend)).unwrap();
+    let rig = Rig { printer, registry, clock: ManualClock::new() };
+
+    let mut job = print_job(&rig, "Quarterly report");
+    drive(&mut job, &rig);
+    assert_eq!(job.state(), LifecycleState::NeedsAttention, "{:?}", job.snapshot().last_error);
+    assert_eq!(rig.printer.job(1).unwrap().name, "Quarterly report", "the printer dropped the tag");
+    assert_eq!(rig.registry.backend_info(Some(&format!("wsd:{URL}"))).unwrap().tag_support.placement(), TagPlacement::JobNameSuffix);
+
+    // A tag-only match would find nothing here and a caller that resends on "not found" would
+    // print the document twice.
+    let found = job.reconcile(&rig.registry).unwrap();
+    let Reconciled::Found(remote) = found else { panic!("{found:?}") };
+    assert_eq!(remote.id.to_string(), format!("wsd:{URL}#1"));
+    assert!(!remote.ours, "the tag did not come back, so nothing says it is ours");
 }
 
 #[test]

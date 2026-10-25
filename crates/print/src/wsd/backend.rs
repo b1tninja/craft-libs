@@ -624,11 +624,14 @@ impl Backend for WsdBackend {
     }
 
     /// The tag is a suffix of the job name in the ticket (`"title [ref abc123de]"`, cut so that it
-    /// fits the 255 characters), and `GetActiveJobs` / `GetJobHistory` return the name, so a
-    /// listing can match it.
+    /// fits the 255 characters), and `GetActiveJobs` / `GetJobHistory` return the name. A printer
+    /// may store a shorter name than it was sent and lose the suffix, so the tag is carried but a
+    /// listing is not relied on to return it ([`TagSupport::Partial`]): a reconcile matches by
+    /// title (a cut-short title included), user and time, never by the tag alone, which would
+    /// report a printed job as not found.
     /// An empty ticket (`TicketShape::Empty`) names no job, so then nothing carries the tag.
     fn tag_support(&self) -> TagSupport {
-        if self.config.ticket_shape.carries_name() { TagSupport::Carried(TagPlacement::JobNameSuffix) } else { TagSupport::None }
+        if self.config.ticket_shape.carries_name() { TagSupport::Partial(TagPlacement::JobNameSuffix) } else { TagSupport::None }
     }
 
     /// Active jobs and history, with the user; no creation time (job summaries do not carry one).

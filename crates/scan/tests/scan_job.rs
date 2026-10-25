@@ -119,6 +119,30 @@ fn a_large_feeder_scan_interrupted_at_page_n_is_continued_by_appending() {
 }
 
 #[test]
+fn an_append_that_delivers_no_pages_fails_and_can_be_started_again() {
+    let mut job = ScanJob::new(feeder_request(20), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("first attempt");
+    job.finish_attempt(SaneLike::new(12).acquire(&plan.settings), t(2)).expect("finish");
+    assert_eq!(job.state(), ScanJobState::Interrupted);
+
+    // The feeder was not reloaded: the backend answers Ok with nothing.
+    let plan = job.begin_attempt_with(t(3), Continuation::Append).expect("append");
+    job.finish_attempt(scripted(&plan, 0, Source::Feeder, None), t(4)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!(snap.state, ScanJobState::Terminal(Outcome::Failed), "an empty append is a failure, not a short success");
+    assert_eq!(snap.attempts[1].outcome, AttemptOutcome::Failed);
+    assert_eq!(snap.attempts[1].pages_gained, 0);
+    assert_eq!(snap.pages.len(), 12, "the earlier pages are still kept");
+    assert!(snap.warnings.is_empty());
+
+    // It can still be continued once the feeder is reloaded.
+    let plan = job.begin_attempt_with(t(5), Continuation::Append).expect("append again");
+    job.finish_attempt(SaneLike::new(8).acquire(&plan.settings), t(6)).expect("finish");
+    assert_eq!(job.snapshot().state, ScanJobState::Terminal(Outcome::Completed));
+    assert_eq!(job.snapshot().pages.len(), 20);
+}
+
+#[test]
 fn restart_discards_the_kept_pages_and_asks_for_everything_again() {
     let mut job = ScanJob::new(feeder_request(5), ScanJobConfig::default());
     let plan = job.begin_attempt(t(1)).expect("attempt");

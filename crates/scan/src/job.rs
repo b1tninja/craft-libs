@@ -1087,7 +1087,7 @@ impl ScanJob {
         };
 
         let (outcome, state, advice, failure) = match error {
-            None => self.settle_ok(kept),
+            None => self.settle_ok(kept, gained),
             Some(error) => self.settle_error(&error, context, &running, used, kept, gained),
         };
         let (outcome, state, advice, failure) = if self.cancel_requested {
@@ -1134,10 +1134,11 @@ impl ScanJob {
         }
     }
 
-    /// Settles an attempt that returned `Ok` with `kept` pages: failed when none arrived, completed with a warning when
-    /// fewer than expected, otherwise completed.
-    fn settle_ok(&mut self, kept: usize) -> (AttemptOutcome, ScanJobState, RetryAdvice, Option<AttemptFailure>) {
-        if kept == 0 {
+    /// Settles an attempt that returned `Ok` with `kept` pages in the job, `gained` of them from this attempt: failed when
+    /// this attempt delivered none (pages kept from earlier attempts do not hide that, so an append that brought nothing
+    /// stays startable), completed with a warning when fewer than expected, otherwise completed.
+    fn settle_ok(&mut self, kept: usize, gained: u32) -> (AttemptOutcome, ScanJobState, RetryAdvice, Option<AttemptFailure>) {
+        if gained == 0 {
             let error = ScanError::Failed("the scanner transferred no pages".into());
             let info = ScanErrorInfo::new(&error, ErrorContext::default());
             let failure = AttemptFailure { info, safety: RetrySafety::Safe, transient: false };

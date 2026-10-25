@@ -596,7 +596,7 @@ pub(crate) fn submit_staged(
 /// The job goes to `lp` on stdin, never through a file: a predictable job folder in a shared
 /// temp directory lets another local user read printed documents or swap the file before `lp`
 /// reads it.
-#[cfg(any(test, all(unix, not(target_arch = "wasm32"))))]
+#[cfg(test)]
 pub(crate) fn submit_via(lp: std::process::Command, pdf: &[u8], job: &Job) -> Result<String, Error> {
     submit_via_staged(lp, pdf, job, &std::sync::atomic::AtomicBool::new(false))
 }

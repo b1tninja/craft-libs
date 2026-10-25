@@ -194,10 +194,10 @@ fn groups_have_one_small_minimum_and_no_maximum() {
     assert_eq!(group(&d, TOOLS).width(), 40.0, "and shrinks to the minimum, no further");
 
     // At its minimum, with Project left of it at its own, it has no room for two halves and
-    // takes a drop on its edge as a tab.
+    // takes a drop on its left edge as a tab.
     let tools = group(&d, TOOLS);
     assert_eq!(group(&d, PROJECT[0]).width(), 40.0);
-    let out = d.drag(tab(&d, INFO), pos2(tools.right() - 4.0, tools.center().y + 30.0));
+    let out = d.drag(tab(&d, INFO), pos2(tools.left() + 4.0, tools.center().y + 30.0));
     assert!(
         matches!(&out.actions[..], [Action::Move { panel: INFO, anchor: TOOLS, placement: Placement::Split(Zone::Center) | Placement::Tab { .. } }]),
         "{:?}",
@@ -357,6 +357,83 @@ fn a_drop_beside_a_narrow_group_splits_that_group_only() {
     d.settle();
     assert!(close(group(&d, TOOLS).union(group(&d, INFO)), tools));
     assert_eq!((group(&d, PROJECT[0]), group(&d, TIMELINE), group(&d, METERS)), (project, timeline, meters));
+}
+
+/// Properties and a narrow Tools frame side by side, Tools `tools` wide in an area `width`
+/// wide, with Info floating at the left.
+fn beside_tools(width: f32, tools: f32) -> Driver {
+    let root = Node::Split {
+        axis: SplitAxis::Horizontal,
+        size: SplitSize::FixedSecond(tools),
+        first: Box::new(tabs(&PROPERTIES)),
+        second: Box::new(tabs(&[TOOLS])),
+    };
+    let layout = Layout { root: Some(root), floating: vec![Floating::single(vec![INFO], 0, [width + 100.0, 100.0, 280.0, 200.0])] };
+    let mut d = driver(layout, Film::default());
+    d.area = Rect::from_min_size(Pos2::ZERO, vec2(width, SCREEN.y));
+    d.settle();
+    d
+}
+
+#[test]
+fn a_drop_beside_a_frame_too_narrow_to_halve_takes_room_from_its_neighbour() {
+    let mut d = beside_tools(1000.0, 60.0);
+    let (tools, properties, info) = (group(&d, TOOLS), group(&d, PROPERTIES[0]), group(&d, INFO));
+    let left = zone_shape(tools, 26.0, 40.0, Zone::Left).unwrap();
+    let at = pos2(tools.left() + 4.0, tools.center().y + 13.0);
+    d.hold(tab(&d, INFO), at);
+    assert!(d.filled_polygon(&left), "Tools' left zone is a target");
+    let out = d.release(at);
+    assert!(
+        matches!(&out.actions[..], [Action::Move { panel: INFO, anchor: TOOLS, placement: Placement::SplitSized { zone: Zone::Left, .. } }]),
+        "{:?}",
+        out.actions
+    );
+    d.settle();
+    let (new_tools, new_info, new_properties) = (group(&d, TOOLS), group(&d, INFO), group(&d, PROPERTIES[0]));
+    assert!((new_tools.width() - tools.width()).abs() < 1.0, "Tools keeps its width: {new_tools:?}");
+    assert!((new_info.width() - info.width()).abs() < 1.0, "Info keeps its floating width: {new_info:?}");
+    assert!(new_info.right() < new_tools.left() && new_properties.right() < new_info.left());
+    assert!(new_properties.width() < properties.width() - 200.0, "Properties gave the room");
+}
+
+#[test]
+fn a_docked_panel_dropped_beside_a_frame_too_narrow_to_halve_takes_its_minimum_width() {
+    // Info docked below Properties, as wide as it, beside a narrow Tools frame.
+    let root = Node::Split {
+        axis: SplitAxis::Horizontal,
+        size: SplitSize::FixedSecond(60.0),
+        first: Box::new(split(SplitAxis::Vertical, 0.6, tabs(&PROPERTIES), tabs(&[INFO]))),
+        second: Box::new(tabs(&[TOOLS])),
+    };
+    let mut d = driver(Layout { root: Some(root), floating: Vec::new() }, Film::default());
+    d.area = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, SCREEN.y));
+    d.settle();
+    let (tools, properties) = (group(&d, TOOLS), group(&d, PROPERTIES[0]));
+    let out = d.drag(tab(&d, INFO), pos2(tools.left() + 4.0, tools.center().y + 13.0));
+    assert!(
+        matches!(&out.actions[..], [Action::Move { panel: INFO, anchor: TOOLS, placement: Placement::SplitSized { zone: Zone::Left, .. } }]),
+        "{:?}",
+        out.actions
+    );
+    d.settle();
+    let (new_tools, new_info, new_properties) = (group(&d, TOOLS), group(&d, INFO), group(&d, PROPERTIES[0]));
+    assert!((new_tools.width() - tools.width()).abs() < 1.0, "Tools keeps its width: {new_tools:?}");
+    assert!(new_info.width() < 60.0, "Info takes its minimum, not its docked width: {new_info:?}");
+    assert!(new_properties.width() > properties.width() - 60.0, "Properties gives only that: {new_properties:?}");
+}
+
+#[test]
+fn a_drop_beside_a_narrow_frame_joins_it_when_no_neighbour_has_room() {
+    let mut d = beside_tools(130.0, 60.0);
+    let tools = group(&d, TOOLS);
+    let at = pos2(tools.left() + 4.0, tools.center().y + 13.0);
+    let out = d.drag(tab(&d, INFO), at);
+    assert!(
+        matches!(&out.actions[..], [Action::Move { panel: INFO, anchor: TOOLS, placement: Placement::Tab { .. } | Placement::Split(Zone::Center) }]),
+        "{:?}",
+        out.actions
+    );
 }
 
 #[test]
@@ -780,16 +857,26 @@ fn the_preview_fills_the_zone_under_the_pointer_and_no_result_rect() {
     assert_eq!(zone_outlines(&d).len(), 6);
     d.key(egui::Key::Escape);
 
-    // The dock-and-canvas arrangement shows a line along the group's left edge instead.
+    // The dock-and-canvas arrangement shows the rect the panel takes there instead.
     let mut d = DockDriver::new(editing(), Film::default());
     d.screen = Rect::from_min_size(Pos2::ZERO, SCREEN);
     d.area = d.screen;
     d.settle();
-    d.hold(tab(&d, INFO), pos2(timeline.left() + 8.0, timeline.center().y + 13.0));
+    let at = pos2(timeline.left() + 8.0, timeline.center().y + 13.0);
+    d.hold(tab(&d, INFO), at);
     assert!(!d.filled_polygon(&zone_shape(timeline, 26.0, 40.0, Zone::Left).unwrap()));
     assert!(zone_outlines(&d).is_empty());
     assert!(!d.filled(zone_rect(timeline, Zone::Left).unwrap().shrink(1.0)));
-    assert!(d.filled(Rect::from_x_y_ranges(timeline.left()..=(timeline.left() + 4.0), timeline.y_range())));
+    let shapes = d.shapes().to_vec();
+    d.release(at);
+    d.settle();
+    let info = group(&d, INFO);
+    assert_eq!(info.left(), timeline.left());
+    let painted = |fill: egui::Color32, stroke: f32| {
+        shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.rect == info.shrink(1.0) && r.fill == fill && r.stroke.width == stroke))
+    };
+    let accent = DockStyle::default().accent;
+    assert!(painted(accent.gamma_multiply(0.08), 0.0) && painted(egui::Color32::TRANSPARENT, 2.0), "Info's rect beside the timeline");
 }
 
 #[test]

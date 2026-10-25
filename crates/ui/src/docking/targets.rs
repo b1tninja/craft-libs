@@ -23,7 +23,8 @@ pub struct DropProposal<P> {
     pub placement: Placement<P>,
     pub preview: Rect,
     pub insertion: Option<Rect>,
-    /// The pointer addresses the tab's current insertion slot.
+    /// The pointer addresses the tab's current insertion slot. The renderer also marks a drop
+    /// that would leave every panel where it is, changing only sizes.
     pub noop: bool,
 }
 
@@ -78,6 +79,12 @@ pub fn drop_zone(rect: Rect, tab_height: f32, depth: f32, pointer: Pos2) -> Opti
 /// or less leaves only the center; more than one half acts as one half. Outside, non-finite,
 /// empty and inverted rectangles have no target.
 pub fn body_zone(rect: Rect, tab_height: f32, fraction: f32, center: bool, pointer: Pos2) -> Option<Zone> {
+    body_zone_on(rect, tab_height, fraction, center, Sides::ALL, pointer)
+}
+
+/// [`body_zone`] where a body without `center` maps only to the nearest of `sides`, and to no
+/// target without any.
+pub(super) fn body_zone_on(rect: Rect, tab_height: f32, fraction: f32, center: bool, sides: Sides, pointer: Pos2) -> Option<Zone> {
     if !usable(rect) || !pointer.is_finite() || !rect.contains(pointer) || !tab_height.is_finite() || tab_height < 0.0 {
         return None;
     }
@@ -87,13 +94,16 @@ pub fn body_zone(rect: Rect, tab_height: f32, fraction: f32, center: bool, point
     }
     let fraction = fraction.min(0.5);
     let (w, h) = (body.width(), body.height());
-    let sides = [
+    let allowed = |zone: &Zone| center || sides.contains(*zone);
+    let (distance, zone) = [
         ((pointer.x - body.left()) / w, Zone::Left),
         ((body.right() - pointer.x) / w, Zone::Right),
         ((pointer.y - body.top()) / h, Zone::Top),
         ((body.bottom() - pointer.y) / h, Zone::Bottom),
-    ];
-    let (distance, zone) = sides.into_iter().min_by(|a, b| a.0.total_cmp(&b.0))?;
+    ]
+    .into_iter()
+    .filter(|(_, zone)| allowed(zone))
+    .min_by(|a, b| a.0.total_cmp(&b.0))?;
     Some(if center && distance > fraction { Zone::Center } else { zone })
 }
 
@@ -216,6 +226,34 @@ pub fn resolve_drop<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarg
     resolve_drop_by(panel, pointer, targets, ZoneRule::Depth(zone_depth))
 }
 
+/// A set of sides: of the layout's outer edge, or of a group's body
+/// ([`crate::docking::DockStyle::drop_edges`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sides {
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
+}
+
+impl Sides {
+    pub const ALL: Self = Self { left: true, right: true, top: true, bottom: true };
+    pub const NONE: Self = Self { left: false, right: false, top: false, bottom: false };
+    pub const LEFT_RIGHT: Self = Self { left: true, right: true, top: false, bottom: false };
+    pub const TOP_BOTTOM: Self = Self { left: false, right: false, top: true, bottom: true };
+
+    /// Whether `zone`'s side is in the set; never the center.
+    pub fn contains(self, zone: Zone) -> bool {
+        match zone {
+            Zone::Left => self.left,
+            Zone::Right => self.right,
+            Zone::Top => self.top,
+            Zone::Bottom => self.bottom,
+            Zone::Center => false,
+        }
+    }
+}
+
 /// How [`resolve_drop_by`] divides a group's body.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ZoneRule {
@@ -229,6 +267,18 @@ pub enum ZoneRule {
 /// [`resolve_drop`] with the body zones of `rule`: [`crate::docking::DockStyle::zone_rule`]
 /// gives the ones the dock area uses.
 pub fn resolve_drop_by<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropTarget<P>], rule: ZoneRule) -> Option<DropProposal<P>> {
+    resolve_drop_on(panel, pointer, targets, rule, Sides::ALL)
+}
+
+/// [`resolve_drop_by`] where a group that takes no tabs splits only on `sides` with
+/// [`ZoneRule::Fraction`].
+pub(super) fn resolve_drop_on<P: Clone + Eq>(
+    panel: &P,
+    pointer: Pos2,
+    targets: &[DropTarget<P>],
+    rule: ZoneRule,
+    sides: Sides,
+) -> Option<DropProposal<P>> {
     if !pointer.is_finite() || targets.len() > super::MAX_PANELS {
         return None;
     }
@@ -270,7 +320,7 @@ pub fn resolve_drop_by<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropT
     let zone = match rule {
         _ if !target.allow_splits => Zone::Center,
         ZoneRule::Depth(depth) => drop_zone(target.rect, header, depth, pointer)?,
-        ZoneRule::Fraction { fraction, .. } => body_zone(target.rect, header, fraction, target.accepts_tabs, pointer)?,
+        ZoneRule::Fraction { fraction, .. } => body_zone_on(target.rect, header, fraction, target.accepts_tabs, sides, pointer)?,
     };
     if zone == Zone::Center && target.accepts_tabs && target.tabs.iter().any(|(p, _)| p == panel) {
         return Some(DropProposal {

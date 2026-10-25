@@ -13,8 +13,8 @@ document stays the app's `CentralPanel`.
 | plain egui panels | Fixed view parts: slide thumbnails, notes, formula bar, sheet tabs, status bar. |
 | `egui::Window` | Free tool windows that never dock (Read Aloud, Power Query). |
 
-`panes` needs no docking types; it uses only the docking chrome (`FloatingFrame`, `TitleBar`,
-`live_move`).
+`panes` needs no docking types; it uses only the docking chrome (`ChromeStyle`,
+`FloatingFrame`, `TitleBar`, `live_move`).
 
 ## API
 
@@ -25,7 +25,8 @@ impl PaneContent<Pane> for MyPanes<'_> {
     fn title(&self, pane: &Pane) -> String { tr(pane.title()) }
     fn body(&mut self, ui: &mut egui::Ui, pane: &Pane) { /* the pane's contents */ }
     fn default_state(&self, pane: &Pane) -> PaneState { PaneState::docked(Edge::End, 250.0) }
-    // Optional: size_range (200..=520), movable, closable, menu (app items in the ▾ menu).
+    // Optional: size_range (200..=520), movable, closable, menu (app items in the ▾ menu),
+    // title_bar (false: a docked pane draws no title bar; floating panes always draw one).
 }
 
 // Every frame, after the top and bottom bars and before the CentralPanel:
@@ -57,10 +58,10 @@ egui::CentralPanel::default().show(ui, |ui| {
 | `SidePolicy::Columns` | Every docked pane shows; panes on one edge sit side by side in `open` order, the first outermost. |
 | `SidePolicy::OneSlot` | One closable pane per edge: the last one in `open`. Non-closable context panes (PivotTable Fields) show beside the slot. |
 | `.max_fraction(f)` | One docked pane takes at most `f` of the host's width (height for bottom panes). |
-| Chrome | Title, ▾ menu (app items, Move to Start, Move to End, Move to Bottom for bottom panes, Float, Close), ×, a resize edge with pointer and arrow keys. The title bar mirrors with `.rtl(true)`. Its accessible name is `PaneLabels::move_pane` with `{title}` replaced by the pane's title ("Move Styles pane"). |
+| Chrome | Title, ▾ menu (app items, Move to Start, Move to End, Move to Bottom for bottom panes, Float, Close), ×, a resize edge with pointer and arrow keys. The edge takes presses on both sides of its line, over the document's own widgets too, and stays under floating windows. The title bar mirrors with `.rtl(true)`. Its accessible name is `PaneLabels::move_pane` with `{title}` replaced by the pane's title ("Move Styles pane"). |
 | Size | A docked pane reserves exactly its size and clips its body, so a body wider than the pane never pushes into the document. |
-| Drag out | A docked pane's title dragged more than `DOCK_SNAP` (32 pt) out of the pane floats it under the pointer when dropped; dropped within 32 pt of the host's left or right edge it docks there. |
-| Floating | `FloatingFrame` with its resize handles; the title bar moves it. Escape or window focus loss during a move puts it back. A drop within 32 pt of the left or right edge docks it. Rects are clamped to the host area. |
+| Drag out | A docked pane's title dragged more than `DOCK_SNAP` (32 pt) out of the pane floats it under the pointer when dropped; dropped within 32 pt of the host's left or right edge it docks there. While the pointer is there, a preview shows the rect the pane will take: with `Columns`, after the panes on that edge that come before it in `open`. |
+| Floating | `FloatingFrame` with its resize handles; the title bar moves it. Escape or window focus loss during a move puts it back. A drop within 32 pt of the left or right edge docks it, with the same preview as a drag out. Rects are clamped to the host area. |
 | Focus | `out.focused` is the pane holding keyboard focus or last clicked; a click or focus in the document clears it. F6 and Shift+F6 cycle through the shown panes and then report `out.to_document`: give focus to the document. `.f6(false)` leaves F6 to the app, which calls `panes::focus_next(ctx, id, reverse)` instead. |
 
 State:
@@ -72,6 +73,65 @@ State:
 - Apply `Resize` and `FloatRect` as they come: they arrive every frame of a gesture, and an
   Escape sends the start rect back.
 - `panes::float_rect` brings a saved rect back inside the window, whatever the file says.
+
+## Rail
+
+`panes::Rail` is a vertical strip of icons, always shown at one edge. Each icon stands for a
+task pane, and one pane at a time is open beside the strip. A click on an icon opens its pane in
+place of the open one; a click on the open pane's icon closes it. The rail stores nothing: the
+app owns which pane is open, as with `PaneHost`.
+
+```rust
+use craft_ui::panes::{Edge, PaneHost, Rail, RailItem, RailRequest, SidePolicy};
+
+let items = [
+    RailItem::new(Pane::Comments, icons.source("comments"), tr("Comments")).marker(has_comments),
+    RailItem::new(Pane::Bookmarks, icons.source("bookmark"), tr("Bookmarks")).enabled(has_outline),
+];
+// After the top and bottom bars, before PaneHost: the rail is the outermost panel on its edge.
+let rail = Rail::new("rail").edge(Edge::End).rtl(ui_is_rtl).show(ui, &items, app.pane.as_ref(), |ui| {
+    page_navigation(ui); // the foot: below the items, always visible; may draw nothing
+});
+match rail.request {
+    Some(RailRequest::Open(pane)) => app.pane = Some(pane),
+    Some(RailRequest::Close(_)) => app.pane = None,
+    _ => {}
+}
+// The open pane, between the document and the rail. Its PaneContent returns `movable = false`
+// and a `default_state` docked at the rail's edge.
+// Apps whose panes draw their own headers return false from `title_bar`.
+let open: Vec<Pane> = app.pane.into_iter().collect();
+let out = PaneHost::new("task-panes").rtl(ui_is_rtl).policy(SidePolicy::OneSlot).show(ui, &open, |_| None, &mut MyPanes { app });
+egui::CentralPanel::default().show(ui, |ui| document(ui));
+```
+
+| Piece | Behavior |
+|---|---|
+| `RailItem` | `pane`, `icon` (an `egui::ImageSource`, like docking's `DockContent::icon`), `label` (tooltip and accessible name; translate it in the app), `enabled`, `marker`, `marker_label` (the accessible description while the marker shows, such as "Has comments"). `RailItem::new` makes an enabled item without a marker. |
+| `.edge(e)` | `End` (default) or `Start`. `Start` is left, or right with `.rtl(true)`. The rail is vertical, so `Bottom` draws at `End`. |
+| `.width(w)`, `.button_size(s)` | Rail width (48) and item size (34; the icon is 16 smaller). Non-finite values fall back to the defaults. |
+| `.frame(f)` | Default: the panel fill, 8 pt above and below. The panel's separator line draws the inner edge. Item colors come from `ChromeStyle`, like the pane title bars. |
+| Panel | Exact width, not resizable. Shown before `PaneHost::show`, it is outermost, so a docked pane on the same edge sits between it and the document. |
+| Items | Top-down in a vertical scroll area. The foot is a bottom sub-panel, so in a short window the items scroll and never run into it. A pane listed twice is drawn once. An empty list draws an empty rail. |
+| States | The open pane's item draws selected. `marker` draws a dot while the pane is not open. A disabled item draws disabled, takes no focus and sends nothing. An item disabled while focused hands focus to the nearest enabled item, the one below first. |
+| `RailOutput` | `#[non_exhaustive]`. `request`: `Open(p)` or `Close(p)` (`#[non_exhaustive]`), at most one per frame. `focused`: the item holding keyboard focus. `rect`: where the rail was drawn. |
+| Accessibility | Each item is a toggle button (accesskit `Button` with a toggled state) named by its `label`. |
+| Keyboard | Items take Tab focus. Enter or Space clicks the focused item. Up and Down move focus between enabled items and stop at the ends. Escape is the app's: the rail neither closes the pane nor moves focus on it. |
+
+F6 stays with the app. To include the rail in an F6 cycle, give `PaneHost` `.f6(false)` and,
+when the cycle reaches the rail, focus the open pane's item if it is enabled, else the first
+enabled one:
+
+```rust
+let enabled = || items.iter().filter(|item| item.enabled);
+let target = enabled().find(|item| Some(&item.pane) == app.pane.as_ref()).or_else(|| enabled().next());
+if let Some(item) = target {
+    ctx.memory_mut(|m| m.request_focus(Rail::new("rail").item_id(&item.pane)));
+}
+```
+
+While `rail.focused` is `Some`, focus is in the rail: the next F6 moves on, for example to the
+panes with `panes::focus_next`.
 
 ## Adoption
 

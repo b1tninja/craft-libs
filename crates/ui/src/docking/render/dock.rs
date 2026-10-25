@@ -10,7 +10,7 @@ use egui::{Context, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, p
 
 use super::{GroupKind, Renderer, RowItem, row_drag, row_range, stripless};
 use crate::docking::{
-    Action, Column, DockEvent, DockHeights, DockStyle, Group, GroupDrag, GroupGesture, Node, Placement, Side, Target, Zone,
+    Action, Column, DockEvent, DockHeights, DockStyle, DropTarget, Group, GroupDrag, GroupGesture, Node, Placement, Side, Target, Zone,
     dock_model::Unit,
     targets::{
         DockDrop, DockTarget, SIDE_EDGE_ZONE_DEPTH, STRIP_REACH, body_zone, column_edge, drop_zone, horizontal_line, resolve_dock, usable,
@@ -95,6 +95,29 @@ pub(in crate::docking) fn dock_rects<P>(
 
 pub(in crate::docking) fn column_width<P>(column: &Column<P>, style: &DockStyle) -> f32 {
     if column.iconic { column.iconic_width.unwrap_or(style.iconic_width).clamp(style.iconic_width, style.iconic_max_width) } else { column.width }
+}
+
+/// [D] A dock's columns as drawn in its rect: each column's width bounds, natural width with
+/// the floor it shrinks to, and the width [`fit_widths`] gives it, and each column with groups
+/// as `(index, width, rect)`, from the window edge inwards.
+pub(in crate::docking) struct DockColumns {
+    bounds: Vec<(f32, f32)>,
+    natural: Vec<(f32, Option<f32>)>,
+    widths: Vec<f32>,
+    pub(in crate::docking) rects: Vec<(usize, f32, Rect)>,
+}
+
+/// The rects of groups `heights` high, stacked from the top of `area`.
+pub(in crate::docking) fn stacked(area: Rect, heights: &[f32]) -> Vec<Rect> {
+    let mut top = area.top();
+    heights
+        .iter()
+        .map(|height| {
+            let rect = Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), top + height));
+            top += height;
+            rect
+        })
+        .collect()
 }
 
 /// A group of a column, as [`group_heights`] sizes it. Heights include the tab strip.
@@ -270,21 +293,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         if usable(rect) {
             ui.painter().rect_filled(rect, 0.0, self.style.background);
         }
-        let bounds: Vec<(f32, f32)> =
-            columns.iter().map(|c| if c.iconic { (self.style.iconic_width, self.style.iconic_max_width) } else { self.column_bounds(c) }).collect();
-        let natural: Vec<(f32, Option<f32>)> =
-            columns.iter().zip(&bounds).map(|(c, (lo, _))| (column_width(c, self.style), (!c.iconic).then_some(lo.max(1.0)))).collect();
-        let widths = fit_widths(&natural, rect.width());
+        let DockColumns { bounds, natural, widths, rects } = self.dock_columns(side, columns, rect);
         let scaled = widths.iter().zip(&natural).any(|(w, (n, _))| w != n);
         let total: f32 = widths.iter().sum();
-        let mut x = outer;
         let mut drawn = Vec::new();
-        for (index, column) in columns.iter().enumerate() {
+        for (index, width, column_rect) in rects {
+            let Some(column) = columns.get(index) else { continue };
             let Some(first) = column.groups.first().and_then(|g| g.panels.first()) else { continue };
-            let fitted = widths.get(index).copied().unwrap_or_default();
-            let width = fitted.min((rect.width() - (x - outer).abs()).max(0.0));
-            let inner = x + inward * width;
-            let column_rect = Rect::from_x_y_ranges(x.min(inner)..=x.max(inner), rect.y_range());
+            let (x, inner) = match edge {
+                Edge::Left => (column_rect.left(), column_rect.right()),
+                Edge::Right => (column_rect.right(), column_rect.left()),
+            };
             let groups = self.dock_groups.len();
             self.column(ui, column, first, column_rect, edge);
             let (outer_band, outer_line) = column_edge(x, rect.y_range(), band_width, line_width);
@@ -304,7 +323,6 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             }
             self.dock_targets.push(DockDrop { target: after.0, band: inner_band, line: after.1 });
             drawn.push((index, column, first, width, inner));
-            x = inner;
         }
         // Registered after the columns, so the narrow hit areas win at the edges.
         for (index, column, first, width, inner) in drawn {
@@ -346,6 +364,49 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 }
             }
         }
+    }
+
+    /// The columns of a dock drawn in `rect` ([`DockColumns`]).
+    pub(in crate::docking) fn dock_columns(&self, side: Side, columns: &[Column<P>], rect: Rect) -> DockColumns {
+        let (outer, inward) = match edge_of(side, self.style.right_to_left) {
+            Edge::Left => (rect.left(), 1.0),
+            Edge::Right => (rect.right(), -1.0),
+        };
+        let bounds: Vec<(f32, f32)> =
+            columns.iter().map(|c| if c.iconic { (self.style.iconic_width, self.style.iconic_max_width) } else { self.column_bounds(c) }).collect();
+        let natural: Vec<(f32, Option<f32>)> =
+            columns.iter().zip(&bounds).map(|(c, (lo, _))| (column_width(c, self.style), (!c.iconic).then_some(lo.max(1.0)))).collect();
+        let widths = fit_widths(&natural, rect.width());
+        let mut x = outer;
+        let mut rects = Vec::new();
+        for (index, column) in columns.iter().enumerate() {
+            if column.groups.first().and_then(|g| g.panels.first()).is_none() {
+                continue;
+            }
+            let fitted = widths.get(index).copied().unwrap_or_default();
+            let width = fitted.min((rect.width() - (x - outer).abs()).max(0.0));
+            let inner = x + inward * width;
+            rects.push((index, width, Rect::from_x_y_ranges(x.min(inner)..=x.max(inner), rect.y_range())));
+            x = inner;
+        }
+        DockColumns { bounds, natural, widths, rects }
+    }
+
+    /// A column drawn at `rect`: its bar, the body below it, and the heights of its groups in
+    /// the body, top to bottom (none when the column is iconic or its body is empty). Groups
+    /// taller than the body together scroll.
+    pub(in crate::docking) fn column_layout(&self, column: &Column<P>, rect: Rect) -> (Rect, Rect, Vec<f32>) {
+        let bar = Rect::from_min_max(rect.min, pos2(rect.right(), (rect.top() + self.style.column_bar_height).min(rect.bottom())));
+        let body = Rect::from_min_max(pos2(rect.left(), bar.bottom()), rect.max);
+        if column.iconic || !usable(body) {
+            return (bar, body, Vec::new());
+        }
+        let sizes: Vec<_> = column
+            .groups
+            .iter()
+            .map(|g| GroupSize { minimized: g.minimized, saved: g.height, min: self.group_min(g), content: self.dock_heights(g) })
+            .collect();
+        (bar, body, group_heights(&sizes, self.style.tab_height, body.height()))
     }
 
     fn handle_style(&self) -> ResizeHandleStyle {
@@ -390,9 +451,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             return;
         }
         self.record_column_float(column.groups.iter().flat_map(|g| g.panels.iter().cloned()).collect(), rect);
-        let bar = Rect::from_min_max(rect.min, pos2(rect.right(), (rect.top() + self.style.column_bar_height).min(rect.bottom())));
+        let (bar, body, heights) = self.column_layout(column, rect);
         self.column_bar(ui, column, first, bar, rect, edge);
-        let body = Rect::from_min_max(pos2(rect.left(), bar.bottom()), rect.max);
         if column.iconic && usable(body) {
             self.iconic_column(ui, column, body, edge);
         }
@@ -400,19 +460,13 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             ui.painter().rect_stroke(rect, 0.0, self.style.border, StrokeKind::Inside);
             return;
         }
-        let sizes: Vec<_> = column
-            .groups
-            .iter()
-            .map(|g| GroupSize { minimized: g.minimized, saved: g.height, min: self.group_min(g), content: self.dock_heights(g) })
-            .collect();
-        let heights = group_heights(&sizes, self.style.tab_height, body.height());
         let total: f32 = heights.iter().sum();
         let start = self.targets.len();
         if total > body.height() + 0.5 {
             let mut child =
                 ui.new_child(UiBuilder::new().id_salt(("dock-column", first)).max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
             child.set_clip_rect(body.intersect(ui.clip_rect()));
-            egui::ScrollArea::vertical()
+            let scrolled = egui::ScrollArea::vertical()
                 .id_salt(self.id.with(("column-scroll", first)))
                 .auto_shrink([false, false])
                 .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
@@ -420,6 +474,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     let (content, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
                     self.column_groups(ui, column, &heights, content, body);
                 });
+            self.column_scroll.insert(first.clone(), scrolled.state.offset.y);
         } else {
             self.column_groups(ui, column, &heights, body, body);
         }
@@ -437,14 +492,11 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     /// Groups top to bottom in `area` (the scrolled content when the column scrolls), their
     /// seams and bands clipped to the visible `view`, and the height dividers.
     fn column_groups(&mut self, ui: &mut Ui, column: &Column<P>, heights: &[f32], area: Rect, view: Rect) {
-        let mut top = area.top();
-        let mut rects = Vec::new();
-        for (group, height) in column.groups.iter().zip(heights) {
-            let rect = Rect::from_min_max(pos2(area.left(), top), pos2(area.right(), top + height));
-            self.group(ui, &group.panels, group.active, group.minimized, rect, GroupKind::Dock);
-            rects.push(rect);
-            top += height;
+        let rects = stacked(area, heights);
+        for (group, rect) in column.groups.iter().zip(&rects) {
+            self.group(ui, &group.panels, group.active, group.minimized, *rect, GroupKind::Dock);
         }
+        let top = rects.last().map_or(area.top(), |r| r.bottom());
         let xs = view.x_range();
         let half = self.style.seam_band * 0.5;
         let width = self.style.drop_line_width;
@@ -636,18 +688,25 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     /// takes tabs: the strip joins the group, and border bands reach into it only
     /// [`STRIP_REACH`] from their lines. Not with [`DockStyle::side_edge_zones`].
     pub(super) fn in_tab_strip(&self, pointer: Pos2) -> bool {
+        self.in_tab_strip_past(pointer, &[])
+    }
+
+    /// [`Self::in_tab_strip`] past the groups holding any of `through`.
+    fn in_tab_strip_past(&self, pointer: Pos2, through: &[P]) -> bool {
+        let own = |t: &DropTarget<P>| t.tabs.iter().any(|(p, _)| through.contains(p));
         !self.style.side_edge_zones
-            && self.targets.iter().rev().find(|t| usable(t.rect) && t.rect.contains(pointer)).is_some_and(|t| {
+            && self.targets.iter().rev().find(|t| usable(t.rect) && t.rect.contains(pointer) && !own(t)).is_some_and(|t| {
                 t.accepts_tabs && t.tab_strip.map(|strip| strip.intersect(t.rect)).is_some_and(|strip| usable(strip) && strip.contains(pointer))
             })
     }
 
     /// The dock target at `pointer`: a band at a border, else a side zone of a dock group's
     /// body ([`SIDE_EDGE_ZONE_DEPTH`] deep with [`DockStyle::side_edge_zones`]). The middle of a
-    /// group that takes tabs is none: the group's own target joins it.
-    fn dock_drop(&self, pointer: Pos2) -> Option<DockDrop<P>> {
+    /// group that takes tabs is none: the group's own target joins it. The groups holding
+    /// `through` (a floating window the drag looks through) hide no strip.
+    fn dock_drop(&self, pointer: Pos2, through: &[P]) -> Option<DockDrop<P>> {
         let mut candidates = self.dock_candidates();
-        let strip = self.in_tab_strip(pointer);
+        let strip = self.in_tab_strip_past(pointer, through);
         if strip {
             candidates.retain(|t| t.line.distance_to_pos(pointer) <= STRIP_REACH);
         }
@@ -670,11 +729,11 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     /// The dock target a whole group or column drag would take at `pointer`, with the action
     /// and its line. A target that leaves the layout unchanged is a no-op: `None` action.
     pub(super) fn dock_group_proposal(&self, drag: &GroupDrag<P>, pointer: Pos2) -> Option<(Option<Action<P>>, Rect)> {
-        let moving = (drag.gesture == GroupGesture::Window).then_some(&drag.panel);
-        if self.dock_covered(pointer, moving) {
+        let through = self.looks_through(drag);
+        if self.dock_covered(pointer, through.then_some(&drag.panel)) {
             return None;
         }
-        let drop = self.dock_drop(pointer)?;
+        let drop = self.dock_drop(pointer, if through { &drag.members } else { &[] })?;
         let action = group_action(drag, drop.target.to());
         self.checked(action).map(|action| (action, drop.line))
     }
@@ -686,7 +745,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         if self.dock_covered(pointer, None) {
             return None;
         }
-        let drop = self.dock_drop(pointer)?;
+        let drop = self.dock_drop(pointer, &[])?;
         let action = match drop.target.to() {
             // A target named by the dragged panel is its own group or column: another panel
             // there names the same one. With none, the drop leaves the panel where it is.
@@ -707,14 +766,16 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         self.checked(action).map(|action| (action, drop.line))
     }
 
-    /// `Some(None)` when the action is valid but changes nothing, `None` when it is invalid.
+    /// `Some(None)` when the action is valid but changes nothing apart from sizes
+    /// ([`crate::docking::Layout::same_arrangement`]), `None` when it is invalid.
     fn checked(&self, action: Action<P>) -> Option<Option<Action<P>>> {
         let mut candidate = self.layout.clone();
         candidate.apply_with_permissions(action.clone(), |p| self.permissions(p)).ok()?;
-        Some((candidate != *self.layout).then_some(action))
+        Some((!candidate.same_arrangement(self.layout)).then_some(action))
     }
 
-    /// The line a drop beside a group, column, dock or the layout's edge previews with.
+    /// The line of a dock drop that shows no result rect: into an iconic column, or any dock
+    /// drop with [`DockStyle::side_edge_zones`].
     pub(super) fn paint_drop_line(&self, ctx: &Context, line: Rect) {
         if usable(line) {
             let painter = self.preview_painter(ctx);

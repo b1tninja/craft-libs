@@ -3,7 +3,9 @@
 
 use egui::{Color32, Event, Key, Modifiers, PointerButton, Pos2, Rect, ViewportCommand, epaint::ClippedShape, pos2, vec2};
 
-use super::render::{APPKIT_CORNER, DragPointer, MACOS_CLOSE, WindowDrag, appkit_resize_areas, close_rects, floats_shown, resize_bands, wayland};
+use super::render::{
+    APPKIT_CORNER, DragPointer, MACOS_CLOSE, WindowDrag, appkit_resize_areas, close_rects, drag_opacity, floats_shown, resize_bands, wayland,
+};
 use super::testing::DockDriver;
 use super::{Action, DockContent, Floating, Hit, Layout, Monitor, Node, Permissions, Placement, Target, WindowKind, Workspace};
 use crate::layout::{SplitAxis, SplitSize};
@@ -581,8 +583,9 @@ fn a_native_window_saves_its_id_place_and_monitor() {
     let copies: Layout<u32> = serde_json::from_str(&serde_json::to_string(&copies).unwrap()).unwrap();
     assert_eq!(copies.floating[0].id, layout.floating[0].id);
     assert_ne!(copies.floating[1].id, copies.floating[0].id);
-    // An in-window window writes no id, as older builds did.
-    assert!(!serde_json::to_string(&Floating::single(vec![1u32], 0, [0.0, 0.0, 9.0, 9.0])).unwrap().contains("id"));
+    // An in-window window writes its id too.
+    let in_window = Floating::single(vec![1u32], 0, [0.0, 0.0, 9.0, 9.0]).with_id(3);
+    assert!(serde_json::to_string(&in_window).unwrap().contains(r#""id":3"#));
 }
 
 /// Height of the bar at the top of a native window.
@@ -2198,4 +2201,18 @@ fn a_tab_drag_onto_a_native_window_is_no_app_drag() {
     d.step(vec![]);
     assert!(matches!(out.actions.as_slice(), [Action::Move { panel: 1, anchor: 5 | 6, .. }]), "{:?}", out.actions);
     assert!(d.content.drops.is_empty(), "{:?}", d.content.drops);
+}
+
+#[test]
+fn a_native_window_fades_only_while_its_drag_can_dock() {
+    let drag = |docks| WindowDrag { window: 1, grab: vec2(10.0, 10.0), to: pos2(100.0, 100.0), start: pos2(100.0, 100.0), docks };
+    assert_eq!(drag_opacity(None, false, true), 1.0);
+    // A bar drag that only moves the window stays opaque.
+    assert_eq!(drag_opacity(Some(&drag(false)), false, false), 1.0);
+    assert_eq!(drag_opacity(Some(&drag(false)), false, true), 0.75);
+    // A drag by the window's only tab or group docks either way.
+    assert_eq!(drag_opacity(Some(&drag(true)), false, false), 0.75);
+    // With Cmd/Ctrl held the drag only moves the window.
+    assert_eq!(drag_opacity(Some(&drag(false)), true, true), 1.0);
+    assert_eq!(drag_opacity(Some(&drag(true)), true, false), 1.0);
 }

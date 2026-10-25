@@ -11,6 +11,8 @@ pub(in crate::docking) use crate::docking::chrome::RESIZE_HANDLES;
 /// A floating window as drawn: what covers the layout behind it.
 pub(in crate::docking) struct WindowHit<P> {
     pub(super) window: Rect,
+    /// Where the window's tree is drawn.
+    pub(super) body: Rect,
     pub(super) members: Vec<P>,
 }
 
@@ -120,7 +122,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 self.tree = outer;
             }
         }
-        self.frame.windows.push(WindowHit { window: frame, members: window.panels().cloned().collect() });
+        self.frame.windows.push(WindowHit { window: frame, body, members: window.panels().cloned().collect() });
     }
 
     /// Drag moves the whole window live, double-click minimizes or expands it, × closes every

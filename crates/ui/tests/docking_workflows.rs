@@ -417,7 +417,8 @@ mod v1_fixtures {
             let float: DockCommand<String> =
                 serde_json::from_value(json!({"command": "window.panel.float", "panel": bars[0], "column": true})).unwrap();
             let space = craft_ui::docking::float_space(&d.ctx, d.id).unwrap();
-            let actions = float.to_actions(&craft_ui::docking::Workspace::new(d.layout.clone()), false, &space).unwrap();
+            let actions =
+                float.to_actions_with(&craft_ui::docking::Workspace::new(d.layout.clone()), false, &space, |p| d.content.permissions(p)).unwrap();
             d.layout.apply_all(actions, |p| d.content.permissions(p)).unwrap_or_else(|e| panic!("{at}: {e}"));
             d.settle();
             assert!(start_columns(&d.layout).is_empty(), "{at}: floated");

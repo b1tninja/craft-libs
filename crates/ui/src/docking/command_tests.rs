@@ -45,7 +45,7 @@ fn parse(params: Value) -> Result<DockCommand<P>, serde_json::Error> {
 /// The actions `params` makes on a fresh workspace.
 fn actions(params: Value) -> Vec<Action<P>> {
     let command = parse(params.clone()).unwrap_or_else(|e| panic!("{params}: {e}"));
-    command.to_actions(&workspace(), false, &space()).unwrap_or_else(|e| panic!("{params}: {e}"))
+    command.to_actions_with(&workspace(), false, &space(), permissions).unwrap_or_else(|e| panic!("{params}: {e}"))
 }
 
 /// Apply `params` to a fresh workspace; return it and the panels closed.
@@ -294,7 +294,7 @@ fn dock_commands_parse_every_documented_shape_and_map_to_atomic_actions() {
 fn side_zones_map_to_the_placement_the_anchor_container_takes_in_either_direction() {
     let command =
         |zone: &str, anchor: &str| parse(json!({"command": "window.panel.move", "panel": "history", "anchor": anchor, "zone": zone})).unwrap();
-    let placed = |zone: &str, anchor: &str, rtl: bool| match command(zone, anchor).to_actions(&workspace(), rtl, &space()) {
+    let placed = |zone: &str, anchor: &str, rtl: bool| match command(zone, anchor).to_actions_with(&workspace(), rtl, &space(), permissions) {
         Ok(actions) => match actions.as_slice() {
             [Action::Move { placement, .. }] => Ok(placement.clone()),
             other => panic!("{other:?}"),
@@ -338,7 +338,7 @@ fn float_without_a_rect_takes_the_drag_size_inside_the_dock_area() {
     let d = testing::DockDriver::new(workspace().layout, Sized).with_area(area);
     let space = float_space::<P>(&d.ctx, d.id).expect("the area records its float space");
     assert_eq!(space.area, area);
-    let float = |params: Value| parse(params).unwrap().to_actions(&workspace(), false, &space).unwrap();
+    let float = |params: Value| parse(params).unwrap().to_actions_with(&workspace(), false, &space, permissions).unwrap();
 
     let panel = float(json!({"command": "window.panel.float", "panel": "layers"}));
     // The floating_size width, and an empty body's least fitted height under its 150 points.
@@ -359,19 +359,25 @@ fn float_without_a_rect_takes_the_drag_size_inside_the_dock_area() {
 
     // Without recorded sizes a unit floats at the layout's size, shrunk into a small area.
     let small = FloatSpace::new(egui::Rect::from_min_size(egui::pos2(0.0, 30.0), egui::vec2(200.0, 200.0)));
-    let applied = parse(json!({"command": "window.panel.float", "panel": "layers", "group": true})).unwrap().to_actions(&workspace(), false, &small);
+    let applied = parse(json!({"command": "window.panel.float", "panel": "layers", "group": true})).unwrap().to_actions_with(
+        &workspace(),
+        false,
+        &small,
+        permissions,
+    );
     assert_eq!(applied, Ok(vec![Action::MoveGroup { panel: s("layers"), to: Target::Float { rect: Some([0.0, 30.0, 200.0, 200.0]) } }]));
 
     // A host seeds the size of a panel the area never drew; a recorded size still wins.
     let seeded = FloatSpace::new(area).with_panel_size(s("layers"), egui::vec2(180.0, 240.0));
-    let applied = parse(json!({"command": "window.panel.float", "panel": "layers"})).unwrap().to_actions(&workspace(), false, &seeded);
+    let applied =
+        parse(json!({"command": "window.panel.float", "panel": "layers"})).unwrap().to_actions_with(&workspace(), false, &seeded, permissions);
     assert_eq!(applied, Ok(vec![Action::Float { panel: s("layers"), rect: [24.0, 54.0, 180.0, 240.0] }]));
     let recorded = space.clone().with_panel_size(s("layers"), egui::vec2(180.0, 240.0));
     assert_eq!(float_with(&recorded, "layers"), vec![Action::Float { panel: s("layers"), rect: [24.0, 54.0, 200.0, 120.0] }]);
 }
 
 fn float_with(space: &FloatSpace<P>, panel: &str) -> Vec<Action<P>> {
-    parse(json!({"command": "window.panel.float", "panel": panel})).unwrap().to_actions(&workspace(), false, space).unwrap()
+    parse(json!({"command": "window.panel.float", "panel": panel})).unwrap().to_actions_with(&workspace(), false, space, permissions).unwrap()
 }
 
 #[test]
@@ -409,6 +415,35 @@ fn dock_with_a_side_zone_and_no_anchor_makes_an_outer_edge_frame() {
         shown.layout
     );
     rejected(json!({"command": "window.panel.dock", "panel": "color", "zone": "left", "before": null}), DockError::InvalidPlacement);
+}
+
+/// The frame beside `panel`'s own: what an edge split with `panel` wrapped.
+fn wrapped(layout: &Layout<P>, panel: &str) -> Option<Node<P>> {
+    let Some(dock_model::Place::Node(path)) = layout.place(&s(panel)) else { return None };
+    let (last, parent) = path.split_last()?;
+    layout.root.as_ref().and_then(|root| dock_model::node_at(root, &[parent, &[!last]].concat())).cloned()
+}
+
+#[test]
+fn an_outer_edge_dock_wraps_the_canvas_column_whatever_the_tree_order() {
+    let tabs = |panel: &str| Node::Tabs { panels: vec![s(panel)], active: 0 };
+    let side =
+        |first, second| Node::Split { axis: SplitAxis::Horizontal, size: SplitSize::Ratio(0.5), first: Box::new(first), second: Box::new(second) };
+    let canvas_first = side(tabs("canvas"), side(tabs("layers"), tabs("history")));
+    let canvas_later = side(side(tabs("layers"), tabs("canvas")), tabs("history"));
+    for root in [canvas_first, canvas_later] {
+        let layout = Layout { root: Some(root), floating: vec![Floating::single(vec![s("color")], 0, [300.0, 200.0, 200.0, 150.0])] };
+        let command = parse(json!({"command": "window.panel.dock", "panel": "color", "zone": "top"})).unwrap();
+        let mut workspace = Workspace::new(layout.clone());
+        command.apply(&mut workspace, false, &space(), permissions).unwrap();
+        assert_eq!(wrapped(&workspace.layout, "color"), Some(tabs("canvas")), "{:?}", workspace.layout);
+        // An area drawn with side edge zones never narrows its edge to the canvas column.
+        let mut workspace = Workspace::new(layout.clone());
+        command.apply(&mut workspace, false, &space().with_side_edge_zones(true), permissions).unwrap();
+        let mut whole = layout;
+        whole.floating.clear();
+        assert_eq!(wrapped(&workspace.layout, "color"), whole.root, "{:?}", workspace.layout);
+    }
 }
 
 #[test]

@@ -312,16 +312,22 @@ impl<P> Sizer<'_, P> {
 /// The size of a split at `path` whose first child is `first` of `available` points, in the
 /// split's own mode `size`: a fixed side keeps its points, a ratio stays a ratio.
 fn push_size(path: &[bool], size: SplitSize, first: f32, available: f32, out: &mut Vec<(Vec<bool>, SplitSize)>) {
+    if let Some(size) = resized(size, first, available) {
+        out.push((path.to_vec(), size));
+    }
+}
+
+/// `size` in its own mode for a first child of `first` out of `available` points.
+pub(in crate::docking) fn resized(size: SplitSize, first: f32, available: f32) -> Option<SplitSize> {
     if available <= 0.0 || !available.is_finite() || !first.is_finite() {
-        return;
+        return None;
     }
     let first = first.clamp(0.0, available);
-    let size = match size {
+    Some(match size {
         SplitSize::Ratio(_) => SplitSize::Ratio((first / available).clamp(0.0, 1.0)),
         SplitSize::FixedFirst(_) => SplitSize::FixedFirst(first),
         SplitSize::FixedSecond(_) => SplitSize::FixedSecond(available - first),
-    };
-    out.push((path.to_vec(), size));
+    })
 }
 
 /// One group of a flat row, such as the panels of a stack or the groups of a dock column:

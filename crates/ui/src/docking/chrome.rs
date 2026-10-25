@@ -32,6 +32,8 @@ pub struct ChromeStyle {
     pub text: Color32,
     pub weak_text: Color32,
     pub accent: Color32,
+    /// Fill of a selected or hovered control, such as an icon rail's open item.
+    pub active_background: Color32,
     pub font: FontId,
     /// Mirror the title bar: buttons at the left, the title at the right.
     pub right_to_left: bool,
@@ -39,7 +41,23 @@ pub struct ChromeStyle {
 
 impl ChromeStyle {
     pub fn from_ui(ui: &Ui) -> Self {
-        Self::from_dock(&DockStyle::from_ui(ui))
+        Self::from_visuals(ui.visuals())
+    }
+
+    /// The colors [`Self::from_dock`] takes from [`DockStyle::from_visuals`], without building
+    /// the dock style's labels.
+    pub fn from_visuals(visuals: &egui::Visuals) -> Self {
+        Self {
+            background: visuals.window_fill,
+            stroke: visuals.window_stroke,
+            title_background: visuals.extreme_bg_color,
+            text: visuals.text_color(),
+            weak_text: visuals.weak_text_color(),
+            accent: visuals.selection.stroke.color,
+            active_background: visuals.widgets.active.bg_fill,
+            font: FontId::proportional(12.0),
+            right_to_left: false,
+        }
     }
 
     pub fn from_dock(style: &DockStyle) -> Self {
@@ -50,6 +68,7 @@ impl ChromeStyle {
             text: style.text,
             weak_text: style.inactive_text,
             accent: style.accent,
+            active_background: style.active_background,
             font: style.font.clone(),
             right_to_left: style.right_to_left,
         }

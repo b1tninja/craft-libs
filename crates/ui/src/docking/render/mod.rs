@@ -21,7 +21,7 @@ pub(in crate::docking) use native::WindowDrag;
 #[cfg(all(test, feature = "native-windows"))]
 pub(in crate::docking) use {
     cross::DragPointer,
-    native::{APPKIT_CORNER, MACOS_CLOSE, Session, appkit_resize_areas, close_rects, floats_shown, resize_bands, session, wayland},
+    native::{APPKIT_CORNER, MACOS_CLOSE, Session, appkit_resize_areas, close_rects, drag_opacity, floats_shown, resize_bands, session, wayland},
 };
 
 #[cfg(all(test, feature = "native-windows"))]
@@ -104,6 +104,8 @@ pub(super) struct Renderer<'a, P> {
     pub(super) dock_targets: Vec<crate::docking::targets::DockDrop<P>>,
     /// [D] The open groups of dock columns, whose body zones stack or make columns.
     pub(super) dock_groups: Vec<dock::DockGroup<P>>,
+    /// [D] The scroll offset of each dock column that scrolls this frame, by its first panel.
+    pub(super) column_scroll: HashMap<P, f32>,
     pub(super) owned_interactions: Vec<Id>,
     pub(super) output: DockOutput<P>,
     pub(super) frame: FrameState<P>,

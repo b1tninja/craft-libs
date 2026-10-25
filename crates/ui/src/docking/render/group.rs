@@ -374,7 +374,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             });
         let response = if elided { response.on_hover_text(&label) } else { response };
         self.register_interaction(ui.ctx(), response.id);
-        if response.is_pointer_button_down_on() || response.clicked() {
+        if response.is_pointer_button_down_on() || response.clicked_by(egui::PointerButton::Primary) {
             ui.ctx().data_mut(|d| d.insert_temp(tab_id.with("pointer-focus"), true));
         }
         // The click that expands a minimized group is not the first half of a double-click.

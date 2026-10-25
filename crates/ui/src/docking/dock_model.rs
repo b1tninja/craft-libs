@@ -326,6 +326,35 @@ pub(super) fn split_frame<P>(root: &mut Node<P>, path: &[bool], new: Node<P>, zo
     true
 }
 
+/// [`split_frame`] with the sizes of [`Placement::SplitSized`]: the new split takes `size`, and
+/// the nearest enclosing split whose divider runs along the frame's `zone` side takes `outer`.
+/// False when there is no such split, or a dock is beyond it.
+pub(super) fn split_frame_sized<P>(root: &mut Node<P>, path: &[bool], new: Node<P>, zone: Zone, size: SplitSize, outer: SplitSize) -> bool {
+    let axis = if matches!(zone, Zone::Top | Zone::Bottom) { SplitAxis::Vertical } else { SplitAxis::Horizontal };
+    // A divider on the frame's start side (left or top) belongs to a split holding the frame
+    // in its second child.
+    let start = matches!(zone, Zone::Left | Zone::Top);
+    let enclosing = (0..path.len()).rev().find(|&depth| {
+        path.get(depth) == Some(&start) && matches!(node_at(root, &path[..depth]), Some(Node::Split { axis: own, .. }) if *own == axis)
+    });
+    let Some(depth) = enclosing else { return false };
+    let Some(Node::Split { size: own, first, second, .. }) = node_at_mut(root, &path[..depth]) else { return false };
+    if zone == Zone::Center || matches!(**first, Node::Dock { .. }) || matches!(**second, Node::Dock { .. }) {
+        return false;
+    }
+    *own = outer;
+    if !split_frame(root, path, new, zone) {
+        return false;
+    }
+    match node_at_mut(root, path) {
+        Some(Node::Split { size: own, .. }) => {
+            *own = size;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Insert `new` at `index` and select the member at `index + selected`.
 fn splice<P>(panels: &mut Vec<P>, active: &mut usize, index: usize, new: Vec<P>, selected: usize) {
     let index = index.min(panels.len());
@@ -335,6 +364,66 @@ fn splice<P>(panels: &mut Vec<P>, active: &mut usize, index: usize, new: Vec<P>,
 }
 
 impl<P: Clone + Eq + Hash> Layout<P> {
+    /// The layout without its sizes and rectangles: which panels are where, and their state.
+    /// A run of splits along one axis nests one way (`a | (b | c)`), since nesting it the
+    /// other way only moves sizes between its members.
+    pub(super) fn shape(&self) -> Layout<P> {
+        fn run<'a, P>(node: &'a Node<P>, axis: SplitAxis, out: &mut Vec<&'a Node<P>>) {
+            match node {
+                Node::Split { axis: own, first, second, .. } if *own == axis => {
+                    run(first, axis, out);
+                    run(second, axis, out);
+                }
+                node => out.push(node),
+            }
+        }
+        fn node<P: Clone>(n: &Node<P>) -> Node<P> {
+            match n {
+                Node::Split { axis, .. } => {
+                    let mut members = Vec::new();
+                    run(n, *axis, &mut members);
+                    let mut shaped = members.into_iter().rev().map(node);
+                    let last = shaped.next().unwrap_or(Node::Tabs { panels: Vec::new(), active: 0 });
+                    shaped.fold(last, |second, first| Node::Split {
+                        axis: *axis,
+                        size: SplitSize::Ratio(0.5),
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    })
+                }
+                Node::Tabs { panels, active } => Node::Tabs { panels: panels.clone(), active: *active },
+                Node::Stack { entries } => Node::Stack { entries: entries.iter().map(|e| super::StackEntry { height: None, ..e.clone() }).collect() },
+                Node::Dock { side, columns } => Node::Dock {
+                    side: *side,
+                    columns: columns
+                        .iter()
+                        .map(|c| Column {
+                            groups: c.groups.iter().map(|g| Group { height: None, ..g.clone() }).collect(),
+                            width: 0.0,
+                            iconic: c.iconic,
+                            iconic_width: None,
+                        })
+                        .collect(),
+                },
+            }
+        }
+        Layout {
+            root: self.root.as_ref().map(node),
+            floating: self
+                .floating
+                .iter()
+                .map(|w| Floating { root: node(&w.root), rect: [0.0; 4], native: None, monitor: None, monitor_size: None, ..w.clone() })
+                .collect(),
+        }
+    }
+
+    /// Whether `other` arranges the panels as this layout does: equal apart from split sizes,
+    /// column widths, group heights and window rectangles. A drop that leads from one to the
+    /// other changes nothing the user would see as a move.
+    pub(super) fn same_arrangement(&self, other: &Self) -> bool {
+        self.shape() == other.shape()
+    }
+
     pub(super) fn place(&self, panel: &P) -> Option<Place> {
         for (w, window) in self.floating.iter().enumerate() {
             for (leaf, path) in leaves(&window.root) {
@@ -454,23 +543,53 @@ impl<P: Clone + Eq + Hash> Layout<P> {
         None
     }
 
-    /// The node an edge split wraps: the root, or the part between the docks.
-    pub(in crate::docking) fn edge_path(&self) -> Vec<bool> {
+    /// The node an edge split at `zone` wraps: the root, or the part between the docks. Where
+    /// neither side of a side-by-side split is a dock and only one holds a `canvas` panel,
+    /// that side: the canvas column, without the side frames. A top (bottom) edge also
+    /// descends a split of rows into its first (last) row when only that row holds a `canvas`
+    /// panel, so a full-width row below (above) the canvas keeps its edge.
+    pub(in crate::docking) fn edge_path(&self, zone: Zone, canvas: &dyn Fn(&P) -> bool) -> Vec<bool> {
+        let holds = |node: &Node<P>| tree_panels(node).into_iter().any(canvas);
         let mut path = Vec::new();
         let mut node = self.root.as_ref();
-        while let Some(Node::Split { axis: SplitAxis::Horizontal, first, second, .. }) = node {
+        while let Some(Node::Split { axis, first, second, .. }) = node {
             if path.len() > MAX_DEPTH {
                 break;
             }
-            let second_side = match (&**first, &**second) {
-                (Node::Dock { .. }, _) => true,
-                (_, Node::Dock { .. }) => false,
-                _ => break,
+            let second_side = match (axis, &**first, &**second) {
+                (SplitAxis::Horizontal, Node::Dock { .. }, _) => true,
+                (SplitAxis::Horizontal, _, Node::Dock { .. }) => false,
+                (SplitAxis::Vertical, ..) => match (zone, holds(first), holds(second)) {
+                    (Zone::Top, true, false) => false,
+                    (Zone::Bottom, false, true) => true,
+                    _ => break,
+                },
+                _ => match (holds(first), holds(second)) {
+                    (true, false) => false,
+                    (false, true) => true,
+                    _ => break,
+                },
             };
             path.push(second_side);
             node = Some(if second_side { second } else { first });
         }
         path
+    }
+
+    /// Whether an edge drop at `zone` that narrows by `canvas` wraps less than one that does
+    /// not: the edge area is narrower than the part between the docks.
+    pub(in crate::docking) fn edge_narrows(&self, zone: Zone, canvas: &dyn Fn(&P) -> bool) -> bool {
+        self.edge_path(zone, canvas) != self.edge_path(zone, &|_| false)
+    }
+
+    /// The docked panel, other than `skip`, that a [`Placement::Edge`] anchors on so the drop
+    /// wraps the edge area it shows: a `protected` one where that area is narrowed to the
+    /// canvas column (`narrowed`), else one that is not protected, since a protected anchor
+    /// narrows the model's edge. Any docked panel when every one is protected.
+    pub(in crate::docking) fn edge_anchor(&self, narrowed: bool, protected: &dyn Fn(&P) -> bool, skip: &dyn Fn(&P) -> bool) -> Option<P> {
+        let docked: Vec<&P> =
+            self.panels().into_iter().filter(|p| !skip(p) && matches!(self.place(p), Some(Place::Dock { .. } | Place::Node(_)))).collect();
+        docked.iter().find(|p| protected(p) == narrowed).or(docked.first()).map(|p| (*p).clone())
     }
 
     pub(super) fn columns_mut(&mut self, path: &[bool]) -> Option<&mut Vec<Column<P>>> {
@@ -666,7 +785,8 @@ impl<P: Clone + Eq + Hash> Layout<P> {
     }
 
     /// Insert groups taken by [`Self::take_unit`] (or a new single-panel group).
-    pub(super) fn insert_moving(&mut self, moving: Moving<P>, to: Target<P>) -> Result<(), DockError> {
+    /// `canvas` is the protected-panel test an outer edge drop narrows by ([`Self::edge_path`]).
+    pub(super) fn insert_moving(&mut self, moving: Moving<P>, to: Target<P>, canvas: &dyn Fn(&P) -> bool) -> Result<(), DockError> {
         if moving.groups.is_empty() || moving.groups.iter().any(|g| g.panels.is_empty()) {
             return Err(DockError::MissingPanel);
         }
@@ -732,10 +852,22 @@ impl<P: Clone + Eq + Hash> Layout<P> {
                         let root = self.tree_mut(window).ok_or(DockError::MissingTarget)?;
                         if split_frame(root, path, new, zone) { Ok(()) } else { Err(DockError::MissingTarget) }
                     }
+                    Placement::SplitSized { zone, size, outer } => {
+                        let (window, path) = place.tree_path().ok_or(DockError::InvalidPlacement)?;
+                        let new = match moving.node {
+                            Some(node) => node,
+                            None => {
+                                let (panels, active) = flatten(moving.groups);
+                                Node::Tabs { panels, active }
+                            }
+                        };
+                        let root = self.tree_mut(window).ok_or(DockError::MissingTarget)?;
+                        if split_frame_sized(root, path, new, zone, size, outer) { Ok(()) } else { Err(DockError::InvalidPlacement) }
+                    }
                     // A floating window is a tree: a group above or below splits the anchor's group.
                     Placement::Group { below, .. } if matches!(place, Place::Floating { .. }) => {
                         let zone = if below { Zone::Bottom } else { Zone::Top };
-                        self.insert_moving(moving, Target::At { anchor, placement: Placement::Split(zone) })
+                        self.insert_moving(moving, Target::At { anchor, placement: Placement::Split(zone) }, canvas)
                     }
                     Placement::Group { below, height } => {
                         if !valid_height(height) {
@@ -757,7 +889,8 @@ impl<P: Clone + Eq + Hash> Layout<P> {
                         if zone == Zone::Center || matches!(place, Place::Floating { .. }) {
                             return Err(DockError::InvalidPlacement);
                         }
-                        let path = self.edge_path();
+                        // A protected anchor narrows the edge to the canvas column.
+                        let path = if canvas(&anchor) { self.edge_path(zone, canvas) } else { self.edge_path(zone, &|_| false) };
                         let node = self.root.as_mut().and_then(|root| node_at_mut(root, &path)).ok_or(DockError::MissingTarget)?;
                         if matches!(node, Node::Dock { .. }) {
                             return Err(DockError::InvalidPlacement);

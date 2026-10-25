@@ -312,6 +312,13 @@ fn reversed<P: Clone + Eq>(hidden: &Location<P>, location: &Location<P>, panel: 
         Placement::Split(Zone::Bottom) => (Placement::Split(Zone::Top), location.size),
         Placement::Group { below, .. } => (Placement::Group { below: !below, height: None }, None),
         Placement::Column { after } => (Placement::Column { after: !after }, None),
+        Placement::SplitSized { zone, .. } => match zone {
+            Zone::Left => (Placement::Split(Zone::Right), location.size),
+            Zone::Right => (Placement::Split(Zone::Left), location.size),
+            Zone::Top => (Placement::Split(Zone::Bottom), location.size),
+            Zone::Bottom => (Placement::Split(Zone::Top), location.size),
+            Zone::Center => return None,
+        },
         Placement::Edge(_) => return None,
     };
     Some(Location { floating: None, anchor: Some(panel.clone()), placement, size, sibling: Vec::new(), ..hidden.clone() })

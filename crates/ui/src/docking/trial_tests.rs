@@ -213,6 +213,14 @@ fn a_clicked_tab_shows_no_focus_outline_but_tab_key_focus_does() {
     assert_eq!(d.ctx.memory(|m| m.focused()), Some(id));
     d.step(vec![]);
     assert!(outlined(&d));
+
+    // Space and Enter activate the tab without counting as a pointer click.
+    for activate in [egui::Key::Space, egui::Key::Enter] {
+        let out = d.step(vec![key(activate)]);
+        assert!(out.actions.contains(&Action::Activate { panel: 3 }), "{:?}", out.actions);
+        d.step(vec![]);
+        assert!(outlined(&d), "{activate:?} hid the focus outline");
+    }
 }
 
 #[test]

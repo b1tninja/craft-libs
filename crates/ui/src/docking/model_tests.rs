@@ -576,16 +576,30 @@ mod serde_tests {
     fn single_plain_floating_window_writes_the_v1_shape() {
         let rect = [1.0, 2.0, 300.0, 200.0];
         let plain = Floating::single(vec![4u32, 5], 1, rect);
-        assert_eq!(serde_json::to_value(&plain).unwrap(), json!({"panels": [4, 5], "active": 1, "rect": rect}));
+        assert_eq!(serde_json::to_value(&plain).unwrap(), json!({"id": plain.id, "panels": [4, 5], "active": 1, "rect": rect}));
         let minimized = Floating { minimized: true, ..Floating::single(vec![4u32], 0, rect) };
         let stacked = Floating::stack(vec![g(&[4], 0), g(&[5], 0)], rect).unwrap();
         let native = Floating { native: Some(rect), ..Floating::single(vec![4u32], 0, rect) };
         for window in [minimized, stacked, native] {
             let value = serde_json::to_value(&window).unwrap();
             assert!(value.get("root").is_some() && value.get("panels").is_none(), "{value}");
+            assert_eq!(value["id"], json!(window.id), "{value}");
             assert_eq!(serde_json::from_value::<Floating<u32>>(value).unwrap(), window);
         }
         assert!(serde_json::from_value::<Floating<u32>>(json!({"rect": rect})).is_err());
+    }
+
+    #[test]
+    fn in_window_windows_keep_their_ids_through_a_save() {
+        let rect = [1.0, 2.0, 300.0, 200.0];
+        let layout = Layout {
+            root: None,
+            floating: vec![Floating::single(vec![4u32], 0, rect).with_id(7), Floating::stack(vec![g(&[5], 0), g(&[6], 0)], rect).unwrap().with_id(8)],
+        };
+        let saved = serde_json::to_string(&layout).unwrap();
+        let loaded: Layout<u32> = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded, layout);
+        assert_eq!(loaded.floating.iter().map(|w| w.id).collect::<Vec<_>>(), [7, 8]);
     }
 
     #[test]
@@ -668,8 +682,13 @@ mod serde_tests {
                 }
                 let layout: super::Layout<String> = serde_json::from_value(layout_value.clone()).unwrap_or_else(|e| panic!("{app}{pointer}: {e}"));
                 layout.validate().unwrap_or_else(|e| panic!("{app}{pointer}: {e}"));
-                // Nothing new is in use, so the layout writes back exactly as read.
-                assert_eq!(serde_json::to_value(&layout).unwrap(), layout_value, "{app}{pointer}");
+                // Nothing new is in use, so the layout writes back exactly as read, plus the
+                // fresh id of each floating window.
+                let mut written = serde_json::to_value(&layout).unwrap();
+                for (window, value) in layout.floating.iter().zip(written["floating"].as_array_mut().unwrap()) {
+                    assert_eq!(value.as_object_mut().unwrap().remove("id"), Some(json!(window.id)), "{app}{pointer}");
+                }
+                assert_eq!(written, layout_value, "{app}{pointer}");
             }
         }
     }
@@ -753,4 +772,24 @@ fn edge_placement_splits_the_part_between_the_docks_or_the_root() {
     let before = frames.clone();
     assert_eq!(frames.apply(Action::Move { panel: 2, anchor: 1, placement: Placement::Edge(Zone::Center) }), Err(DockError::InvalidPlacement));
     assert_eq!(frames, before);
+}
+
+#[test]
+fn a_sized_split_sets_the_new_split_and_the_enclosing_one_beside_the_anchor() {
+    // 1 | (2 | 3): 4 goes left of 3, and the split between 2 and 3 gives the room.
+    let layout = Layout {
+        root: Some(hsplit(SplitSize::Ratio(0.5), tabs(&[1], 0), hsplit(SplitSize::FixedSecond(60.0), tabs(&[2], 0), tabs(&[3], 0)))),
+        floating: vec![Floating::single(vec![4], 0, [0.0, 0.0, 100.0, 100.0])],
+    };
+    let sized = |zone| Placement::SplitSized { zone, size: SplitSize::FixedFirst(100.0), outer: SplitSize::FixedSecond(164.0) };
+    let mut moved = layout.clone();
+    moved.apply(Action::Move { panel: 4, anchor: 3, placement: sized(Zone::Left) }).unwrap();
+    let inner = hsplit(SplitSize::FixedSecond(164.0), tabs(&[2], 0), hsplit(SplitSize::FixedFirst(100.0), tabs(&[4], 0), tabs(&[3], 0)));
+    assert_eq!(moved.root, Some(hsplit(SplitSize::Ratio(0.5), tabs(&[1], 0), inner)));
+    // 1 has no divider on its left, and a center is no side.
+    for (anchor, zone) in [(1, Zone::Left), (3, Zone::Center)] {
+        let mut moved = layout.clone();
+        assert_eq!(moved.apply(Action::Move { panel: 4, anchor, placement: sized(zone) }), Err(DockError::InvalidPlacement), "{anchor} {zone:?}");
+        assert_eq!(moved, layout);
+    }
 }

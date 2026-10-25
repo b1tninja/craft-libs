@@ -340,7 +340,24 @@ impl<P: Clone + Eq + Hash> DockCommand<P> {
     /// [`super::float_space`] of the area that draws `workspace`. Given `x`, `y`, `width` and
     /// `height` replace the matching values, and a group or column that is already a whole
     /// floating window keeps its rect.
+    ///
+    /// An outer edge dock wraps the part between the docks. [`Self::to_actions_with`] also
+    /// knows which panels are protected, so it wraps the canvas column where a drag would.
     pub fn to_actions(&self, workspace: &Workspace<P>, right_to_left: bool, space: &FloatSpace<P>) -> Result<Vec<Action<P>>, DockError> {
+        self.to_actions_with(workspace, right_to_left, space, |_| Permissions::default())
+    }
+
+    /// [`Self::to_actions`] with the `permissions` the actions are applied with. An outer edge
+    /// dock wraps what a drag to that edge would: the canvas column where the area narrows its
+    /// edge band to it, else the part between the docks. `space` says whether the area draws
+    /// with [`super::DockStyle::side_edge_zones`], which never narrows.
+    pub fn to_actions_with(
+        &self,
+        workspace: &Workspace<P>,
+        right_to_left: bool,
+        space: &FloatSpace<P>,
+        permissions: impl Fn(&P) -> Permissions,
+    ) -> Result<Vec<Action<P>>, DockError> {
         let layout = &workspace.layout;
         let zoned = Zoned { layout, right_to_left };
         let shown = |panel: &P| if layout.contains(panel) { Ok(()) } else { Err(DockError::MissingPanel) };
@@ -418,12 +435,13 @@ impl<P: Clone + Eq + Hash> DockCommand<P> {
                     if before.is_some() {
                         return Err(DockError::InvalidPlacement);
                     }
-                    let anchor = layout
-                        .panels()
-                        .into_iter()
-                        .find(|p| !members.contains(p) && matches!(layout.place(p), Some(Place::Dock { .. } | Place::Node(_))))
-                        .cloned()
-                        .ok_or(DockError::MissingTarget)?;
+                    // The model narrows the edge on a protected anchor, as `Workspace::apply` checks it.
+                    let protected = |p: &P| {
+                        let policy = if workspace.locked { permissions(p).locked() } else { permissions(p) };
+                        policy.is_protected()
+                    };
+                    let narrowed = !space.side_edge_zones && layout.edge_narrows(zone, &protected);
+                    let anchor = layout.edge_anchor(narrowed, &protected, &|p| members.contains(p)).ok_or(DockError::MissingTarget)?;
                     return one(unit.to(layout, panel, Target::At { anchor, placement: Placement::Edge(zone) })?);
                 }
                 if !matches!(layout.place(panel), Some(Place::Floating { .. })) {
@@ -504,7 +522,7 @@ impl<P: Clone + Eq + Hash> DockCommand<P> {
     /// location, and a panel never laid out opens as [`Action::Open`] without an anchor does
     /// ([`Workspace::set_visible`]); Lock sets [`Workspace::locked`]. Application-owned commands
     /// ([`Self::is_app_owned`]) return [`DockError::NotAllowed`] and change nothing.
-    /// `space` is where `window.panel.float` floats, as for [`Self::to_actions`].
+    /// `space` is where `window.panel.float` floats, as for [`Self::to_actions_with`].
     pub fn apply(
         &self,
         workspace: &mut Workspace<P>,
@@ -526,7 +544,7 @@ impl<P: Clone + Eq + Hash> DockCommand<P> {
             // Shown, then moved to the edge, all or nothing.
             let mut shown = workspace.clone();
             shown.set_visible(panel.clone(), true, None, &permissions)?;
-            let closed = shown.apply_all(self.to_actions(&shown, right_to_left, space)?, permissions)?;
+            let closed = shown.apply_all(self.to_actions_with(&shown, right_to_left, space, &permissions)?, &permissions)?;
             *workspace = shown;
             return Ok(closed);
         }
@@ -534,7 +552,7 @@ impl<P: Clone + Eq + Hash> DockCommand<P> {
             workspace.locked = locked.unwrap_or(!workspace.locked);
             return Ok(Vec::new());
         }
-        let actions = self.to_actions(workspace, right_to_left, space)?;
+        let actions = self.to_actions_with(workspace, right_to_left, space, &permissions)?;
         workspace.apply_all(actions, permissions)
     }
 }

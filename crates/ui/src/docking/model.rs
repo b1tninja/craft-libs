@@ -1,7 +1,8 @@
 use std::{collections::HashSet, fmt, hash::Hash};
 
 use super::dock_model::{
-    Column, ColumnLocation, Group, GroupLocation, Moving, PanelState, Place, Side, Target, Unit, node_at, split_frame, tree_panels, valid_column,
+    Column, ColumnLocation, Group, GroupLocation, Moving, PanelState, Place, Side, Target, Unit, node_at, split_frame, split_frame_sized,
+    tree_panels, valid_column,
 };
 use crate::layout::{SplitAxis, SplitSize};
 
@@ -61,15 +62,16 @@ pub struct StackEntry<P> {
 /// Serde reads the v1 shape `{panels, active, rect}` as one group, and a stack of groups
 /// `{groups, rect}` as a vertical split of them, sized by their heights. A window with one
 /// group (not minimized, no native rect) writes the v1 shape, so older builds can read files
-/// that use no newer feature. A native window also writes its `id`; any other window gets a
-/// fresh one on load.
+/// that use no newer feature. Every window writes its `id`; a window read without one gets a
+/// fresh one.
 ///
 /// Equality ignores `id`: two windows with the same contents and place are the same layout.
 #[derive(Clone, Debug)]
 pub struct Floating<P> {
     /// Names the window across panel moves, and its OS window with feature `native-windows`.
-    /// Unique within a layout: [`Self::new`] and loading draw fresh ids, [`Self::with_id`]
-    /// sets one, and merging windows keeps the receiving window's.
+    /// Unique within a layout: [`Self::new`] draws a fresh id, [`Self::with_id`] sets one,
+    /// loading keeps the saved id (or draws one when it is missing or taken), and merging
+    /// windows keeps the receiving window's.
     pub id: u64,
     /// `Split`, `Tabs` and `Stack` nodes; a `Dock` is invalid here.
     pub root: Node<P>,
@@ -181,6 +183,7 @@ mod floating_serde {
 
     #[derive(Serialize)]
     struct V1<'a, P> {
+        id: u64,
         panels: &'a [P],
         active: usize,
         rect: [f32; 4],
@@ -188,8 +191,7 @@ mod floating_serde {
 
     #[derive(Serialize)]
     struct Tree<'a, P> {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        id: Option<u64>,
+        id: u64,
         root: &'a Node<P>,
         rect: [f32; 4],
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,10 +208,10 @@ mod floating_serde {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             match &self.root {
                 Node::Tabs { panels, active } if !self.minimized && self.native.is_none() => {
-                    V1 { panels, active: *active, rect: self.rect }.serialize(serializer)
+                    V1 { id: self.id, panels, active: *active, rect: self.rect }.serialize(serializer)
                 }
                 root => Tree {
-                    id: self.native.map(|_| self.id),
+                    id: self.id,
                     root,
                     rect: self.rect,
                     native: self.native,
@@ -305,6 +307,13 @@ pub enum Placement<P> {
     /// Center inserts after the anchor; sides split the anchor's frame into two halves, and
     /// every other frame keeps its size. Sides apply to `Tabs` and `Stack` nodes only.
     Split(Zone),
+    /// A side [`Placement::Split`] that gives the new frame its own room instead of half the
+    /// anchor's frame: the new split takes `size`, and `outer` replaces the size of the nearest
+    /// enclosing split whose divider runs along the anchor frame's `zone` side, so the frames
+    /// beyond that divider give the room. The renderer offers it beside a frame too small to
+    /// halve. `Center`, and an anchor without such a divider or with a dock beyond it, are
+    /// invalid.
+    SplitSized { zone: Zone, size: SplitSize, outer: SplitSize },
     /// A new group above or below the anchor's group in a dock column. On an anchor in a
     /// floating window, a split of the anchor's group above or below.
     /// `height` is the inserted group's preferred height ([`super::Group::height`]); `None`
@@ -318,7 +327,11 @@ pub enum Placement<P> {
     Column { after: bool },
     /// A new frame along one edge of the docked layout, a quarter of its width or height: the
     /// root is split, or in a layout with docks, the part between them. The anchor names any
-    /// docked panel. `Center` is invalid.
+    /// docked panel. A protected anchor ([`Permissions::is_protected`], applied through
+    /// [`Layout::apply_with_permissions`]) narrows the part to the canvas column: where neither
+    /// side of a side-by-side split is a dock and only one holds a protected panel, that side;
+    /// for `Top` (`Bottom`), also the first (last) row of a split of rows when only that row
+    /// holds one. `Center` is invalid.
     Edge(Zone),
 }
 
@@ -819,14 +832,14 @@ impl<P: Clone + Eq + Hash> Layout<P> {
         let window_open = location.anchor.as_ref().is_some_and(|anchor| proposed.floating.iter().any(|w| w.contains(anchor)));
         if let Some(rect) = location.floating.filter(|_| !window_open) {
             // A window that closed as a whole reopens at its last rect.
-            proposed.insert_moving(moving(), Target::Float { rect: Some(rect) })?;
+            proposed.insert_moving(moving(), Target::Float { rect: Some(rect) }, &|_| false)?;
         } else if let Some(anchor) = &location.anchor
             && matches!(location.placement, Placement::Group { .. } | Placement::Column { .. })
         {
             if !proposed.contains(anchor) {
                 return Err(DockError::MissingTarget);
             }
-            proposed.insert_moving(moving(), Target::At { anchor: anchor.clone(), placement: location.placement.clone() })?;
+            proposed.insert_moving(moving(), Target::At { anchor: anchor.clone(), placement: location.placement.clone() }, &|_| false)?;
         } else if let Some(column) = state.and_then(|s| s.column).filter(|_| location.anchor.is_none()) {
             // Alone in its dock: back at that edge, as the outermost column if a dock exists.
             match proposed.dock_path(column.side) {
@@ -835,7 +848,7 @@ impl<P: Clone + Eq + Hash> Layout<P> {
                     let Moving { groups, .. } = moving();
                     columns.insert(0, Column { groups, width: column.width, iconic: column.iconic, iconic_width: column.iconic_width });
                 }
-                None => proposed.insert_moving(moving(), Target::NewDock { side: column.side })?,
+                None => proposed.insert_moving(moving(), Target::NewDock { side: column.side }, &|_| false)?,
             }
         } else if let Some(anchor) = &location.anchor {
             if !proposed.contains(anchor) {
@@ -862,7 +875,7 @@ impl<P: Clone + Eq + Hash> Layout<P> {
                     Placement::Tab { before: Some(before) } if !proposed.same_group(before, anchor) => Placement::Tab { before: None },
                     placement => placement.clone(),
                 };
-                proposed.apply_inner(Action::OpenAt { panel: panel.clone(), anchor: anchor.clone(), placement })?;
+                proposed.apply_inner(Action::OpenAt { panel: panel.clone(), anchor: anchor.clone(), placement }, &|_| false)?;
                 if let Some(size) = location.size {
                     proposed.trees_mut().any(|root| restore_parent_size(root, &panel, size));
                 }
@@ -899,7 +912,7 @@ impl<P: Clone + Eq + Hash> Layout<P> {
                 .find(|p| matches!(self.place(p), Some(Place::Dock { .. } | Place::Node(_))))
                 .cloned()
                 .ok_or(DockError::MissingTarget)?;
-            proposed.apply_inner(Action::OpenAt { panel: panel.clone(), anchor, placement: Placement::Edge(Zone::Right) })?;
+            proposed.apply_inner(Action::OpenAt { panel: panel.clone(), anchor, placement: Placement::Edge(Zone::Right) }, &|_| false)?;
             if let Some(root) = proposed.root.as_mut() {
                 restore_parent_size(root, &panel, SplitSize::Ratio(0.25));
             }
@@ -987,7 +1000,7 @@ impl<P: Clone + Eq + Hash> Layout<P> {
         }
         let closed = self.closed_by(&action)?;
         let mut proposed = self.clone();
-        proposed.apply_inner(action)?;
+        proposed.apply_inner(action, &|p| permissions(p).is_protected())?;
         proposed.validate()?;
         *self = proposed;
         Ok(closed)
@@ -1017,7 +1030,8 @@ impl<P: Clone + Eq + Hash> Layout<P> {
         })
     }
 
-    fn apply_inner(&mut self, action: Action<P>) -> Result<(), DockError> {
+    /// `canvas` is the protected-panel test an outer edge drop narrows by.
+    fn apply_inner(&mut self, action: Action<P>, canvas: &dyn Fn(&P) -> bool) -> Result<(), DockError> {
         match action {
             Action::Move { panel, anchor, placement } => {
                 if panel == anchor {
@@ -1036,7 +1050,7 @@ impl<P: Clone + Eq + Hash> Layout<P> {
                     }
                 }
                 let entry = self.take(&panel).ok_or(DockError::MissingPanel)?;
-                self.insert(entry, &anchor, placement)
+                self.insert(entry, &anchor, placement, canvas)
             }
             Action::Float { panel, rect } => {
                 if !valid_rect(rect) {
@@ -1070,11 +1084,11 @@ impl<P: Clone + Eq + Hash> Layout<P> {
             }
             Action::Open { panel, anchor } => {
                 if self.contains(&panel) {
-                    return self.apply_inner(Action::Activate { panel });
+                    return self.apply_inner(Action::Activate { panel }, canvas);
                 }
                 let entry = StackEntry { panel, open: true, height: None };
                 if let Some(anchor) = anchor {
-                    self.insert(entry, &anchor, Placement::Tab { before: None })
+                    self.insert(entry, &anchor, Placement::Tab { before: None }, canvas)
                 } else if self.root.is_none() {
                     self.root = Some(Node::Tabs { panels: vec![entry.panel], active: 0 });
                     Ok(())
@@ -1084,14 +1098,14 @@ impl<P: Clone + Eq + Hash> Layout<P> {
             }
             Action::OpenAt { panel, anchor, placement } => {
                 if self.contains(&panel) {
-                    return self.apply_inner(Action::Move { panel, anchor, placement });
+                    return self.apply_inner(Action::Move { panel, anchor, placement }, canvas);
                 }
                 if let Placement::Tab { before: Some(before) } = &placement
                     && !self.same_group(before, &anchor)
                 {
                     return Err(DockError::MissingTarget);
                 }
-                self.insert(StackEntry { panel, open: true, height: None }, &anchor, placement)
+                self.insert(StackEntry { panel, open: true, height: None }, &anchor, placement, canvas)
             }
             Action::MoveFloating { panel, rect } => {
                 if !valid_rect(rect) {
@@ -1142,13 +1156,13 @@ impl<P: Clone + Eq + Hash> Layout<P> {
                     return Ok(());
                 }
                 let moving = self.take_unit(panel, unit)?;
-                self.insert_moving(moving, to.clone())
+                self.insert_moving(moving, to.clone(), canvas)
             }
             Action::MovePanel { panel, to } => match to {
-                Target::At { anchor, placement } => self.apply_inner(Action::Move { panel, anchor, placement }),
+                Target::At { anchor, placement } => self.apply_inner(Action::Move { panel, anchor, placement }, canvas),
                 to => {
                     let entry = self.take(&panel).ok_or(DockError::MissingPanel)?;
-                    self.insert_moving(Moving::group(Group::new(vec![entry.panel], 0)), to)
+                    self.insert_moving(Moving::group(Group::new(vec![entry.panel], 0)), to, canvas)
                 }
             },
             Action::CloseGroup { ref panel } | Action::CloseWindow { ref panel } => self.take_unit(panel, unit_of(&action)).map(|_| ()),
@@ -1285,16 +1299,18 @@ impl<P: Clone + Eq + Hash> Layout<P> {
         if let Some((panel, _)) = groups.clone().find(|(_, place)| side(place) == Some(Side::End)).or_else(|| groups.clone().next()) {
             return Some(((*panel).clone(), Placement::Tab { before: None }));
         }
-        docked.first().map(|(panel, _)| ((*panel).clone(), Placement::Edge(Zone::Right)))
+        // A canvas anchor would narrow the edge to the canvas column.
+        let edge = docked.iter().find(|(p, _)| !permissions(p).is_protected()).or(docked.first());
+        edge.map(|(panel, _)| ((*panel).clone(), Placement::Edge(Zone::Right)))
     }
 
-    fn insert(&mut self, entry: StackEntry<P>, anchor: &P, placement: Placement<P>) -> Result<(), DockError> {
+    fn insert(&mut self, entry: StackEntry<P>, anchor: &P, placement: Placement<P>, canvas: &dyn Fn(&P) -> bool) -> Result<(), DockError> {
         let place = self.place(anchor).ok_or(DockError::MissingTarget)?;
         let tree = place.tree_path().map(|(window, path)| (window, path.to_vec()));
         let Some((window, path)) = tree.filter(|_| !matches!(placement, Placement::Group { .. } | Placement::Column { .. } | Placement::Edge(_)))
         else {
             let group = Group::new(vec![entry.panel], 0);
-            return self.insert_moving(Moving::group(group), Target::At { anchor: anchor.clone(), placement });
+            return self.insert_moving(Moving::group(group), Target::At { anchor: anchor.clone(), placement }, canvas);
         };
         let root = self.tree_mut(window).ok_or(DockError::MissingTarget)?;
         if let Placement::Split(zone) = placement
@@ -1302,6 +1318,10 @@ impl<P: Clone + Eq + Hash> Layout<P> {
         {
             let new = Node::Tabs { panels: vec![entry.panel], active: 0 };
             return if split_frame(root, &path, new, zone) { Ok(()) } else { Err(DockError::MissingTarget) };
+        }
+        if let Placement::SplitSized { zone, size, outer } = placement {
+            let new = Node::Tabs { panels: vec![entry.panel], active: 0 };
+            return if split_frame_sized(root, &path, new, zone, size, outer) { Ok(()) } else { Err(DockError::InvalidPlacement) };
         }
         if insert_node(root, &entry, anchor, &placement) { Ok(()) } else { Err(DockError::MissingTarget) }
     }
@@ -1312,7 +1332,7 @@ impl<P: Clone + Eq + Hash> Layout<P> {
 fn placement_allowed<P>(placement: &Placement<P>, anchor: Permissions) -> bool {
     match placement {
         Placement::Tab { .. } | Placement::Split(Zone::Center) => anchor.accepts_tabs,
-        Placement::Split(_) => anchor.accepts_splits,
+        Placement::Split(_) | Placement::SplitSized { .. } => anchor.accepts_splits,
         _ => true,
     }
 }

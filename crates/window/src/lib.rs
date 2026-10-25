@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 
 //! Decide who draws the window frame, so every Craft app shows the same titlebar and borders on a
-//! given desktop.
+//! given desktop, and make an app-drawn strip act as the title bar.
 //!
 //! egui apps either let the desktop draw the window frame (the title bar, borders and window
 //! buttons) or turn it off and draw their own. Across the suite this decision had drifted: some
@@ -45,6 +45,28 @@
 //!
 //! The probe opens a short-lived Wayland connection and reads the global registry once; it never
 //! touches the connection winit inherits. Call it once at startup.
+//!
+//! # The app's own title bar
+//!
+//! An app that draws over the title bar (a hidden macOS title bar with a full-size content view,
+//! or [`Frame::App`]) makes its top strip act as one with [`title_bar`]: the strip's empty part
+//! moves the window and follows the system's double-click setting, while the strip's controls and
+//! in-window panels lying over it keep their own clicks and drags. On macOS,
+//! `title_bar::sync_movable` sets AppKit's `movable` flag each frame so a drag that starts on
+//! one of those does not move the window.
+//!
+//! ```ignore
+//! egui::Panel::top("app_bar").show(ui, |ui| {
+//!     craft_window::title_bar::empty_area(ui, ui.max_rect());
+//!     // ... the bar's controls ...
+//! });
+//! // After the UI, once per frame (macOS); `applied` lives in the app state, starting at `None`.
+//! #[cfg(target_os = "macos")]
+//! craft_window::title_bar::sync_movable(ui.ctx(), &mut self.applied);
+//! ```
+
+#[cfg(feature = "egui")]
+pub mod title_bar;
 
 /// The environment-variable prefix an app overrides the frame with: `<PREFIX>_TITLEBAR`.
 ///

@@ -2,7 +2,8 @@ craft-window
 ============
 
 Decide who draws the window frame — the desktop or the app — so every Craft app shows the same
-titlebar and borders on a given desktop.
+titlebar and borders on a given desktop, and make the app's own top strip act as the title bar
+when it draws one.
 
 ## Why
 
@@ -54,8 +55,38 @@ if let Some(layout) = choice.frame().layout() {
 An app that offers a "System title bar" preference checks `choice.overridden()` and its own setting,
 and can override the probe by setting the frame to `Frame::Desktop`.
 
-The `egui` feature adds [`decorate`]. Without it, the crate is pure decision logic (`Choice`,
-`Frame`, `Layout`) with no egui dependency.
+The `egui` feature adds [`decorate`] and the [`title_bar`](#the-apps-own-title-bar) module.
+Without it, the crate is pure decision logic (`Choice`, `Frame`, `Layout`) with no egui dependency.
+
+## The app's own title bar
+
+An app that draws over the title bar — a hidden macOS title bar with a full-size content view, or
+`Frame::App` — makes its top strip act as one with `craft_window::title_bar` (`egui` feature):
+
+| Where the drag or double-click starts | What happens |
+| --- | --- |
+| The strip's empty part | A drag moves the window (`ViewportCommand::StartDrag`); a double-click follows the system setting (macOS `AppleActionOnDoubleClick`: zoom, minimize or nothing; zoom elsewhere) |
+| A control on the strip | The control gets it; the window stays put |
+| An in-window panel over the strip (an `Order::Middle` layer: a floating dock, an `egui::Window`) | The panel gets it; the window stays put |
+| A modal's backdrop or a tooltip (`Foreground`/`Tooltip`) | The window moves, as under AppKit's own title bar |
+| Anything, in full screen | Nothing happens to the window |
+
+```rust,ignore
+egui::Panel::top("app_bar").show(ui, |ui| {
+    // Before the bar's controls, so they sit on top and take their own clicks.
+    craft_window::title_bar::empty_area(ui, ui.max_rect());
+    // ... the bar's controls ...
+});
+// macOS, once per frame after the UI: `applied` is app state, starting at `None`.
+#[cfg(target_os = "macos")]
+craft_window::title_bar::sync_movable(ui.ctx(), &mut self.applied);
+```
+
+On macOS, AppKit moves a full-size-content window from a drag anywhere in the title-bar band, the
+app's controls and panels included, unless `NSWindow.movable` is false. `sync_movable` sets that
+flag from `title_bar::window_movable`, which is false while the pointer is on a control or a panel
+over the strip. It leaves windows with hidden window buttons alone, such as floating panels in
+their own windows.
 
 ## Notes
 

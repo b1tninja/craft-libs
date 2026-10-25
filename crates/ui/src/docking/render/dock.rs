@@ -287,7 +287,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 outer.min(outer + inward * self.style.new_dock_band)..=outer.max(outer + inward * self.style.new_dock_band),
                 rect.y_range(),
             ));
-            self.dock_targets.push(DockDrop { target: DockTarget::NewDock { side }, band, line });
+            self.dock_targets.push(DockDrop { target: DockTarget::NewDock { side }, band, line, outer: true });
             return;
         }
         if usable(rect) {
@@ -319,9 +319,11 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 group.sides[1] = Some(right.clone());
             }
             if index == 0 {
-                self.dock_targets.push(DockDrop { target: before.0, band: outer_band, line: before.1 });
+                // Inside the window, as the new-dock band's line is.
+                let line = vertical_line(x + inward * line_width * 0.5, rect.y_range(), line_width);
+                self.dock_targets.push(DockDrop { target: before.0, band: outer_band, line, outer: true });
             }
-            self.dock_targets.push(DockDrop { target: after.0, band: inner_band, line: after.1 });
+            self.dock_targets.push(DockDrop { target: after.0, band: inner_band, line: after.1, outer: false });
             drawn.push((index, column, first, width, inner));
         }
         // Registered after the columns, so the narrow hit areas win at the edges.
@@ -505,7 +507,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let push = |targets: &mut Vec<DockDrop<P>>, target: DockTarget<P>, band: Rect, line: Rect| {
             let band = band.intersect(view);
             if usable(band) {
-                targets.push(DockDrop { target, band, line });
+                targets.push(DockDrop { target, band, line, outer: false });
             }
         };
         let mut previous: Option<&P> = None;
@@ -679,7 +681,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             let band = Rect::from_x_y_ranges(x.min(x + inward)..=x.max(x + inward), ys);
             let width = self.style.drop_line_width;
             let line = vertical_line(x + inward.signum() * width * 0.5, ys, width);
-            candidates.push(DockDrop { target: DockTarget::NewDock { side }, band, line });
+            candidates.push(DockDrop { target: DockTarget::NewDock { side }, band, line, outer: true });
         }
         candidates
     }
@@ -723,25 +725,36 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             body_zone(group.body, 0.0, self.style.side_zone_fraction, group.center, pointer)?
         };
         let (target, line) = group.side(zone)?.clone();
-        Some(DockDrop { target, band: group.body, line })
+        Some(DockDrop { target, band: group.body, line, outer: false })
     }
 
-    /// The dock target a whole group or column drag would take at `pointer`, with the action
-    /// and its line. A target that leaves the layout unchanged is a no-op: `None` action.
-    pub(super) fn dock_group_proposal(&self, drag: &GroupDrag<P>, pointer: Pos2) -> Option<(Option<Action<P>>, Rect)> {
+    /// The dock target a whole group or column drag would take at `pointer`, with the action.
+    /// A target that leaves the layout unchanged is a no-op: `None` action. A target named by
+    /// one of the moving panels, such as the window edge of the moving group's own column, is
+    /// named by another panel of that column or group, as for a tab drag.
+    pub(super) fn dock_group_proposal(&self, drag: &GroupDrag<P>, pointer: Pos2) -> Option<(Option<Action<P>>, DockDrop<P>)> {
         let through = self.looks_through(drag);
         if self.dock_covered(pointer, through.then_some(&drag.panel)) {
             return None;
         }
         let drop = self.dock_drop(pointer, if through { &drag.members } else { &[] })?;
-        let action = group_action(drag, drop.target.to());
-        self.checked(action).map(|action| (action, drop.line))
+        let to = match drop.target.to() {
+            Target::At { anchor, placement } if drag.members.contains(&anchor) => {
+                let unit = if matches!(placement, Placement::Column { .. }) { Unit::Column } else { Unit::Group };
+                match self.layout.members(&anchor, unit).ok()?.into_iter().find(|p| !drag.members.contains(p)) {
+                    Some(anchor) => Target::At { anchor, placement },
+                    None => return Some((None, drop)),
+                }
+            }
+            to => to,
+        };
+        self.checked(group_action(drag, to)).map(|action| (action, drop))
     }
 
     /// The dock target a single tab drag would take: a new group, column or dock of that panel.
     /// A panel alone in its group takes the group's state to a new dock; one that shares its
     /// group leaves the other tabs behind (P6).
-    pub(super) fn dock_tab_proposal(&self, panel: &P, pointer: Pos2) -> Option<(Option<Action<P>>, Rect)> {
+    pub(super) fn dock_tab_proposal(&self, panel: &P, pointer: Pos2) -> Option<(Option<Action<P>>, DockDrop<P>)> {
         if self.dock_covered(pointer, None) {
             return None;
         }
@@ -753,7 +766,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 let unit = if matches!(placement, Placement::Column { .. }) { Unit::Column } else { Unit::Group };
                 match self.layout.members(panel, unit).ok()?.into_iter().find(|p| p != panel) {
                     Some(anchor) => Action::Move { panel: panel.clone(), anchor, placement },
-                    None => return Some((None, drop.line)),
+                    None => return Some((None, drop)),
                 }
             }
             Target::At { anchor, placement } => Action::Move { panel: panel.clone(), anchor, placement },
@@ -763,7 +776,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             to @ Target::NewDock { .. } => Action::MovePanel { panel: panel.clone(), to },
             Target::Float { .. } => return None,
         };
-        self.checked(action).map(|action| (action, drop.line))
+        self.checked(action).map(|action| (action, drop))
     }
 
     /// `Some(None)` when the action is valid but changes nothing apart from sizes
@@ -774,8 +787,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         Some((!candidate.same_arrangement(self.layout)).then_some(action))
     }
 
-    /// The line of a dock drop that shows no result rect: into an iconic column, or any dock
-    /// drop with [`DockStyle::side_edge_zones`].
+    /// The line of a drop that shows no result rect: on the window edge, into an iconic column,
+    /// or any dock drop with [`DockStyle::side_edge_zones`].
     pub(super) fn paint_drop_line(&self, ctx: &Context, line: Rect) {
         if usable(line) {
             let painter = self.preview_painter(ctx);

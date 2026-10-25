@@ -25,6 +25,9 @@ pub(super) const POINTER: &str = "drag-pointer";
 /// Key of an Escape that reached one of the application's windows other than the drag's
 /// owner. Keys go to the window with keyboard focus, which need not be the one dragging.
 const ESCAPE: &str = "drag-escape";
+/// Key of whether a native window's bar drag highlighted a drop target on the last frame, under
+/// the area's id: [`Cross::highlighted`] as [`Renderer::end_cross`] left it.
+pub(super) const HIGHLIGHTED: &str = "drag-highlighted";
 
 /// The pointer of a drag, as the window that owns the drag last saw it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,6 +102,9 @@ pub(in crate::docking) struct Cross<P> {
     pub moved: Option<Pos2>,
     /// Resolving a window move that docks whatever `title_bar_docks` says.
     pub docks: bool,
+    /// A native window's bar drag highlighted a drop target this frame, in whichever window
+    /// drew its preview.
+    pub highlighted: bool,
     /// A native window's dragged widget is one of the area's controls: egui keeps a drag per
     /// viewport.
     pub held: bool,
@@ -122,6 +128,7 @@ impl<P> Default for Cross<P> {
             bar: false,
             moved: None,
             docks: false,
+            highlighted: false,
             held: false,
             pointed: None,
             viewports: Vec::new(),
@@ -315,7 +322,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let Some(drag) = pointer.window.and_then(|w| self.window_group_drag(w)) else { return };
         if let Some(Dest::Main(local)) = self.destination(&pointer, None) {
             (self.cross.bar, self.cross.docks) = (true, pointer.docks);
-            self.paint_group_drag(ui, &drag, local, pointer.command);
+            self.cross.highlighted |= self.paint_group_drag(ui, &drag, local, pointer.command);
             (self.cross.bar, self.cross.docks) = (false, false);
         }
     }
@@ -371,7 +378,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         if let Some(window) = pointer.window {
             if let Some(drag) = self.window_group_drag(window) {
                 self.cross.docks = pointer.docks;
-                self.paint_group_drag(ui, &drag, local, pointer.command);
+                self.cross.highlighted |= self.paint_group_drag(ui, &drag, local, pointer.command);
                 self.cross.docks = false;
             }
             return;
@@ -391,9 +398,12 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
     }
 
-    /// End of the main window's frame: forget the pointer of a finished drag.
+    /// End of the main window's frame: forget the pointer of a finished drag, and keep whether
+    /// a bar drag highlighted a drop target. The dragged window sets its opacity from that on
+    /// the next frame: it draws before the main window paints its preview.
     pub(in crate::docking) fn end_cross(&mut self, ctx: &Context) {
         let id = self.id;
+        ctx.data_mut(|d| d.insert_temp(id.with(HIGHLIGHTED), self.cross.highlighted));
         let active = ctx.data(|d| {
             d.get_temp::<Drag<P>>(id.with("drag")).is_some()
                 || d.get_temp::<GroupDrag<P>>(id.with("group-drag")).is_some()

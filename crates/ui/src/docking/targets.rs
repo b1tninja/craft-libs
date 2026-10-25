@@ -4,6 +4,8 @@ use super::{Placement, Side, Target, Zone};
 
 /// One visible group, supplied in back-to-front order to [`resolve_drop`]. An empty tab strip
 /// or a group that rejects tabs may still accept side splits, e.g. a protected document canvas.
+/// The dock area's docking profile ([`crate::docking::DockStyle::new_dock_zones`]) gives the
+/// body of a frame or floating group that rejects tabs no target at all.
 #[derive(Clone, Debug)]
 pub struct DropTarget<P> {
     pub anchor: P,
@@ -75,9 +77,10 @@ pub fn drop_zone(rect: Rect, tab_height: f32, depth: f32, pointer: Pos2) -> Opti
 /// In the body below it, the outer `fraction` of its width from the left or right edge, or of
 /// its height from the top or bottom edge, is that side's zone; where two sides' zones meet, the
 /// side the pointer is relatively nearer wins. The rest is the center. Without `center` (a group
-/// that takes no tabs) the whole body goes to the relatively nearest side. A `fraction` of zero
-/// or less leaves only the center; more than one half acts as one half. Outside, non-finite,
-/// empty and inverted rectangles have no target.
+/// that takes no tabs) the whole body goes to the relatively nearest side, as the dock area has
+/// it without [`crate::docking::DockStyle::new_dock_zones`]; with it, such a body is no target.
+/// A `fraction` of zero or less leaves only the center; more than one half acts as one half.
+/// Outside, non-finite, empty and inverted rectangles have no target.
 pub fn body_zone(rect: Rect, tab_height: f32, fraction: f32, center: bool, pointer: Pos2) -> Option<Zone> {
     body_zone_on(rect, tab_height, fraction, center, Sides::ALL, pointer)
 }
@@ -271,7 +274,7 @@ pub fn resolve_drop_by<P: Clone + Eq>(panel: &P, pointer: Pos2, targets: &[DropT
 }
 
 /// [`resolve_drop_by`] where a group that takes no tabs splits only on `sides` with
-/// [`ZoneRule::Fraction`].
+/// [`ZoneRule::Fraction`], and with none is no target.
 pub(super) fn resolve_drop_on<P: Clone + Eq>(
     panel: &P,
     pointer: Pos2,
@@ -354,12 +357,15 @@ pub(super) fn resolve_drop_on<P: Clone + Eq>(
 }
 
 /// [D] A dock drop target, built once per frame next to the [`DropTarget`]s. The pointer selects
-/// it inside `band`; the preview is the line `line`.
+/// it inside `band`; `line` is the edge it docks to.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct DockDrop<P> {
     pub(super) target: DockTarget<P>,
     pub(super) band: Rect,
     pub(super) line: Rect,
+    /// A band along the window edge: a new dock, or a new column outside the outermost one.
+    /// Its preview is `line`, not the rect the drop takes.
+    pub(super) outer: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

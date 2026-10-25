@@ -39,13 +39,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     pub(super) fn window_limits(&self, window: &Floating<P>) -> PanelLimits {
         let chrome = self.window_chrome(window);
         let tree = node_limits(&window.root, self.style, &*self.content);
-        let body = match (&window.root, window.minimized) {
-            (Node::Tabs { .. }, true) => (self.style.tab_height, self.style.tab_height),
-            (_, true) => (0.0, 0.0),
-            (_, false) => (tree.min.y, tree.max.y),
+        let body = match window.minimized {
+            true => (self.minimized_body(window), self.minimized_body(window)),
+            false => (tree.min.y, tree.max.y),
         };
         let min = vec2(tree.min.x, chrome + body.0).min(vec2(1_000_000.0, 1_000_000.0));
         PanelLimits { min, max: vec2(tree.max.x, chrome + body.1).max(min).min(vec2(1_000_000.0, 1_000_000.0)) }
+    }
+
+    /// The height of a minimized window's body: the tab strip of its only group, or nothing.
+    pub(super) fn minimized_body(&self, window: &Floating<P>) -> f32 {
+        if matches!(window.root, Node::Tabs { .. }) { self.style.tab_height } else { 0.0 }
     }
 
     /// The title bar and, for a movable (resizable) window, the resize band above it.
@@ -76,11 +80,13 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let movable = window.panels().all(|panel| self.permissions(panel).movable);
         let style = ChromeStyle::from_dock(self.style);
         let resize_label = self.style.resize_window_label.clone();
-        let response = FloatingFrame::new(id, rect).bounds(screen).limits(limits).resizable(movable).resize_label(&resize_label).show(
-            ctx,
-            &style,
-            |ui, contents| self.window_contents(ui, window, contents, rect, &style),
-        );
+        let opacity = self.drag_opacity(ctx, first);
+        let response =
+            FloatingFrame::new(id, rect).bounds(screen).limits(limits).resizable(movable).resize_label(&resize_label).opacity(opacity).show(
+                ctx,
+                &style,
+                |ui, contents| self.window_contents(ui, window, contents, rect, &style),
+            );
         for handle in &response.handles {
             self.register_interaction(ctx, handle.id);
         }
@@ -98,6 +104,18 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 .actions
                 .push(Action::MoveFloating { panel: first.clone(), rect: [resized.left(), resized.top(), resized.width(), resized.height()] });
         }
+    }
+
+    /// Opacity of the in-window floating window whose first panel is `first`: faded
+    /// ([`super::DRAG_OPACITY`]) while its title bar drag highlights a drop target, as the last
+    /// frame drew it ([`super::preview::GROUP_HIGHLIGHTED`]), else opaque. Its tabs and drag
+    /// bars only drag a ghost, so the window stays opaque for them.
+    fn drag_opacity(&self, ctx: &Context, first: &P) -> f32 {
+        let moving = ctx
+            .data(|d| d.get_temp::<GroupDrag<P>>(self.id.with("group-drag")))
+            .is_some_and(|drag| drag.gesture == GroupGesture::Window && drag.panel == *first);
+        let highlighted = ctx.data(|d| d.get_temp::<bool>(self.id.with(super::preview::GROUP_HIGHLIGHTED))).unwrap_or(false);
+        if moving && highlighted { super::DRAG_OPACITY } else { 1.0 }
     }
 
     /// The title bar, then the window's tree below it, in `contents`. Moves carry the whole

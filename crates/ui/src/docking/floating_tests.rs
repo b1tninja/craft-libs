@@ -51,6 +51,8 @@ struct Content {
     /// Canvas 0 accepts side splits, as an app that opens panels beside it does.
     beside: bool,
     drawn: Vec<u32>,
+    /// A preview the host draws for every drag, from `resolve_drag`.
+    host_preview: Option<Rect>,
 }
 
 impl DockContent<u32> for Content {
@@ -70,6 +72,9 @@ impl DockContent<u32> for Content {
     }
     fn allow_native(&self, _: &u32) -> bool {
         self.native
+    }
+    fn resolve_drag(&mut self, _: &Context, _: &DockStyle, _: &DropRequest<'_, u32>) -> Option<DropFeedback> {
+        self.host_preview.map(|rect| DropFeedback { preview: Some(rect), insertion: None })
     }
 }
 
@@ -106,6 +111,8 @@ struct Driver {
     hide: Hide,
     modifiers: Modifiers,
     time: f64,
+    /// What the last frame painted.
+    shapes: Vec<egui::epaint::ClippedShape>,
 }
 
 impl Driver {
@@ -119,6 +126,7 @@ impl Driver {
             hide: Hide::None,
             modifiers: Modifiers::NONE,
             time: 0.0,
+            shapes: Vec::new(),
         };
         driver.step(vec![]);
         driver.step(vec![]);
@@ -154,6 +162,7 @@ impl Driver {
         });
         let mut full = full;
         full.textures_delta.clear();
+        self.shapes = full.shapes;
         output
     }
 
@@ -192,6 +201,22 @@ impl Driver {
     fn click(&mut self, at: egui::Pos2) -> DockOutput<u32> {
         self.step(vec![Event::PointerMoved(at), button(at, true)]);
         self.step(vec![button(at, false)])
+    }
+
+    /// Opacity of the floating window that the last frame drew at `rect`: the alpha of its
+    /// opaque background fill.
+    fn window_opacity(&self, rect: [f32; 4]) -> Option<f32> {
+        let rect = Rect::from_min_size(pos2(rect[0], rect[1]), vec2(rect[2], rect[3]));
+        fn find(shape: &egui::Shape, rect: Rect) -> Option<f32> {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(|s| find(s, rect)),
+                egui::Shape::Rect(r) if r.rect.min.distance(rect.min) < 0.5 && r.rect.max.distance(rect.max) < 0.5 && r.fill.a() > 0 => {
+                    Some(f32::from(r.fill.a()) / 255.0)
+                }
+                _ => None,
+            }
+        }
+        self.shapes.iter().find_map(|s| find(&s.shape, rect))
     }
 
     fn wait(&mut self) {
@@ -727,4 +752,60 @@ fn undock_panel_group_floats_one_group_of_a_floating_window() {
     h.run_steps(2);
     menu(&mut h, 5);
     assert_eq!(h.query_all_by_label("Undock Panel Group").count(), 0);
+}
+
+#[test]
+fn a_title_bar_drag_fades_over_a_preview_the_host_draws() {
+    let mut d = Driver::new(workspace(), false);
+    d.content.host_preview = Some(Rect::from_min_size(pos2(20.0, 20.0), vec2(100.0, 100.0)));
+    let title = d.title(8).center();
+    d.step(vec![Event::PointerMoved(title), button(title, true)]);
+    d.step(vec![Event::PointerMoved(title + vec2(8.0, 6.0))]);
+    d.step(vec![Event::PointerMoved(pos2(650.0, 150.0))]);
+    let rect = window_of(&d.layout, 8).unwrap().rect;
+    d.step(vec![]);
+    let shown = d.window_opacity(rect).unwrap();
+    assert!((shown - 0.75).abs() < 0.01, "{shown}");
+}
+
+#[test]
+fn an_in_window_floating_window_fades_only_while_its_title_bar_drag_highlights_a_drop_target() {
+    let mut d = Driver::new(workspace(), false);
+    let strip = d.tab(4).unwrap().center();
+    let empty = pos2(650.0, 150.0);
+    // Opacity of window W2 (dragged) and W1 once the pointer rests at `at`: the window draws
+    // before the preview, so it fades a frame after the target lights up.
+    let over = |d: &mut Driver, at: egui::Pos2| {
+        d.step(vec![Event::PointerMoved(at)]);
+        let (dragged, other) = (window_of(&d.layout, 8).unwrap().rect, window_of(&d.layout, 5).unwrap().rect);
+        d.step(vec![]);
+        (d.window_opacity(dragged).unwrap(), d.window_opacity(other).unwrap())
+    };
+    let shown = |d: &Driver| d.window_opacity(window_of(&d.layout, 8).unwrap().rect).unwrap();
+    let grab = |d: &mut Driver| {
+        let title = d.title(8).center();
+        d.step(vec![Event::PointerMoved(title), button(title, true)]);
+        d.step(vec![Event::PointerMoved(title + vec2(8.0, 6.0))]);
+    };
+    assert_eq!(shown(&d), 1.0);
+    grab(&mut d);
+    assert_eq!(over(&mut d, empty), (1.0, 1.0), "over empty space");
+    let (dragged, other) = over(&mut d, strip);
+    assert!((dragged - 0.75).abs() < 0.01 && other == 1.0, "over a drop target: {dragged}, {other}");
+    assert_eq!(over(&mut d, empty).0, 1.0, "after leaving the target");
+    assert!((over(&mut d, strip).0 - 0.75).abs() < 0.01);
+    // Released off the target the window stays floating, opaque.
+    d.step(vec![Event::PointerMoved(empty), button(empty, false)]);
+    d.step(vec![]);
+    assert_eq!(shown(&d), 1.0, "after the release");
+    assert!(window_of(&d.layout, 8).is_some());
+
+    // Escape over a target puts the window back, opaque.
+    grab(&mut d);
+    assert!((over(&mut d, strip).0 - 0.75).abs() < 0.01);
+    d.step(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+    d.step(vec![]);
+    assert_eq!(shown(&d), 1.0, "after Escape");
+    d.step(vec![button(strip, false)]);
+    assert!(window_of(&d.layout, 8).is_some());
 }

@@ -183,7 +183,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 if usable(band) {
                     let width = self.style.drop_line_width;
                     let line = horizontal_line(line.clamp(view.top() + width * 0.5, view.bottom() - width * 0.5), xs, width);
-                    self.dock_targets.push(DockDrop { target: DockTarget::GroupBand { anchor: anchor.clone(), below }, band, line });
+                    self.dock_targets.push(DockDrop { target: DockTarget::GroupBand { anchor: anchor.clone(), below }, band, line, outer: false });
                 }
             }
         }

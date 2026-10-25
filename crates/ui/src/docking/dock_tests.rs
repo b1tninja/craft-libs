@@ -235,6 +235,10 @@ fn hline(y: f32, x: std::ops::RangeInclusive<f32>) -> Rect {
     Rect::from_x_y_ranges(x, (y - 2.0)..=(y + 2.0))
 }
 
+fn vline(x: f32, y: std::ops::RangeInclusive<f32>) -> Rect {
+    Rect::from_x_y_ranges((x - 2.0)..=(x + 2.0), y)
+}
+
 /// A floating group's drag bar.
 fn bar(d: &Driver, panel: u32) -> Pos2 {
     d.rect("drag-bar", panel).center()
@@ -453,12 +457,14 @@ fn group_dropped_on_the_window_edge_without_a_dock_makes_a_new_dock() {
         let layout = with_floating(docked(side, &[&[&[2]]]), &[(5, [300.0, 300.0, 150.0, 150.0])]);
         let mut d = Driver::new(layout);
         d.hold(bar(&d, 5), at);
+        let x = if new == Side::End { 598.0 } else { 2.0 };
+        assert!(d.painted(vline(x, 0.0..=600.0)), "{new:?}: a vertical line at the window edge");
         let held = d.shapes.clone();
         let out = d.step(vec![button(at, false)]);
         d.settle();
         let rect = d.column_of(5);
         let shapes = std::mem::replace(&mut d.shapes, held);
-        assert!(d.previewed(rect), "{new:?}: the new dock's column at the window edge, {rect:?}");
+        assert!(!d.previewed(rect), "{new:?}: no rect of the new dock's column");
         d.shapes = shapes;
         assert_eq!(moved(&out.actions), Some((5, &Target::NewDock { side: new })));
         assert_eq!(columns(&d.layout, new), vec![vec![vec![5]]]);
@@ -933,4 +939,95 @@ fn defaults_give_way_to_the_filler_but_user_heights_stay() {
     // In a drawn column too: Layers gets less than it asks for rather than the user's heights.
     let d = sized_column(900.0, [Some(200.0), Some(340.0), None]);
     assert_eq!(drawn_heights(&d), [200.0, 340.0, 900.0 - 14.0 - 540.0]);
+}
+
+/// Dock columns left and right of protected canvas 0, as in a creative app: group [1, 7] above
+/// [2] at the left, [3] above [4] at the right, each column 200 wide, and a floating window
+/// holding group [5, 6].
+fn creative() -> testing::DockDriver<u32, TestContent> {
+    let dock = |side, groups: &[&[u32]]| Node::Dock { side, columns: vec![Column::new(groups.iter().map(|g| group(g)).collect(), 200.0)] };
+    let canvas = Node::Tabs { panels: vec![0], active: 0 };
+    let inner = Node::Split {
+        axis: SplitAxis::Horizontal,
+        size: SplitSize::FixedSecond(200.0),
+        first: Box::new(canvas),
+        second: Box::new(dock(Side::End, &[&[3], &[4]])),
+    };
+    let root = Node::Split {
+        axis: SplitAxis::Horizontal,
+        size: SplitSize::FixedFirst(200.0),
+        first: Box::new(dock(Side::Start, &[&[1, 7], &[2]])),
+        second: Box::new(inner),
+    };
+    let layout = Layout { root: Some(root), floating: vec![Floating::single(vec![5, 6], 0, [300.0, 200.0, 200.0, 160.0])] };
+    testing::DockDriver::new(layout, TestContent::default()).with_style(|s| {
+        s.side_edge_zones = false;
+        s.new_dock_zones = true;
+        s.float_on_empty_drop = true;
+        s.title_bar_docks = true;
+    })
+}
+
+/// The rect of the result preview the last frame painted: a 2 pt accent outline with a light
+/// fill.
+fn result_preview<C: DockContent<u32>>(d: &testing::DockDriver<u32, C>) -> Option<Rect> {
+    let fill = DockStyle::default().accent.gamma_multiply(0.08);
+    d.shapes()
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Rect(shape) if shape.fill == fill && shape.stroke.width == 0.0 => Some(shape.rect),
+            _ => None,
+        })
+        .filter(|rect| d.outlined(*rect))
+}
+
+#[test]
+fn a_group_dropped_on_the_window_edge_makes_a_column_there_and_previews_the_edge_line() {
+    // Group [1, 7] heads the left column, so the column's window edge is named by panel 1: the
+    // drop names the column by panel 2 instead and moves the whole group out.
+    let mut d = creative();
+    let at = pos2(3.0, 300.0);
+    d.hold(d.hit(&Hit::DragBar(1)).unwrap().center(), at);
+    assert!(d.filled(Rect::from_x_y_ranges(0.0..=4.0, 0.0..=600.0)), "the line along the window edge");
+    assert_eq!(result_preview(&d), None);
+    let out = d.release(at);
+    assert_eq!(out.actions, vec![Action::MoveGroup { panel: 1, to: Target::At { anchor: 2, placement: Placement::Column { after: false } } }]);
+    assert_eq!(columns(&d.layout, Side::Start), vec![vec![vec![1, 7]], vec![vec![2]]]);
+
+    // A floating window's group at the right window edge.
+    let mut d = creative();
+    let at = pos2(797.0, 300.0);
+    d.hold(d.hit(&Hit::DragBar(5)).unwrap().center(), at);
+    assert!(d.filled(Rect::from_x_y_ranges(796.0..=800.0, 0.0..=600.0)), "the line along the window edge");
+    assert_eq!(result_preview(&d), None);
+    let out = d.release(at);
+    assert_eq!(out.actions, vec![Action::MoveGroup { panel: 5, to: Target::At { anchor: 3, placement: Placement::Column { after: false } } }]);
+    assert_eq!(columns(&d.layout, Side::End), vec![vec![vec![5, 6]], vec![vec![3], vec![4]]]);
+
+    // The bottom edge band between the docks: the line along the canvas's bottom.
+    let mut d = creative();
+    let at = pos2(400.0, 597.0);
+    d.hold(d.hit(&Hit::DragBar(5)).unwrap().center(), at);
+    assert!(d.filled(Rect::from_x_y_ranges(204.0..=596.0, 596.0..=600.0)), "the line along the canvas's bottom edge");
+    assert_eq!(result_preview(&d), None);
+    let out = d.release(at);
+    assert!(
+        matches!(&out.actions[..], [Action::MoveGroup { panel: 5, to: Target::At { placement: Placement::Edge(Zone::Bottom), .. } }]),
+        "{:?}",
+        out.actions
+    );
+}
+
+#[test]
+fn a_tab_dropped_beside_a_dock_group_previews_the_rect_it_takes() {
+    // The bottom third of group [2], the left column's last group: a new group below it.
+    let mut d = creative();
+    let at = pos2(100.0, 560.0);
+    d.hold(d.hit(&Hit::Tab(6)).unwrap().center(), at);
+    let preview = result_preview(&d);
+    let out = d.release(at);
+    assert_eq!(out.actions, vec![Action::Move { panel: 6, anchor: 2, placement: Placement::Group { below: true, height: None } }]);
+    d.settle();
+    let rect = Rect::from_x_y_ranges(0.0..=200.0, d.hit(&Hit::Tab(6)).unwrap().top()..=600.0);
+    assert_eq!(preview, Some(rect.shrink(1.0)), "group 6's rect below group 2");
 }

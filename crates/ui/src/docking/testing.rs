@@ -140,6 +140,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static, C: DockContent<P>> Do
         let monitors = self.monitors.clone();
         #[cfg(feature = "native-windows")]
         let input_hook = self.input_hook.clone();
+        #[cfg(feature = "native-windows")]
+        let cursor = self.host.as_ref().and_then(|host| host.borrow().cursor);
         let (style_fn, maximized, raise, auto, bounds, locked, native, blocked) = (
             &self.style,
             self.maximized.clone(),
@@ -168,6 +170,10 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static, C: DockContent<P>> Do
                 }
                 if let Some(bounds) = bounds {
                     dock = dock.float_bounds(bounds);
+                }
+                #[cfg(feature = "native-windows")]
+                {
+                    dock = dock.desktop_cursor(super::render::DesktopCursor::Fixed(cursor));
                 }
                 #[cfg(feature = "native-windows")]
                 if let Some(hook) = input_hook.clone() {
@@ -247,6 +253,26 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static, C: DockContent<P>> Do
         self.window_step(window, vec![Event::PointerMoved(from), self.button(from, true)]);
         self.window_step(window, vec![Event::PointerMoved(from + NUDGE)]);
         self.window_step(window, vec![Event::PointerMoved(to)])
+    }
+
+    /// Move the pointer to the desktop point `point` in the native window of `window`, and
+    /// step. The window gets the point in its coordinates, measured against its place
+    /// [`NativeHost::stale`] picks; with [`NativeHost::tells_cursor`] the window system also
+    /// tells the point as the cursor's.
+    #[cfg(feature = "native-windows")]
+    pub fn window_pointer(&mut self, window: u64, point: Pos2) -> DockOutput<P> {
+        let viewport = self.viewport(window);
+        {
+            let mut host = self.host();
+            let behind = host.pointer_moves.checked_rem(host.stale.len()).and_then(|i| host.stale.get(i)).copied().unwrap_or(0);
+            host.pointer_moves += 1;
+            host.cursor = host.tells_cursor.then_some(point);
+            if let Some(target) = host.windows.get_mut(&viewport) {
+                let place = target.places.iter().rev().nth(behind).or(target.places.first()).copied().unwrap_or(target.rect.min);
+                target.events.push(Event::PointerMoved(point - place.to_vec2()));
+            }
+        }
+        self.step(Vec::new())
     }
 
     /// Release at `pos` in a native window, in its coordinates.
@@ -400,11 +426,21 @@ pub struct NativeHost {
     /// `OuterPosition` lands a frame late, at the end of the frame after the command. That
     /// frame still reports the old place, and gets pointer events relative to it.
     pub lag: bool,
+    /// The window system tells where the cursor is on the desktop, as AppKit does: where
+    /// [`DockDriver::window_pointer`] last put it.
+    pub tells_cursor: bool,
+    /// [`DockDriver::window_pointer`] measures a window's pointer events against its place
+    /// this many frames back, one entry per call in turn, as AppKit does while the window
+    /// server catches up with a move it reported at once. Empty: its place now.
+    pub stale: Vec<usize>,
     pub windows: std::collections::HashMap<egui::ViewportId, HostWindow>,
     /// Every command sent to a native window or the main window, in order.
     pub commands: Vec<(egui::ViewportId, egui::ViewportCommand)>,
     /// Moves waiting to land under `lag`: window, content position, frame sent.
     late: Vec<(egui::ViewportId, Pos2, usize)>,
+    cursor: Option<Pos2>,
+    /// Calls of [`DockDriver::window_pointer`], for [`Self::stale`].
+    pointer_moves: usize,
     frames: usize,
     /// The driver's modifiers: the keyboard's, whichever window has focus.
     modifiers: Modifiers,
@@ -434,6 +470,8 @@ pub struct HostWindow {
     pub dropped_files: Vec<egui::DroppedFileHandle>,
     /// Shapes of its last frame.
     pub shapes: Vec<ClippedShape>,
+    /// Desktop positions of its content at the end of recent frames, latest last.
+    places: Vec<Pos2>,
 }
 
 #[cfg(feature = "native-windows")]
@@ -446,9 +484,13 @@ impl NativeHost {
             no_position: false,
             frame: egui::Vec2::ZERO,
             lag: false,
+            tells_cursor: false,
+            stale: Vec::new(),
             windows: Default::default(),
             commands: Vec::new(),
             late: Vec::new(),
+            cursor: None,
+            pointer_moves: 0,
             frames: 0,
             modifiers: Modifiers::NONE,
             screen: Rect::NOTHING,
@@ -492,6 +534,7 @@ impl NativeHost {
                 hovered_files: Vec::new(),
                 dropped_files: Vec::new(),
                 shapes: Vec::new(),
+                places: Vec::new(),
             });
             let mut viewports = host.infos();
             let (time, focused, modifiers) = (host.time, host.focus == Some(id), host.modifiers);
@@ -524,8 +567,10 @@ impl NativeHost {
         }
     }
 
-    /// End a frame: moves sent in an earlier one land.
+    /// End a frame: moves sent in an earlier one land, and each window keeps its place.
     fn land(&mut self) {
+        /// How many frames back [`Self::stale`] can reach.
+        const PLACES: usize = 8;
         let frames = self.frames;
         let (landed, late) = std::mem::take(&mut self.late).into_iter().partition::<Vec<_>, _>(|(.., sent)| *sent < frames);
         self.late = late;
@@ -533,6 +578,11 @@ impl NativeHost {
             if let Some(window) = self.windows.get_mut(&id) {
                 window.rect = Rect::from_min_size(pos, window.rect.size());
             }
+        }
+        for window in self.windows.values_mut() {
+            window.places.push(window.rect.min);
+            let excess = window.places.len().saturating_sub(PLACES);
+            window.places.drain(..excess);
         }
     }
 

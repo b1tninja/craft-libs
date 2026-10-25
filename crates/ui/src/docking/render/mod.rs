@@ -21,7 +21,7 @@ pub(in crate::docking) use native::WindowDrag;
 #[cfg(all(test, feature = "native-windows"))]
 pub(in crate::docking) use {
     cross::DragPointer,
-    native::{APPKIT_CORNER, MACOS_CLOSE, Session, appkit_resize_areas, close_rects, drag_opacity, floats_shown, resize_bands, session, wayland},
+    native::{APPKIT_CORNER, INACTIVE_PALETTE, MACOS_CLOSE, Session, appkit_resize_areas, close_rects, drag_opacity, resize_bands, session, wayland},
 };
 
 #[cfg(all(test, feature = "native-windows"))]
@@ -29,13 +29,17 @@ pub(in crate::docking) use body_drag::held_events;
 #[cfg(feature = "native-windows")]
 pub(in crate::docking) use body_drag::{cancel_body_route, mark_app_drag};
 #[cfg(feature = "native-windows")]
-pub(in crate::docking) use native::{InputHook, set_input_hook};
+pub(in crate::docking) use native::{DesktopCursor, InputHook, send_keys, set_input_hook, typing_window};
 
 /// How long after blocking starts a native window that still has the keyboard hands it to the
 /// main window: an OS dialog the app opens with the modal (a file dialog) takes focus a little
 /// later, and a Focus sent before then could raise the main window over it.
 #[cfg(feature = "native-windows")]
 const BLOCKED_FOCUS_WAIT: f64 = 0.2;
+
+/// Opacity of a floating window, in-window or native, while its bar, only tab or only tab row
+/// drags it over a drop target: the highlighted target under the window shows through it.
+pub(in crate::docking) const DRAG_OPACITY: f32 = 0.75;
 
 /// While input is blocked (`starts`: from this frame), a native window of the dock area `area`
 /// with the keyboard would drop the keys the modal needs, so once, after
@@ -133,6 +137,9 @@ pub(super) struct Renderer<'a, P> {
     /// The other OS windows a drag may cross into.
     #[cfg(feature = "native-windows")]
     pub(super) cross: cross::Cross<P>,
+    /// Where a native window that follows a bar drag goes.
+    #[cfg(feature = "native-windows")]
+    pub(super) cursor: DesktopCursor,
 }
 
 pub(super) struct DrawnDivider {

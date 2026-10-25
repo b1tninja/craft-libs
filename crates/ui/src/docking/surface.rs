@@ -64,25 +64,30 @@ pub struct DockStyle {
     /// bottom edges add a full-width row, a group's zones are [`Self::side_zone_fraction`] of its
     /// body, and every preview is a line or a tab outline.
     pub side_edge_zones: bool,
-    /// Which sides of a group that takes no tabs (a canvas), and of the layout's outer edge, take
-    /// a drop (all four). Without [`Self::side_edge_zones`] the outer left and right edges are
-    /// new docks, so only top and bottom apply there. A dock-column app whose palettes dock only
-    /// at the left and right sets [`crate::docking::Sides::NONE`] with [`Self::new_dock_zones`]
-    /// on. Not used with [`Self::side_edge_zones`]. Groups that take tabs keep all four sides.
+    /// Which sides of the layout's outer edge, and of a group that takes no tabs (a canvas)
+    /// without [`Self::new_dock_zones`], take a drop (all four). With [`Self::new_dock_zones`]
+    /// a canvas body takes no drop, and without [`Self::side_edge_zones`] the outer left and
+    /// right edges are new docks, so only top and bottom apply there. A dock-column app whose
+    /// palettes dock only at the left and right sets [`crate::docking::Sides::NONE`] with
+    /// [`Self::new_dock_zones`] on. Not used with [`Self::side_edge_zones`]. Groups that take
+    /// tabs keep all four sides.
     pub drop_edges: super::Sides,
     /// The share of a group's body, below the tab strip, that means "beside" on each side: of
     /// its width from the left and right edges, of its height from the top and bottom edges
     /// (one third, at most one half). The middle joins the group as a tab. Not used with
     /// [`Self::side_edge_zones`].
     pub side_zone_fraction: f32,
-    /// Width of the line that a drop between the icon groups of an iconic column, and every
-    /// dock drop with [`Self::side_edge_zones`], previews with, and of the line
+    /// Width of the line that a drop on a band along the layout's outer edge (a new dock, a new
+    /// outermost column or the outer edge band), a drop between the icon groups of an iconic
+    /// column, and every dock drop with [`Self::side_edge_zones`] preview with, and of the line
     /// [`crate::docking::ZoneRule::Fraction`] gives hosts as a side's preview (4 pt, more than
-    /// zero). Other drops beside a group, column, dock or the layout's edge preview the rect the
-    /// moved panels take. Border bands reach 4 pt past this line into a tab strip.
+    /// zero). Other drops beside a group, column or dock preview the rect the moved panels
+    /// take. Border bands reach 4 pt past this line into a tab strip.
     pub drop_line_width: f32,
-    /// [D] The docked area's left and right edges, where no dock is yet, take a drop as a new
-    /// dock (see [`Self::new_dock_band`]).
+    /// [D] The docking profile. The docked area's left and right edges, where no dock is yet,
+    /// take a drop as a new dock (see [`Self::new_dock_band`]). Without
+    /// [`Self::side_edge_zones`], the body of a frame or floating group that takes no tabs (a
+    /// canvas) takes no drop: a release there floats as over no target.
     pub new_dock_zones: bool,
     /// [D] Height of the bar above each dock column. It drags the column and holds its »/« button.
     pub column_bar_height: f32,
@@ -237,10 +242,18 @@ impl DockStyle {
         }
     }
 
-    /// The canvas sides [`Self::drop_edges`] gives in this profile: all four with
+    /// The sides [`Self::drop_edges`] gives in this profile: all four with
     /// [`Self::side_edge_zones`].
     pub(super) fn drop_sides(&self) -> super::Sides {
         if self.side_edge_zones { super::Sides::ALL } else { self.drop_edges }
+    }
+
+    /// The sides of a frame or floating group that takes no tabs (a canvas) whose body takes a
+    /// drop: none in the docking profile ([`Self::new_dock_zones`] without
+    /// [`Self::side_edge_zones`]), where only the bands along borders dock beside it, else
+    /// [`Self::drop_sides`].
+    pub(super) fn canvas_sides(&self) -> super::Sides {
+        if self.side_edge_zones || !self.new_dock_zones { self.drop_sides() } else { super::Sides::NONE }
     }
 
     /// The outer edges that take a drop: all four with [`Self::side_edge_zones`], else the top
@@ -778,6 +791,41 @@ pub fn route_app_drag(ctx: &Context, area_id: Id) {
     let _ = (ctx, area_id);
 }
 
+/// The native window that has the keyboard and a focused text field in its last pass (feature
+/// `native-windows`; elsewhere `None`). Not a window drawn under [`DockArea::input_blocked`].
+///
+/// On macOS the menu bar takes key equivalents such as ⌘C and ⌘V before the key window sees
+/// them, and an app's menu glue reports them in the main window's input. While this is `Some`,
+/// the dock area moves the keys a text field acts on (⌘C, ⌘X, ⌘V, ⌘A, ⌘Z and ⇧⌘Z, ⌘ with the
+/// arrows, ⌘Backspace and ⌘Delete, and `Copy`, `Cut` and `Paste` events) from the main window's
+/// input to that window's, as [`send_keys`] does; the app's other command keys stay with the
+/// main window. A menu that runs commands itself instead of reporting keys can send the text
+/// keys to this window with [`send_keys`]. An app whose own `raw_input_hook` turns the main
+/// window's ⌘V into `ViewportCommand::RequestPaste` for its text fields skips that while this
+/// is `Some`, so the field's window pastes instead.
+pub fn typing_window(ctx: &Context) -> Option<egui::ViewportId> {
+    #[cfg(feature = "native-windows")]
+    return super::render::typing_window(ctx);
+    #[cfg(not(feature = "native-windows"))]
+    {
+        let _ = ctx;
+        None
+    }
+}
+
+/// Give `events` to the native window `viewport` at the start of its next input, and repaint
+/// it (feature `native-windows`; elsewhere it does nothing). A text field copies and pastes on
+/// egui's `Copy`, `Cut` and `Paste` events, not on key presses, so ⌘C and ⌘X presses arrive as
+/// `Copy` and `Cut`, and ⌘V asks the window for the clipboard text
+/// (`ViewportCommand::RequestPaste`), which arrives as `Paste`. Other events arrive as they are.
+/// See [`typing_window`].
+pub fn send_keys(ctx: &Context, viewport: egui::ViewportId, events: Vec<egui::Event>) {
+    #[cfg(feature = "native-windows")]
+    super::render::send_keys(ctx, viewport, events);
+    #[cfg(not(feature = "native-windows"))]
+    let _ = (ctx, viewport, events);
+}
+
 /// One mutable application adapter owns bodies, menus, shaped text and per-panel policy,
 /// avoiding competing mutable closures. Logical labels are used for tab accessibility.
 /// [`DockArea::show_content`] reads every policy from here; the closures passed to the older
@@ -965,6 +1013,8 @@ pub struct DockArea<'a, P = ()> {
     native_windows: Option<bool>,
     #[cfg(feature = "native-windows")]
     input_hook: Option<super::render::InputHook>,
+    #[cfg(feature = "native-windows")]
+    cursor: super::render::DesktopCursor,
 }
 
 impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
@@ -983,6 +1033,8 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
             native_windows: None,
             #[cfg(feature = "native-windows")]
             input_hook: None,
+            #[cfg(feature = "native-windows")]
+            cursor: Default::default(),
         }
     }
 
@@ -1037,6 +1089,13 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
     #[cfg(feature = "native-windows")]
     pub fn native_input_hook(mut self, hook: impl FnMut(&Context, &mut egui::RawInput) + Send + 'static) -> Self {
         self.input_hook = Some(Box::new(hook));
+        self
+    }
+
+    /// Where native windows that follow a bar drag go: a stand-in window system's cursor.
+    #[cfg(all(feature = "native-windows", any(test, feature = "testing")))]
+    pub(in crate::docking) fn desktop_cursor(mut self, cursor: super::render::DesktopCursor) -> Self {
+        self.cursor = cursor;
         self
     }
 
@@ -1216,6 +1275,8 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
             native_windows: self.native_windows,
             #[cfg(feature = "native-windows")]
             cross: Default::default(),
+            #[cfg(feature = "native-windows")]
+            cursor: self.cursor,
         };
         if let Some(root) = &view.root {
             renderer.node(ui, root, rect, &mut Vec::new(), (root, rect));

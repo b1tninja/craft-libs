@@ -117,6 +117,7 @@ pub struct FloatingFrame<'a> {
     limits: PanelLimits,
     resizable: bool,
     resize_label: &'a str,
+    opacity: f32,
 }
 
 /// What a [`FloatingFrame`] did this frame.
@@ -136,7 +137,7 @@ pub struct FrameResponse<R> {
 
 impl<'a> FloatingFrame<'a> {
     pub fn new(id: Id, rect: Rect) -> Self {
-        Self { id, rect, bounds: None, limits: PanelLimits::default(), resizable: true, resize_label: "Resize window" }
+        Self { id, rect, bounds: None, limits: PanelLimits::default(), resizable: true, resize_label: "Resize window", opacity: 1.0 }
     }
 
     /// The frame stays inside `bounds`; the default is the viewport's content rect.
@@ -163,6 +164,12 @@ impl<'a> FloatingFrame<'a> {
         self
     }
 
+    /// Opacity of everything drawn in the frame, contents included (default 1.0).
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity;
+        self
+    }
+
     pub fn layer(id: Id) -> LayerId {
         LayerId::new(Order::Middle, id)
     }
@@ -180,6 +187,7 @@ impl<'a> FloatingFrame<'a> {
             .movable(false)
             .constrain_to(bounds);
         let shown = area.show(ctx, |ui| {
+            ui.multiply_opacity(self.opacity);
             // Drawn at `rect` itself, also in egui's first (sizing) pass of a new area.
             ui.set_min_size(rect.size());
             ui.allocate_rect(rect, Sense::hover());

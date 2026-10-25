@@ -563,18 +563,30 @@ pub fn submit(pdf: &[u8], job: &Job) -> Result<String, Error> {
 /// success: only the returned result confirms submission, and a later failure may follow the
 /// last progress event. This does not report physical printing or provide cancellation.
 pub fn submit_with_progress(pdf: &[u8], job: &Job, progress: &mut dyn FnMut(usize, usize)) -> Result<String, Error> {
+    submit_staged(pdf, job, progress, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// [`submit_with_progress`] that sets `started` once the spooler may have taken the job (`lp` is
+/// running, or the first spool job begins): an error while it is still unset was a refusal before
+/// anything was sent.
+pub(crate) fn submit_staged(
+    pdf: &[u8],
+    job: &Job,
+    progress: &mut dyn FnMut(usize, usize),
+    started: &std::sync::atomic::AtomicBool,
+) -> Result<String, Error> {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     {
         let _ = progress;
-        submit_via(std::process::Command::new("lp"), pdf, job)
+        submit_via_staged(std::process::Command::new("lp"), pdf, job, started)
     }
     #[cfg(windows)]
     {
-        windows::submit_with_progress(pdf, job, progress)
+        windows::submit_with_render(pdf, job, &spool_render::RenderChoice::default(), progress, started).map(|spooled| spooled.message)
     }
     #[cfg(not(any(windows, all(unix, not(target_arch = "wasm32")))))]
     {
-        let _ = (pdf, job, progress);
+        let _ = (pdf, job, progress, started);
         Err(Error::Spool("printing to a printer isn't available on this platform yet; save the print-ready PDF instead".into()))
     }
 }
@@ -585,7 +597,18 @@ pub fn submit_with_progress(pdf: &[u8], job: &Job, progress: &mut dyn FnMut(usiz
 /// temp directory lets another local user read printed documents or swap the file before `lp`
 /// reads it.
 #[cfg(any(test, all(unix, not(target_arch = "wasm32"))))]
-pub(crate) fn submit_via(mut lp: std::process::Command, pdf: &[u8], job: &Job) -> Result<String, Error> {
+pub(crate) fn submit_via(lp: std::process::Command, pdf: &[u8], job: &Job) -> Result<String, Error> {
+    submit_via_staged(lp, pdf, job, &std::sync::atomic::AtomicBool::new(false))
+}
+
+/// [`submit_via`] that sets `started` once `lp` is running.
+#[cfg(any(test, all(unix, not(target_arch = "wasm32"))))]
+pub(crate) fn submit_via_staged(
+    mut lp: std::process::Command,
+    pdf: &[u8],
+    job: &Job,
+    started: &std::sync::atomic::AtomicBool,
+) -> Result<String, Error> {
     use std::io::Write;
     use std::process::Stdio;
     let mut child = lp
@@ -595,6 +618,7 @@ pub(crate) fn submit_via(mut lp: std::process::Command, pdf: &[u8], job: &Job) -
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| Error::Spool(format!("the print spooler is not available: {e}")))?;
+    started.store(true, std::sync::atomic::Ordering::SeqCst);
     let stdin = child.stdin.take();
     // Feed the job on its own thread while collecting the output, so neither side can fill a
     // pipe and wait on the other. Dropping `stdin` at the end closes it: the end of the job.

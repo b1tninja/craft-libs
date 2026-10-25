@@ -147,6 +147,16 @@ fn zero_copies_end_failed_with_do_not_retry_and_nothing_is_sent() {
 }
 
 #[test]
+fn a_title_with_markup_is_listed_back_intact() {
+    let printer = FakePrinter::new(FakeConfig::default());
+    let registry = registry_over(&printer, 0);
+    foreign(&registry, "R&D <report>");
+    let listed = registry.list_jobs(&format!("wsd:{URL}"), &JobFilter::new()).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].title, "R&D <report>");
+}
+
+#[test]
 fn a_lost_send_reply_is_reconciled_and_nothing_is_sent_twice() {
     let printer = FakePrinter::new(FakeConfig::default());
     foreign(&registry_over(&printer, 0), "Quarterly report"); // an earlier job with the very same title

@@ -28,8 +28,10 @@ mod spooler {
     use crate::backend::{Backend, JobHint, PrintError, PrinterDetails, PrinterRef, SubmitRequest};
     use crate::job::Submitted;
     #[cfg(not(windows))]
-    use crate::submit_with_progress;
+    use crate::submit_staged;
+    use crate::{Phase, RetrySafety};
     use crate::{Printer, Progress, printers, spool_render};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// The system spooler as a [`Backend`]: CUPS (`lp`, `lpstat`) on macOS and Linux, the Windows
     /// print spooler on Windows. Local class: no consent needed. PDF only.
@@ -110,15 +112,22 @@ mod spooler {
                     report(Progress::of(clamp(done), clamp(total)));
                 }
             };
+            let started = AtomicBool::new(false);
+            // An error before the spooler may have taken the job (no default printer, an unreadable
+            // PDF, a refused ticket) sent nothing, so sending again is safe; after that it is not known.
+            let refused = |e: crate::Error| {
+                let error = PrintError::from(e);
+                if started.load(Ordering::SeqCst) { error } else { error.with_phase(Phase::Prepare).with_safety(RetrySafety::Safe) }
+            };
             #[cfg(windows)]
             let message = {
                 let choice = spool_render::choose(&options);
-                let spooled = crate::windows::submit_with_render(document.bytes, &job, &choice, &mut report_progress)?;
+                let spooled = crate::windows::submit_with_render(document.bytes, &job, &choice, &mut report_progress, &started).map_err(refused)?;
                 warnings.extend(spooled.warnings);
                 spooled.message
             };
             #[cfg(not(windows))]
-            let message = submit_with_progress(document.bytes, &job, &mut report_progress)?;
+            let message = submit_staged(document.bytes, &job, &mut report_progress, &started).map_err(refused)?;
             Ok(Submitted::new(NAME, message).with_warnings(warnings))
         }
     }
@@ -129,6 +138,8 @@ mod tests {
     use super::*;
     use crate::backend::{Backend, ErrorKind, JobHint, PrintError};
     use crate::{Document, DocumentFormat, Error, Job, Printer, SubmitRequest};
+    #[cfg(windows)]
+    use crate::{Phase, RetrySafety};
 
     #[test]
     fn the_adapter_keeps_the_legacy_printer_fields() {
@@ -152,6 +163,17 @@ mod tests {
         assert_eq!(error.to_string(), "the print job was refused");
         assert_eq!(error.kind(), ErrorKind::Failed);
         assert_eq!(error.native(), None);
+    }
+
+    /// An unreadable PDF is refused before the spooler is asked anything: sending again is safe, so
+    /// the print ends as failed instead of waiting for someone to check the device.
+    #[cfg(windows)]
+    #[test]
+    fn a_refusal_before_anything_is_sent_is_safe_to_repeat() {
+        let doc = Document::new(DocumentFormat::Pdf, b"this is not a PDF");
+        let error = SystemSpooler.submit(SubmitRequest::new(doc, Job::default())).unwrap_err();
+        assert_eq!(error.retry_safety(), RetrySafety::Safe, "{error}");
+        assert_eq!(error.phase(), Some(Phase::Prepare));
     }
 
     #[test]

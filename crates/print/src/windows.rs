@@ -168,25 +168,29 @@ fn imageable_margin(device: &PrinterDevice, ticket: &PrintTicket) -> f64 {
         .map_or(0.0, ticket::points)
 }
 
-/// Spool a print-ready PDF. The sheets are read first ([`sheets::read`]); everything that talks
-/// to the driver runs on a thread of its own, so WinRT and COM get an apartment of their own
-/// whoever calls. Windows.Data.Pdf reads from a path, so the job goes to a file in a private
-/// temporary folder (an unpredictable name, only this user's) for as long as the spooler takes
-/// it, and the folder is removed however the job ended. Windows answers once the job is in the
-/// queue: a paused queue or an offline printer keeps the job there, as with any program.
-pub(crate) fn submit_with_progress(pdf: &[u8], job: &Job, progress: &mut dyn FnMut(usize, usize)) -> Result<String, Error> {
-    submit_with_render(pdf, job, &RenderChoice::default(), progress).map(|spooled| spooled.message)
-}
-
 /// What the spooler accepted: the message for people and what was changed on the way.
 pub(crate) struct Spooled {
     pub(crate) message: String,
     pub(crate) warnings: Vec<String>,
 }
 
-/// [`submit_with_progress`] with the render resolution chosen by `choice`; its notes and any
-/// difference between the resolution asked for and the one used come back as warnings.
-pub(crate) fn submit_with_render(pdf: &[u8], job: &Job, choice: &RenderChoice, progress: &mut dyn FnMut(usize, usize)) -> Result<Spooled, Error> {
+/// Spool a print-ready PDF. The sheets are read first ([`sheets::read`]); everything that talks
+/// to the driver runs on a thread of its own, so WinRT and COM get an apartment of their own
+/// whoever calls. Windows.Data.Pdf reads from a path, so the job goes to a file in a private
+/// temporary folder (an unpredictable name, only this user's) for as long as the spooler takes
+/// it, and the folder is removed however the job ended. Windows answers once the job is in the
+/// queue: a paused queue or an offline printer keeps the job there, as with any program.
+///
+/// The render resolution is chosen by `choice`; its notes and any
+/// difference between the resolution asked for and the one used come back as warnings. `started`
+/// is set when the first spool job begins: an error before that was a refusal with nothing sent.
+pub(crate) fn submit_with_render(
+    pdf: &[u8],
+    job: &Job,
+    choice: &RenderChoice,
+    progress: &mut dyn FnMut(usize, usize),
+    started: &std::sync::atomic::AtomicBool,
+) -> Result<Spooled, Error> {
     let trace = JobTrace::begin();
     trace.line(|| format!("submit: {} bytes, printer {:?}, scaling {:?}, copies {}", pdf.len(), job.printer, job.scaling, job.copies));
     let read = sheets::read(pdf)?;
@@ -260,6 +264,7 @@ pub(crate) fn submit_with_render(pdf: &[u8], job: &Job, choice: &RenderChoice, p
         });
         let printer = WinPdfPrinter::new(device);
         let jobs = jobs as usize;
+        started.store(true, std::sync::atomic::Ordering::SeqCst);
         for copy in 0..jobs {
             let printed = printer
                 .print_with_progress(&path, ticket.clone(), |processed, total| {

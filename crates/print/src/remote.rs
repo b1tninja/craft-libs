@@ -182,7 +182,15 @@ pub fn filter_jobs(jobs: Vec<RemoteJob>, filter: &JobFilter) -> Vec<RemoteJob> {
 
 /// A [`Timestamp`] as the wall-clock time a [`RemoteJob::created`] uses.
 fn system_time(at: Timestamp) -> SystemTime {
-    UNIX_EPOCH + Duration::from_millis(at.millis())
+    // Beyond what the platform's clock can hold (a corrupted journal's timestamp) it saturates to
+    // a late time it can hold: a conversion must not panic.
+    let mut millis = at.millis();
+    loop {
+        if let Some(time) = UNIX_EPOCH.checked_add(Duration::from_millis(millis)) {
+            return time;
+        }
+        millis /= 2;
+    }
 }
 
 /// Printing's reading of a [`Fingerprint`] (`craft-job`'s record of what was submitted): the
@@ -308,6 +316,12 @@ mod tests {
 
     use super::*;
     use craft_job::TagPlacement;
+
+    #[test]
+    fn a_timestamp_beyond_the_platforms_clock_saturates_instead_of_panicking() {
+        assert_eq!(system_time(Timestamp::from_millis(1_500)), UNIX_EPOCH + Duration::from_millis(1_500));
+        assert!(system_time(Timestamp::from_millis(u64::MAX)) > UNIX_EPOCH);
+    }
 
     /// A pending job `p#{n}` of a test backend titled `title`.
     fn job(n: u32, title: &str) -> RemoteJob {

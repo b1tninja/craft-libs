@@ -25,7 +25,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use super::adapter::{DeviceUrl, Request, Response, Transport, WireError, param};
+use super::adapter::{DeviceUrl, Request, Response, Transport, WireError, param, xml};
 pub use super::adapter::{HttpRequest, Server, raw_response};
 
 pub const SOAP: &str = "http://www.w3.org/2003/05/soap-envelope";
@@ -451,7 +451,7 @@ impl FakePrinter {
                     .jobs
                     .iter()
                     .filter(|(_, j)| active != matches!(j.state, "Completed" | "Canceled" | "Aborted"))
-                    .map(|(id, j)| format!("<wprt:JobSummary><wprt:JobId>{id}</wprt:JobId><wprt:JobState>{}</wprt:JobState><wprt:JobName>{}</wprt:JobName><wprt:JobOriginatingUserName>{}</wprt:JobOriginatingUserName><wprt:KOctetsProcessed>0</wprt:KOctetsProcessed><wprt:MediaSheetsCompleted>0</wprt:MediaSheetsCompleted><wprt:NumberOfDocuments>1</wprt:NumberOfDocuments></wprt:JobSummary>", j.state, j.name, j.user))
+                    .map(|(id, j)| format!("<wprt:JobSummary><wprt:JobId>{id}</wprt:JobId><wprt:JobState>{}</wprt:JobState><wprt:JobName>{}</wprt:JobName><wprt:JobOriginatingUserName>{}</wprt:JobOriginatingUserName><wprt:KOctetsProcessed>0</wprt:KOctetsProcessed><wprt:MediaSheetsCompleted>0</wprt:MediaSheetsCompleted><wprt:NumberOfDocuments>1</wprt:NumberOfDocuments></wprt:JobSummary>", j.state, xml::esc(&j.name), xml::esc(&j.user)))
                     .collect();
                 let rows = filler + &live;
                 let wrap = if active { "ActiveJobs" } else { "JobHistory" };

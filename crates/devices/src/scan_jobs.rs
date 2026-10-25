@@ -235,8 +235,13 @@ impl JobRecord {
         self.effective_state() != self.journal.state
     }
 
-    /// The exit class of [`Self::effective_state`].
+    /// The exit class of [`Self::effective_state`], except that a finished backs pass with backs still missing is
+    /// `NeedsAttention`, so the exit status and the JSON never call an unfinished document done.
     pub fn exit_class(&self) -> ExitClass {
+        // A backs pass that ran the feeder empty is `Completed`, but the document still lacks backs: not done.
+        if self.backs_remaining() && self.completed() {
+            return ExitClass::NeedsAttention;
+        }
         self.effective_state().exit_class()
     }
 

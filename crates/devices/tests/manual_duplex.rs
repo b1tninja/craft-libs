@@ -5,8 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use craft_devices::scan_jobs::{
-    JobRecord, ManualDuplex, detail_text, duplex_page_number, page_mismatch, page_numbers, place_fronts_for_duplex, read_record, request_json,
-    write_record,
+    JobRecord, ManualDuplex, detail_text, duplex_page_number, exit_code, job_json, page_mismatch, page_numbers, place_fronts_for_duplex, read_record,
+    request_json, write_record,
 };
 use craft_scan::ScanSettings;
 use craft_scan::job::{Outcome, PageInfo, ScanJob, ScanJobConfig, ScanJobState};
@@ -115,6 +115,9 @@ fn a_backs_pass_that_ran_the_feeder_empty_still_says_the_backs_are_not_finished(
     write_record(&dir, &record).expect("journal");
     let read = read_record(&dir).expect("read");
     assert!(read.backs_remaining());
+    assert_eq!(read.exit_class(), ScanJobState::NeedsAttention.exit_class(), "backs are missing: not a success");
+    assert_ne!(exit_code(read.exit_class()), 0);
+    assert_eq!(job_json(&dir, &read)["exit_code"], 10, "the JSON says so too");
     let text = detail_text("app", &dir, &read);
     assert!(!text.contains("nothing; the scan is complete"), "{text}");
     assert!(text.contains("next: scan the rest of the backs") && text.contains("the back of sheet 2 is next"), "{text}");
@@ -123,6 +126,7 @@ fn a_backs_pass_that_ran_the_feeder_empty_still_says_the_backs_are_not_finished(
     feed(&dir, &mut record, &["back 2", "back 1"]);
     let read = read_record(&dir).expect("read");
     assert!(!read.backs_remaining());
+    assert_eq!(read.exit_class(), ScanJobState::Terminal(Outcome::Completed).exit_class());
     assert!(detail_text("app", &dir, &read).contains("nothing; the scan is complete"));
     let _ = std::fs::remove_dir_all(&dir);
 }

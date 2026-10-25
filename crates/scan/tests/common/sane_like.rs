@@ -92,7 +92,9 @@ impl Backend for SaneLike {
             }
             pages.push(page);
         }
-        let ran_out = feeder && settings.pages != 0 && pages.len() < wanted;
+        // An empty tray is NO_DOCS however many pages were asked for, the whole feeder included; running out after
+        // some pages is the normal end of a whole-feeder request and a shortfall of a counted one.
+        let ran_out = feeder && (pages.is_empty() || (settings.pages != 0 && pages.len() < wanted));
         if !ran_out {
             return Ok(Acquired { source: if feeder { Source::Feeder } else { Source::Glass }, pages });
         }

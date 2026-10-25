@@ -229,6 +229,25 @@ fn an_empty_feeder_with_pages_in_hand_and_nothing_more_wanted_is_a_normal_end() 
 }
 
 #[test]
+fn an_empty_feeder_under_a_whole_feeder_request_is_feeder_empty_not_a_scan_of_nothing() {
+    // pages = 0 asks for the whole feeder; SANE's NO_DOCS on the first frame is how the backend learns it is empty.
+    let mut job = ScanJob::new(feeder_request(0), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    let result = SaneLike::new(0).acquire(&plan.settings);
+    assert!(matches!(&result, Err(e) if e.interrupt_kind() == InterruptKind::FeederEmpty), "{result:?}");
+    job.finish_attempt(result, t(2)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!((snap.state, snap.pages.len()), (ScanJobState::Interrupted, 0));
+    assert_eq!(snap.last_error.map(|f| f.info.kind), Some(InterruptKind::FeederEmpty));
+
+    // A loaded feeder, whole feeder wanted: the end of the stack is the end of the job.
+    let mut job = ScanJob::new(feeder_request(0), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(SaneLike::new(4).acquire(&plan.settings), t(2)).expect("finish");
+    assert_eq!((job.state(), job.page_count()), (ScanJobState::Terminal(Outcome::Completed), 4));
+}
+
+#[test]
 fn a_short_stack_under_a_counted_request_is_an_interruption_the_person_resolves() {
     // The WIA-shaped fake: one sheet in the tray, five wanted; the driver answers busy after page one.
     let mut job = ScanJob::new(feeder_request(5), ScanJobConfig::default());

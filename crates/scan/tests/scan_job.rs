@@ -1010,6 +1010,12 @@ fn capabilities_are_absent_only_when_the_handling_bits_were_read() {
     assert_eq!((view.capabilities.has_feeder, view.capabilities.has_flatbed, view.capabilities.duplex), (Tri::On, Tri::Off, Tri::Off));
     assert_eq!(state_of(&view, K::FeederPaper), Some(Tri::NotReported));
     assert_eq!(view.paper.expect("paper").glass_available, Tri::Off);
+    // A status that says the flatbed is ready is believed over a details record that listed none: the indicator and the
+    // paper path agree.
+    let status = HandlingStatus { flat_ready: true, ..HandlingStatus::default() };
+    let view = device_view(&scanner, Some(status), None);
+    assert_eq!(state_of(&view, K::FlatbedReady), Some(Tri::On));
+    assert_eq!(view.paper.expect("paper").glass_available, Tri::On);
 }
 
 #[test]

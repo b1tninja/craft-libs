@@ -74,8 +74,10 @@ pub fn device_view(scanner: &Scanner, status: Option<HandlingStatus>, source_in_
         .with_flatbed(tri(scanner.flatbed_presence()))
         .with_duplex(tri(scanner.duplex_presence()));
 
-    let mut paper =
-        PaperPathView::new().with_feeder_loaded(feeder).with_glass_available(if scanner.flatbed { flat } else { tri(scanner.flatbed_presence()) });
+    // The glass answers like the FlatbedReady indicator: a status that says the flatbed is ready is believed even where the
+    // details did not list one, so the two never disagree in one view.
+    let glass = if scanner.flatbed || flat.is_on() { flat } else { tri(scanner.flatbed_presence()) };
+    let mut paper = PaperPathView::new().with_feeder_loaded(feeder).with_glass_available(glass);
     if let Some(capacity) = scanner.feeder_capacity {
         paper = paper.with_feeder_capacity(capacity);
     }

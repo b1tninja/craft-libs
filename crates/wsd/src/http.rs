@@ -127,7 +127,8 @@ fn retry_after(headers: &ureq::http::HeaderMap, now: SystemTime) -> Option<Durat
 impl Transport for HttpTransport {
     /// POST `request` with only `Content-Type`, `SOAPAction` and `Accept` headers, bounded by the
     /// request's timeout. Redirects are refused and a body larger than `max_response` is
-    /// [`Error::TooLarge`]; `Retry-After` is read into the response.
+    /// [`Error::TooLarge`] for a success status; a non-success status keeps its [`Error::Http`] even
+    /// when its body is over the cap. `Retry-After` is read into the response.
     fn post(&self, url: &DeviceUrl, request: Request) -> Result<Response, Error> {
         let mut builder = self
             .agent
@@ -155,7 +156,13 @@ impl Transport for HttpTransport {
         let cap = request.max_response as u64;
         response.body_mut().as_reader().take(cap.saturating_add(1)).read_to_end(&mut body).map_err(map_body_error)?;
         if body.len() > request.max_response {
-            return Err(Error::TooLarge("the device's reply", request.max_response));
+            // An oversized success is a reply we refuse; an oversized failure is still the device's
+            // status (and Retry-After), which the caller classifies, so keep them.
+            return Err(if (200..300).contains(&status) {
+                Error::TooLarge("the device's reply", request.max_response)
+            } else {
+                Error::http_retry_after(status, retry_after)
+            });
         }
         Ok(Response::new(status, content_type, body).with_retry_after(retry_after))
     }

@@ -91,13 +91,22 @@ impl StartupPrompt {
                                     ui.label(RichText::new(self.app.name).size(15.0).strong().color(text_primary));
                                     ui.label(RichText::new("UPDATE").size(10.0).monospace().color(accent_color));
                                 });
-                                let version_pill = format!("v{} → {}", self.running_version, self.release.version_label());
+                                // ASCII only, like the rest of the card: an app whose fonts lack a glyph may panic
+                                // instead of drawing a box, and this prompt shows up unasked.
+                                let version_pill = format!("v{} to {}", self.running_version, self.release.version_label());
                                 ui.label(RichText::new(version_pill).size(11.0).monospace().color(text_muted));
                             });
 
                             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                                let x_btn = egui::Button::new(RichText::new("✕").size(12.0).color(text_muted)).frame(false);
-                                if ui.add(x_btn).clicked() {
+                                // Two strokes, not a "✕" glyph: none of the bundled faces has U+2715.
+                                let (rect, close) = ui.allocate_exact_size(Vec2::splat(18.0), egui::Sense::click());
+                                close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Close"));
+                                let color = if close.hovered() { text_primary } else { text_muted };
+                                let (center, reach) = (rect.center(), 4.5);
+                                let stroke = egui::Stroke::new(1.5, color);
+                                ui.painter().line_segment([center + Vec2::new(-reach, -reach), center + Vec2::new(reach, reach)], stroke);
+                                ui.painter().line_segment([center + Vec2::new(-reach, reach), center + Vec2::new(reach, -reach)], stroke);
+                                if close.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                                     response = StartupPromptResponse::Later;
                                 }
                             });
@@ -304,7 +313,7 @@ mod tests {
         for expected in [
             "PhotoCraft",
             "UPDATE",
-            "v0.1.0 → 0.2.0",
+            "v0.1.0 to 0.2.0",
             "PhotoCraft 0.2.0 is available with the latest features and bug fixes.",
             "What's new",
             "DOWNLOAD",
@@ -313,6 +322,8 @@ mod tests {
             assert!(painted.contains(expected), "missing {expected:?} in painted text {painted:?}");
         }
         assert!(!painted.contains("UPDATE AND RESTART"), "download branch must not offer the self-update button: {painted:?}");
+        // No glyph that a font might lack: apps that panic on a missing glyph would take the prompt down (#343).
+        assert!(painted.is_ascii(), "the prompt paints a non-ASCII character: {painted:?}");
         let fills = rect_fills(&output);
         let backdrop = fills.iter().any(|(rect, fill)| *fill == Color32::from_black_alpha(150) && rect.size() == screen().size());
         assert!(backdrop, "modal backdrop missing: {fills:?}");

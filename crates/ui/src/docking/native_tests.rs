@@ -2514,6 +2514,33 @@ fn cancel_drag_from_a_native_input_hook_returns() {
     assert!(!cancel.load(Ordering::SeqCst), "the hook did not run");
 }
 
+/// `send_keys` from the per-area native input hook, inside `Plugin::input_hook`, returns
+/// without locking the plugin again, and the keys reach that window's next input.
+#[test]
+fn send_keys_from_a_native_input_hook_returns_and_delivers() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let send = Arc::new(AtomicBool::new(false));
+    let flag = send.clone();
+    let mut d = driver(layout(true)).with_native_input_hook(move |ctx, input| {
+        if flag.swap(false, Ordering::SeqCst) {
+            super::send_keys(ctx, input.viewport_id, vec![Event::Copy]);
+        }
+    });
+    let id = id_of(&d);
+    d.content.text = Some(5);
+    d.settle();
+    send.store(true, Ordering::SeqCst);
+    d.window_step(id, vec![]);
+    assert!(!send.load(Ordering::SeqCst), "the hook did not run");
+    d.step(vec![]);
+    d.window_step(id, vec![]);
+    assert!(d.content.field_keys.contains(&Event::Copy), "{:?}", d.content.field_keys);
+}
+
 /// An app drag with a release queued for the main window: `cancel_drag` from the per-area
 /// native input hook (inside `Plugin::input_hook`, with egui holding the `NativeInput` plugin
 /// lock) returns without deadlocking, withdraws that release, and leaves the owner's own

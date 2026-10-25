@@ -194,6 +194,11 @@ impl Updater {
                     Ok(()) => {
                         self.installed = true;
                         self.restart = true;
+                        if let Some(prompt) = &mut self.prompt {
+                            prompt.is_installing = false;
+                            prompt.status_message =
+                                Some(format!("The update is installed. Close {} to finish; it restarts by itself.", self.app.name));
+                        }
                     }
                     Err(e) => {
                         log::warn!("{} self-update failed: {e}", self.app.name);
@@ -215,18 +220,24 @@ impl Updater {
 
     /// Draws the startup prompt and starts what it asks for.
     pub fn show(&mut self, ctx: &egui::Context) -> Action {
-        if std::mem::take(&mut self.restart) {
-            if let Some(prompt) = &mut self.prompt {
-                prompt.is_installing = false;
-                prompt.status_message = Some(format!("The update is installed. Close {} to finish; it restarts by itself.", self.app.name));
-            }
+        self.show_if(ctx, true)
+    }
+
+    /// Like [`Self::show`], but an installation only starts when `can_start` is true. An app passes
+    /// `false` while it holds unsaved work: the restart helper is scheduled before the app closes,
+    /// and a close that the user then cancels would leave it waiting for an exit that never comes.
+    pub fn show_if(&mut self, ctx: &egui::Context, can_start: bool) -> Action {
+        // The close waits for the app to hold no unsaved work: the user may have edited while the
+        // update installed, and a close they cancel is asked again once the work is saved.
+        if self.restart && can_start {
+            self.restart = false;
             return Action::Close;
         }
         let Some(prompt) = &mut self.prompt else { return Action::None };
         match prompt.show(ctx) {
             StartupPromptResponse::Pending => Action::None,
             StartupPromptResponse::UpdateAndRestart => {
-                self.start_install(ctx);
+                self.request_install(ctx, can_start);
                 Action::None
             }
             StartupPromptResponse::Download => {
@@ -239,6 +250,14 @@ impl Updater {
                 self.prompt = None;
                 Action::None
             }
+        }
+    }
+
+    fn request_install(&mut self, ctx: &egui::Context, can_start: bool) {
+        if can_start {
+            self.start_install(ctx);
+        } else if let Some(prompt) = &mut self.prompt {
+            prompt.status_message = Some("Save or close your open work first; the update restarts the app.".into());
         }
     }
 
@@ -420,6 +439,37 @@ mod tests {
         assert!(u.check.is_none(), "no check after an install");
         u.offer(newer());
         assert!(!u.prompt_open(), "no second offer after an install");
+    }
+
+    #[test]
+    fn an_install_waits_while_the_app_holds_unsaved_work() {
+        let ctx = egui::Context::default();
+        let mut u = updater(Ok(None));
+        u.offer(newer());
+        u.request_install(&ctx, false);
+        assert!(u.install.is_none(), "nothing is scheduled while there is unsaved work");
+        assert!(u.prompt.as_ref().is_some_and(|p| !p.is_installing && p.status_message.is_some()));
+    }
+
+    /// One frame with the updater's prompt drawn.
+    fn frame(u: &mut Updater, ctx: &egui::Context, can_start: bool) -> Action {
+        let mut action = Action::None;
+        ctx.run_ui(egui::RawInput::default(), |ui| action = u.show_if(ui.ctx(), can_start)).textures_delta.clear();
+        action
+    }
+
+    #[test]
+    fn a_finished_install_keeps_asking_to_close_until_the_app_can() {
+        let ctx = egui::Context::default();
+        let mut u = updater(Ok(None));
+        u.offer(newer());
+        let (tx, rx) = channel();
+        u.install = Some((rx, newer()));
+        assert!(tx.send(Ok(())).is_ok());
+        u.tick(&ctx);
+        assert_eq!(frame(&mut u, &ctx, false), Action::None, "unsaved work holds the close back");
+        assert_eq!(frame(&mut u, &ctx, true), Action::Close);
+        assert_eq!(frame(&mut u, &ctx, true), Action::None);
     }
 
     #[test]

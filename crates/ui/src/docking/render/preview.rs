@@ -599,12 +599,12 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             if self.style.side_edge_zones {
                 drop_preview(painter, proposal.preview.shrink(1.0), self.style.accent, filled);
             } else if matches!(proposal.placement, Placement::Edge(_)) {
-                self.paint_drop_line(ctx, proposal.preview);
+                self.paint_drop_line(ctx, proposal.preview, true);
             } else if beside {
                 let to = Target::At { anchor: proposal.anchor.clone(), placement: proposal.placement.clone() };
                 match self.result_rect(action(to), members) {
                     Some(rect) => tab_outline(painter, rect.shrink(1.0), self.style.accent),
-                    None => self.paint_drop_line(ctx, proposal.preview),
+                    None => self.paint_drop_line(ctx, proposal.preview, false),
                 }
             } else {
                 tab_outline(painter, proposal.preview.shrink(1.0), self.style.accent);
@@ -621,7 +621,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let rect = (!self.style.side_edge_zones && !drop.outer).then_some(action).and_then(|action| self.result_rect(action, members));
         match rect {
             Some(rect) => tab_outline(painter, rect.shrink(1.0), self.style.accent),
-            None => self.paint_drop_line(ctx, drop.line),
+            None => self.paint_drop_line(ctx, drop.line, drop.outer),
         }
     }
 

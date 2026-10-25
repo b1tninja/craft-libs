@@ -273,6 +273,27 @@ fn group_dropped_on_an_iconic_column_joins_as_an_icon_group() {
     assert!(first_column(&d.layout).iconic);
 }
 
+/// A group dropped on the window edge beside an iconic column at that edge docks in a new column
+/// there: the preview is the edge line alone, without the column's outline.
+#[test]
+fn an_edge_drop_next_to_an_iconic_column_highlights_only_the_edge() {
+    let mut layout = docked(&[&[1], &[2]], true);
+    layout.floating.push(Floating::single(vec![5, 6], 0, [300.0, 200.0, 240.0, 200.0]));
+    let mut d = DockDriver::new(layout, Content);
+    let bar = hit(&d, Hit::DragBar(5)).center();
+    let target = pos2(2.0, 300.0);
+    d.hold(bar, target);
+    let column = Rect::from_min_max(pos2(0.0, 14.0), pos2(36.0, 600.0));
+    assert!(d.filled(Rect::from_x_y_ranges(0.0..=4.0, 0.0..=600.0)), "the edge line");
+    assert!(!d.outlined(column.shrink(1.0)), "the iconic column is not outlined");
+    d.release(target);
+    let Some(Node::Split { first, .. }) = &d.layout.root else { panic!("{:?}", d.layout.root) };
+    let Node::Dock { columns, .. } = first.as_ref() else { panic!("{first:?}") };
+    let panels: Vec<Vec<u32>> = columns.iter().map(|c| c.groups.iter().flat_map(|g| g.panels.clone()).collect()).collect();
+    assert_eq!(panels, vec![vec![5, 6], vec![1, 2]]);
+    assert!(!columns[0].iconic && columns[1].iconic);
+}
+
 /// Every kind of gesture source has a rect, and dragging from it does something.
 #[test]
 fn hit_rects_cover_every_gesture_source() {

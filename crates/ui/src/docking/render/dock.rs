@@ -789,11 +789,15 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     }
 
     /// The line of a drop that shows no result rect: on the window edge, into an iconic column,
-    /// or any dock drop with [`DockStyle::side_edge_zones`].
-    pub(super) fn paint_drop_line(&self, ctx: &Context, line: Rect) {
+    /// or any dock drop with [`DockStyle::side_edge_zones`]. A line inside an iconic column also
+    /// outlines the column, unless it is on the window edge (`outer`): a column at that edge holds
+    /// the line, but the drop docks beside the column, not into it.
+    pub(super) fn paint_drop_line(&self, ctx: &Context, line: Rect, outer: bool) {
         if usable(line) {
             let painter = self.preview_painter(ctx);
-            self.iconic.outline(&painter, line, self.style);
+            if !outer {
+                self.iconic.outline(&painter, line, self.style);
+            }
             painter.rect_filled(line, 1.0, self.style.accent);
         }
     }

@@ -239,6 +239,12 @@ fn reconcile_tagged_finds_a_job_whose_name_lost_the_tag_but_not_one_that_carries
     let asked = asker(&printer);
     assert_eq!(asked.reconcile_tagged(URL, "Quarterly report", Some(&Tag::random())).unwrap(), WsdReconciled::NotFound);
     assert!(matches!(asked.reconcile_tagged(URL, "Quarterly report", Some(&their_tag)).unwrap(), WsdReconciled::Found(_)));
+
+    // A job that still carries the tag is the answer even with an untagged job of the same title
+    // listed beside it (newer or older): the title decides only when no listed name has the tag.
+    foreign(&registry_over(&printer, 0), "Quarterly report");
+    let found = asked.reconcile_tagged(URL, "Quarterly report", Some(&their_tag)).unwrap();
+    assert!(matches!(&found, WsdReconciled::Found(m) if m.name.contains(" [ref ")), "{found:?}");
 }
 
 #[test]

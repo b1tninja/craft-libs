@@ -866,24 +866,30 @@ impl WsdBackend {
         let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
         let history = history_or_none(client.get_job_history())?;
         let url = entry.url.as_url();
-        let mut found: Vec<(u32, JobMatch)> = Vec::new();
+        // (whether the name is the one sent, the match, its job id)
+        let mut found: Vec<(bool, JobMatch, u32)> = Vec::new();
         for row in active.into_iter().chain(history) {
+            if user.is_some_and(|user| row.user_name != user) || found.iter().any(|(_, _, id)| *id == row.status.job_id) {
+                continue;
+            }
             // The name as sent, or one the printer stored shorter without the tag suffix (see
             // `tag_support`): then the title decides, as in a listing. A name that carries a tag of
             // its own is another print's, whatever its title.
             let listed = comparable(&row.job_name);
-            let untagged_match = Tag::find_in(&listed).is_none() && crate::remote::title_matches(&listed, &title);
-            if (listed != name && !untagged_match)
-                || user.is_some_and(|user| row.user_name != user)
-                || found.iter().any(|(id, _)| *id == row.status.job_id)
-            {
+            let exact = listed == name;
+            if !exact && !(Tag::find_in(&listed).is_none() && crate::remote::title_matches(&listed, &title)) {
                 continue;
             }
             let job = JobId::new(NAME, job_native(&url, row.status.job_id));
-            found.push((row.status.job_id, JobMatch { job, name: row.job_name.clone(), status: neutral_status(&row.status) }));
+            found.push((exact, JobMatch { job, name: row.job_name.clone(), status: neutral_status(&row.status) }, row.status.job_id));
         }
-        found.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
-        let mut matches: Vec<JobMatch> = found.into_iter().map(|(_, m)| m).collect();
+        // A job that still carries the name as sent is the answer, whatever else shares its title;
+        // the untagged rows decide only when none does.
+        if found.iter().any(|(exact, ..)| *exact) {
+            found.retain(|(exact, ..)| *exact);
+        }
+        found.sort_by_key(|(_, _, id)| std::cmp::Reverse(*id));
+        let mut matches: Vec<JobMatch> = found.into_iter().map(|(_, m, _)| m).collect();
         Ok(match matches.len() {
             0 => Reconciled::NotFound,
             1 => matches.pop().map_or(Reconciled::NotFound, Reconciled::Found),

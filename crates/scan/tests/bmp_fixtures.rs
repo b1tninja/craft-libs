@@ -37,6 +37,28 @@ fn the_fixture_set_is_there_and_small() {
     assert!(all.iter().map(|(_, b, r)| b.len() + r.len()).sum::<usize>() < 200_000);
 }
 
+/// The fixtures are compared byte for byte, so Git must never convert their line endings (`core.autocrlf` would
+/// otherwise rewrite any 0x0A in a file it takes for text). The repository's root `.gitattributes` marks them binary.
+#[test]
+fn the_fixtures_are_marked_binary_and_their_bytes_are_intact() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join(".gitattributes");
+    if let Ok(rules) = std::fs::read_to_string(&root) {
+        let marked = rules.lines().map(str::trim).any(|line| {
+            let mut parts = line.split_whitespace();
+            parts.next().is_some_and(|pattern| pattern.starts_with("crates/scan/tests/fixtures/")) && parts.any(|a| a == "binary" || a == "-text")
+        });
+        assert!(marked, "the root .gitattributes has no rule marking crates/scan/tests/fixtures/** as binary (-text)");
+    }
+    for (name, bytes, rgba) in fixtures() {
+        let (w, h) = bmp_size(&bytes).unwrap_or_else(|| panic!("{name}: no size"));
+        assert_eq!(
+            rgba.len(),
+            w as usize * h as usize * 4,
+            "{name}: the .rgba is not width x height x 4 bytes; was it checked out with its line endings converted?"
+        );
+    }
+}
+
 #[test]
 fn to_rgba_matches_the_oracle_picture() {
     for (name, bytes, want) in fixtures() {

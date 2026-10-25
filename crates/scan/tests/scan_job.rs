@@ -433,6 +433,27 @@ fn a_glass_answer_that_kept_no_page_does_not_shrink_the_expected_count() {
 }
 
 #[test]
+fn a_journal_with_no_pages_keeps_its_attempt_count_error_and_warnings() {
+    use craft_scan::job::ScanJobJournal;
+    // The first attempt found an empty feeder and no glass: nothing kept, interrupted, one attempt made.
+    let request = ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
+    let mut job = ScanJob::new(request.clone(), ScanJobConfig::default().with_capabilities(true, false, None));
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(SaneLike::new(0).acquire(&plan.settings), t(2)).expect("finish");
+    let mut journal: ScanJobJournal = job.snapshot().into_journal();
+    assert_eq!((journal.state, journal.pages.len(), journal.attempts_total), (ScanJobState::Interrupted, 0, 1));
+    assert!(journal.last_error.is_some());
+    journal.warnings.push("kept for the next run".into());
+
+    let resumed = ScanJob::continuing_from(request, ScanJobConfig::default(), journal);
+    let snap = resumed.snapshot();
+    assert_eq!(snap.state, ScanJobState::Preparing, "nothing was kept, so it starts fresh");
+    assert_eq!(snap.attempts_total, 1, "the next attempt must not reuse number 1");
+    assert!(snap.last_error.is_some());
+    assert_eq!(snap.warnings, ["kept for the next run"]);
+}
+
+#[test]
 fn auto_does_not_fall_back_without_a_glass_or_after_pages_or_for_a_jam() {
     let auto = || ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
 

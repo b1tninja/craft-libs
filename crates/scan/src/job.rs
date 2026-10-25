@@ -807,13 +807,14 @@ impl ScanJob {
         let unknown = journal.version > ScanJobJournal::VERSION || journal.effective_state() == ScanJobState::NeedsAttention;
         let attempts = journal.attempts_total;
         let mut job = Self::continuing(settings, config, journal.pages);
+        // What the earlier runs did carries over even with nothing kept, so the next attempt is numbered after them.
+        job.attempts_total = job.attempts_total.max(attempts);
+        job.last_error = journal.last_error;
+        job.warnings = journal.warnings;
         // An unknown outcome is never a fresh job, even with nothing kept: the scanner may have moved.
         if job.infos.is_empty() && !unknown {
             return job;
         }
-        job.attempts_total = job.attempts_total.max(attempts);
-        job.last_error = journal.last_error;
-        job.warnings = journal.warnings;
         if unknown {
             job.state = ScanJobState::NeedsAttention;
             job.advice = RetryAdvice::CheckDeviceFirst;

@@ -87,7 +87,6 @@ impl JobState {
 /// otherwise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(feature = "serde", serde(default))]
 pub struct Progress {
     pub done: u32,
     pub total: Option<u32>,

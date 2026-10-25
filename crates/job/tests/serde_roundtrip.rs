@@ -92,6 +92,10 @@ fn times_progress_documents_and_fingerprint() {
     assert_eq!(serde_json::from_str::<JobTimes>("{}").expect("all optional"), JobTimes::new());
     assert_eq!(round(&Progress::of(2, 5)), r#"{"done":2,"total":5}"#);
     assert_eq!(serde_json::from_str::<Progress>(r#"{"done":2}"#).expect("total optional"), Progress::done_only(2));
+    // `done` is required: a record that lost it must not read as "no progress yet".
+    for text in ["{}", r#"{"total":5}"#] {
+        assert!(serde_json::from_str::<Progress>(text).is_err(), "{text} must not deserialize");
+    }
     round(&ExpectedTotals::for_request(Some(5), true, 2));
     let docs = JobDocuments::new().with(DocumentRef::new("page-1").with_format("png").with_pages(1).with_bytes(10)).with(DocumentRef::new("page-2"));
     assert!(round(&docs).starts_with("[{\"name\":\"page-1\""));

@@ -277,7 +277,8 @@ aliases). `ScanJob` itself is deliberately not serialisable: it holds tokens and
 
 * the job is `NeedsAttention` (advice `CheckDeviceFirst`) if the journal's state was `NeedsAttention`, or if the
   journal was cut off mid-scan (`acquiring`, or `preparing` with attempts made: `ScanJobJournal::effective_state`),
-  with or without kept pages; else `Interrupted`. The last error, warnings and attempt count carry over;
+  with or without kept pages; else `Interrupted` if pages are kept, else (nothing kept) a fresh `Preparing` job,
+  which advises `RetryNow`. The last error, warnings and attempt count carry over;
 * `settings` is the app's own request (device, resolution, colour, ...); the journal does not carry it. If its
   `pages` is `0` and the journal knows the wanted count, that count is used, so the continuation needs no `--pages`;
 * the app maps `Continuation::Append` to "the person put the remaining sheets in" and asks.

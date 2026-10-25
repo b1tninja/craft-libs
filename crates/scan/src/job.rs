@@ -793,7 +793,8 @@ impl ScanJob {
 
     /// [`Self::continuing`] from a [`ScanJobJournal`]. The job starts `NeedsAttention` if the journal says the
     /// outcome was unknown, or was cut off mid-scan ([`ScanJobJournal::effective_state`]), and stays
-    /// `CheckDeviceFirst`, with or without kept pages; else `Interrupted`. The last error, the warnings and the
+    /// `CheckDeviceFirst`, with or without kept pages; else, with pages kept, `Interrupted`; else, with nothing kept,
+    /// a fresh `Preparing` job (which advises `RetryNow`). The last error, the warnings and the
     /// attempt count carry over. `settings` is the original request; when its `pages` is `0` and the journal
     /// knows the wanted count, that count is used, so `--continue DIR` needs no `--pages`. A journal written with a
     /// [`ScanJobJournal::version`] newer than [`ScanJobJournal::VERSION`] may mean something this reader cannot

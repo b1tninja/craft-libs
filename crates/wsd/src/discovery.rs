@@ -758,7 +758,11 @@ impl Collector<'_> {
     /// at most `MAX_BYES` addresses are kept.
     fn remember_bye(&mut self, address: &str, seq: AppSequence) {
         if let Some(known) = self.byes.iter_mut().find(|(a, _)| a.eq_ignore_ascii_case(address)) {
-            known.1 = seq;
+            if seq.supersedes(&known.1) {
+                known.1 = seq;
+            } else {
+                self.report.ignored.stale += 1;
+            }
         } else if self.byes.len() < MAX_BYES {
             self.byes.push((address.to_owned(), seq));
         }
@@ -1448,6 +1452,34 @@ mod tests {
         assert_eq!(replayed.ignored.stale, 1);
         assert_eq!(run(&AppSequence::new(2, 1)).devices.len(), 1, "a new instance comes back");
         assert_eq!(run(&AppSequence::new(1, 3)).devices.len(), 1, "a later message of the same instance comes back");
+    }
+
+    #[test]
+    fn an_older_bye_does_not_replace_a_newer_remembered_bye() {
+        let t = target("h", print_dev(), &["http://10.0.0.7/x"]);
+        let opts = DiscoverOptions { probe_sends: 1, accept_announcements: true, ..Default::default() };
+        // Hello(1,1), then two Byes in the given order, then a final Hello.
+        let run = |byes: [u64; 2], last: &AppSequence| {
+            let socket = FakeSocket::new();
+            socket.push(Datagram { from: peer(7), payload: hello("m1", &AppSequence::new(1, 1), &t).into_bytes() });
+            for (i, n) in byes.into_iter().enumerate() {
+                socket.push(Datagram { from: peer(7), payload: bye(&format!("b{i}"), &AppSequence::new(1, n), &t).into_bytes() });
+            }
+            socket.push(Datagram { from: peer(7), payload: hello("m9", last, &t).into_bytes() });
+            discover(&socket, &opts).unwrap()
+        };
+        // A reordered older Bye (1,2) after Bye (1,5) must not lower the remembered sequence, so
+        // the reordered Hello (1,3) cannot bring the device back.
+        let reordered = run([5, 2], &AppSequence::new(1, 3));
+        assert!(reordered.devices.is_empty(), "{reordered:?}");
+        assert_eq!(reordered.ignored.stale, 2, "the older Bye and the older Hello");
+        // In order, the newer Bye replaces the older one: Hello (1,3) is stale, Hello (1,6) is not.
+        let in_order = run([2, 5], &AppSequence::new(1, 3));
+        assert!(in_order.devices.is_empty(), "{in_order:?}");
+        assert_eq!(run([2, 5], &AppSequence::new(1, 6)).devices.len(), 1, "a Hello after the newest Bye comes back");
+        assert_eq!(run([5, 2], &AppSequence::new(1, 6)).devices.len(), 1);
+        // A new instance id resets the order.
+        assert_eq!(run([5, 2], &AppSequence::new(2, 1)).devices.len(), 1, "a new instance comes back");
     }
 
     #[test]

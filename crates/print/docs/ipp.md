@@ -59,7 +59,7 @@ printer uses; `Submitted::effective` names the version the job went out at.
 | submit, small document | `Print-Job` | `job-name`, `document-format`, `ipp-attribute-fidelity` (strict only), the job template group, then the document |
 | submit, large document or no `Print-Job` listed | `Create-Job` then `Send-Document` | `last-document` true; a refused `Send-Document` is followed by a cleanup `Cancel-Job`; a lost reply is not (the job may exist) |
 | `job_status` | `Get-Job-Attributes` | one request |
-| `list_jobs` / `find_job` | `Get-Jobs` twice (`not-completed`, `completed`) | `limit` (default 100), `my-jobs` and `requesting-user-name` when the filter names a user; a status reply to the `completed` listing means "no history" |
+| `list_jobs` / `find_job` | `Get-Jobs` twice (`not-completed`, `completed`) | `limit` (default 100), `my-jobs` and `requesting-user-name` when the filter names a user; only a refusal of the `completed` listing itself (`client-error-attributes-or-values-not-supported` or `server-error-operation-not-supported`) means "no history" and gives the active jobs alone; any other status (busy, unavailable, not-authorized, bad-request, ...) is an error, because a wrong "no history" lets a finished job look lost and be sent twice |
 | `cancel_job` | `Cancel-Job` | tolerant, see below |
 
 `JobFlow::Auto` (default) uses `Print-Job` up to 8 MiB (`with_large_document`) and `Create-Job` +

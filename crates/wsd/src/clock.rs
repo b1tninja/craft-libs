@@ -1,8 +1,8 @@
 //! A monotonic clock that exists on every target.
 //!
 //! `std::time::Instant::now()` and `SystemTime::now()` panic on `wasm32-unknown-unknown`, so
-//! nothing in this crate calls them directly: deadlines use [`Instant`]. On other targets
-//! [`Instant`] is the system's monotonic clock. On `wasm32` it
+//! nothing in this crate calls them directly: deadlines use [`Instant`] and message ids draw on
+//! `entropy_nanos`. On other targets [`Instant`] is the system's monotonic clock. On `wasm32` it
 //! reads the source the host installed with [`set_time_source`]; with none installed it is a
 //! logical clock that advances one millisecond per read, so a deadline loop always ends.
 
@@ -53,6 +53,20 @@ impl Add<Duration> for Instant {
 /// `true`. Other targets always use the system clock, so this has no effect there.
 pub fn set_time_source(source: TimeSource) -> bool {
     HOST.set(source)
+}
+
+/// A varying number for message ids: wall-clock nanoseconds on most targets, the host's clock
+/// (or a logical tick) on `wasm32`. Not a time to compare or display.
+pub(crate) fn entropy_nanos() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        HOST.now().as_nanos() as u64
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -161,7 +175,18 @@ mod tests {
     /// reads the clock only through this module. (`http` is not built for wasm32.)
     #[test]
     fn nothing_but_this_module_reads_the_std_clock() {
-        let sources = [("discovery.rs", include_str!("discovery.rs"))];
+        let sources = [
+            ("addressing.rs", include_str!("addressing.rs")),
+            ("discovery.rs", include_str!("discovery.rs")),
+            ("envelope.rs", include_str!("envelope.rs")),
+            ("eventing.rs", include_str!("eventing.rs")),
+            ("fault.rs", include_str!("fault.rs")),
+            ("metadata.rs", include_str!("metadata.rs")),
+            ("mtom.rs", include_str!("mtom.rs")),
+            ("soap.rs", include_str!("soap.rs")),
+            ("transport.rs", include_str!("transport.rs")),
+            ("xml.rs", include_str!("xml.rs")),
+        ];
         for (name, text) in sources {
             // Test modules run on the host, where the clock exists; only production code counts.
             let production = text.split("#[cfg(test)]").next().unwrap_or(text);

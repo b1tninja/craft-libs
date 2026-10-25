@@ -491,8 +491,9 @@ fn a_flood_is_rate_limited_and_a_slow_sender_does_not_stop_the_listener() {
 }
 
 #[test]
-fn a_connection_deadline_too_large_to_add_is_no_deadline_and_not_a_panic() {
-    // `Duration::MAX` as "no limit" overflows `Instant + Duration`; the listener must survive it.
+fn a_connection_deadline_too_large_to_add_is_capped_and_not_a_panic() {
+    // `Duration::MAX` would overflow `Instant + Duration`; it means the longest allowed deadline,
+    // and the listener must survive it (the cap itself is checked in the events unit tests).
     let tuning = EventTuning { connection_deadline: Duration::MAX, ..EventTuning::default() };
     let rig = rig_with(tuning, FakeConfig::default());
     let rx = rig.subscribed(1);

@@ -136,7 +136,9 @@ never reset the stall rule (that needs a changed reading) and never affect the c
   2. a global **rate limit** (a token bucket) has room;
   3. it is a well-formed `POST` to `/n/<token>` or `/e/<token>` over HTTP/1.1 with a `Content-Length`
      within the cap (64 KiB), a SOAP content type and a header block within its caps, read within a
-     total deadline (3 seconds). No chunked bodies, no pipelining, `Connection: close`;
+     total deadline (3 seconds by default, never more than 5 minutes: a longer
+     `EventTuning::connection_deadline`, `Duration::MAX` included, is cut to
+     `MAX_CONNECTION_DEADLINE`). No chunked bodies, no pipelining, `Connection: close`;
   4. `<token>` is the **unguessable per-subscription identifier** (two random UUIDs, 64 hex digits, from std's randomly keyed hasher), compared in
      constant time against every subscription (no early exit), **and the source address equals that
      subscription's printer**;
@@ -152,7 +154,7 @@ never reset the stall rule (that needs a changed reading) and never affect the c
   431 (the header block is too large). They are counted (`EventStats`) for diagnostics. Valid events
   are answered `202 Accepted`.
 * **Bounded everything:** one connection at a time; 8 KiB of headers; 64 KiB of body; a 3 second
-  total deadline per connection; a token bucket (default burst 50, 20 per second); at most 16
+  total deadline per connection (configurable, capped at 5 minutes, so a silent peer cannot hold the listener or block `shutdown_events()` indefinitely); a token bucket (default burst 50, 20 per second); at most 16
   subscriptions; 256 remembered message ids per subscription; wakes coalesce into one counter per
   watch, so a flood cannot grow memory.
 * **Scope of a subscription.** One per printer, shared by all the jobs watched on that printer.

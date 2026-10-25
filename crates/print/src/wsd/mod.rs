@@ -88,7 +88,7 @@ pub use backend::{JobMatch, Reconciled, WsdBackend, WsdJob};
 pub use client::Client;
 pub use encoder::{ColorMode, DocumentEncoder, PassThrough, RasterEncoder};
 pub use error::{Class, KINDS, Op, Result, WsdError};
-pub use events::{EventStats, EventTuning, EventsStatus, NotifyConfig, SubscriptionInfo, Wake};
+pub use events::{EventStats, EventTuning, EventsStatus, MAX_CONNECTION_DEADLINE, NotifyConfig, SubscriptionInfo, Wake};
 pub use fault::{Fault, FaultCode};
 pub use job::{
     Accepted, JobOutcome, JobResult, PollPolicy, PrintOptions, print_document, print_document_with_progress, printer_info, submit_document,

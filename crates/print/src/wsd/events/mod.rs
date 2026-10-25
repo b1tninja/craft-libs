@@ -35,6 +35,12 @@ use crate::{Clock, ErrorKind, PrintError, WakeReceiver, WakeSender, wake_channel
 pub const SUBSCRIBED: [Event; 5] =
     [Event::JobStatus, Event::JobEndState, Event::PrinterStatusSummary, Event::PrinterStatusCondition, Event::PrinterStatusConditionCleared];
 
+/// The longest a single connection may take to deliver its request, whatever
+/// [`EventTuning::connection_deadline`] says (5 minutes). The listener serves one connection at a
+/// time, so a time without a bound would let one silent peer hold it, and the thread that stops it,
+/// for good.
+pub const MAX_CONNECTION_DEADLINE: Duration = Duration::from_secs(300);
+
 /// The numbers the listener and the manager run on. The defaults are what the design note says;
 /// tests (and apps with a reason) change them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +59,9 @@ pub struct EventTuning {
     pub burst: u32,
     /// Token bucket: refilled per second. Default 20.
     pub per_second: u32,
-    /// The whole time one connection may take to deliver its request. Default 3 seconds.
+    /// The whole time one connection may take to deliver its request. Default 3 seconds; a longer
+    /// time is cut to [`MAX_CONNECTION_DEADLINE`] (5 minutes), so `Duration::MAX` means "the longest
+    /// allowed", not "wait forever".
     pub connection_deadline: Duration,
     /// The largest request body accepted, in bytes. Default 64 KiB.
     pub max_body: usize,

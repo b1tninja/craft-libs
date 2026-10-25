@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Instant;
 
-use super::{Arc, Duration, Event, IpAddr, Ordering, SUBSCRIBED, Shared, Sub, TcpListener, backoff, bump, ct_eq, lock};
+use super::{Arc, Duration, Event, IpAddr, MAX_CONNECTION_DEADLINE, Ordering, SUBSCRIBED, Shared, Sub, TcpListener, backoff, bump, ct_eq, lock};
 use crate::wsd::adapter::wse;
 use crate::wsd::adapter::{Incoming, Notification, WSE, WireError};
 use crate::wsd::ns::WPRT;
@@ -130,19 +130,23 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// When a connection that started at `start` must have delivered its request. The configured time
+/// is capped at [`MAX_CONNECTION_DEADLINE`] (`Duration::MAX` means "the longest allowed"), so the sum
+/// is representable and every read has a finite timeout: a peer that connects and says nothing can
+/// never hold the single listener thread for good. A sum that still did not fit would be a deadline
+/// that has already passed, never no deadline.
+pub(super) fn connection_deadline(configured: Duration, start: Instant) -> Instant {
+    start.checked_add(configured.min(MAX_CONNECTION_DEADLINE)).unwrap_or(start)
+}
+
 /// Read one request within the deadline and the size caps. The error is the status to answer.
 fn read_request(stream: &mut TcpStream, shared: &Shared) -> Result<Request, u16> {
-    // A deadline too far away to represent (an app that sets `Duration::MAX` for "no limit") is
-    // no deadline at all; adding it to `Instant::now()` would panic the listener thread.
-    let deadline = Instant::now().checked_add(shared.tuning.connection_deadline);
+    let deadline = connection_deadline(shared.tuning.connection_deadline, Instant::now());
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 2048];
     let mut fill = |buf: &mut Vec<u8>| -> Result<usize, u16> {
-        let left = match deadline {
-            Some(deadline) => Some(deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or(408u16)?),
-            None => None,
-        };
-        stream.set_read_timeout(left).map_err(|_| 400u16)?;
+        let left = deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or(408u16)?;
+        stream.set_read_timeout(Some(left)).map_err(|_| 400u16)?;
         match stream.read(&mut chunk) {
             Ok(0) => Err(400),
             Ok(n) => {

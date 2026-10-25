@@ -1,7 +1,7 @@
 //! Unit tests of the pieces; the listener and the subscription flows are tested end to end in
 //! `tests/wsd_events.rs`.
 
-use super::http::{Bucket, Request, ingest, token_of};
+use super::http::{self, Bucket, Request, ingest, token_of};
 use super::*;
 use crate::ManualClock;
 use crate::wsd::adapter::default_transport;
@@ -180,6 +180,18 @@ fn a_request_from_another_address_than_the_tokens_printer_is_forged() {
     assert_eq!(ingest(&events.shared, "127.0.0.2".parse().unwrap(), &request), 404);
     assert_eq!(events.stats().forged, 1);
     assert_eq!(events.stats().malformed, 1);
+}
+
+#[test]
+fn a_connection_deadline_is_capped_so_a_silent_peer_cannot_hold_the_listener_for_good() {
+    let start = std::time::Instant::now();
+    let end = |configured| http::connection_deadline(configured, start);
+    assert_eq!(end(secs(3)), start + secs(3), "a configured time under the cap is used as it is");
+    assert_eq!(end(MAX_CONNECTION_DEADLINE), start + MAX_CONNECTION_DEADLINE);
+    // Longer times, `Duration::MAX` ("no limit") included, are cut to the cap: still a finite
+    // deadline, never none, and never one that has already passed.
+    assert_eq!(end(MAX_CONNECTION_DEADLINE + secs(1)), start + MAX_CONNECTION_DEADLINE);
+    assert_eq!(end(Duration::MAX), start + MAX_CONNECTION_DEADLINE);
 }
 
 #[test]

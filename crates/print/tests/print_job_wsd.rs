@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use craft_print::backends::Backend;
-use craft_print::wsd::WsdBackend;
 use craft_print::wsd::adapter::{DeviceUrl, Request, Response, Transport, TransportKind, WireError};
 use craft_print::wsd::testing::{FakeConfig, FakePrinter};
+use craft_print::wsd::{Reconciled as WsdReconciled, WsdBackend};
 use craft_print::{
     BytesSource, Document, DocumentFormat, Fingerprint, Job, JobFilter, LifecycleState, ManualClock, Outcome, PrintJob, Reconciled, Registry,
     RetryAdvice, SubmitRequest, Tag, TagExt as _, TagPlacement, TagPolicy, Timestamp, UserConfirmed,
@@ -200,6 +200,45 @@ fn a_printer_that_cuts_the_tag_off_the_job_name_is_still_reconciled_by_title_and
     let Reconciled::Found(remote) = found else { panic!("{found:?}") };
     assert_eq!(remote.id.to_string(), format!("wsd:{URL}#1"));
     assert!(!remote.ours, "the tag did not come back, so nothing says it is ours");
+}
+
+/// A second backend over the same printer, to ask `reconcile_tagged` directly.
+fn asker(printer: &Arc<FakePrinter>) -> WsdBackend {
+    let transport = LossyReply { printer: Arc::clone(printer), lose: "SendDocument", remaining: AtomicU32::new(0) };
+    let backend = WsdBackend::new().with_transport(transport);
+    backend.add(URL).unwrap();
+    backend
+}
+
+#[test]
+fn reconcile_tagged_finds_a_job_whose_name_lost_the_tag_but_not_one_that_carries_another_tag() {
+    let printer = FakePrinter::new(FakeConfig::default());
+    let lossy = LossyReply { printer: Arc::clone(&printer), lose: "SendDocument", remaining: AtomicU32::new(0) };
+    let backend = WsdBackend::new().with_transport(CutsTheName { inner: lossy }).with_poll_interval(Duration::from_millis(1));
+    backend.add(URL).unwrap();
+    let registry = Registry::new();
+    registry.register(Box::new(backend)).unwrap();
+    let rig = Rig { printer: Arc::clone(&printer), registry, clock: ManualClock::new() };
+    let mut job = print_job(&rig, "Quarterly report");
+    let tag = *job.tag();
+    drive(&mut job, &rig);
+    assert_eq!(printer.job(1).unwrap().name, "Quarterly report", "the printer dropped the tag");
+
+    // The listed name has no tag at all, so the title and the user decide: the job is found, and
+    // `NotFound` (which says that sending again is safe) is not the answer.
+    let found = asker(&printer).reconcile_tagged(URL, "Quarterly report", Some(&tag)).unwrap();
+    assert!(matches!(&found, WsdReconciled::Found(m) if m.name == "Quarterly report"), "{found:?}");
+
+    // A listing that carries a different tag is somebody else's job with the same title.
+    let printer = FakePrinter::new(FakeConfig::default());
+    let other = Rig { printer: Arc::clone(&printer), registry: registry_over(&printer, 0), clock: ManualClock::new() };
+    let mut theirs = print_job(&other, "Quarterly report");
+    let their_tag = *theirs.tag();
+    drive(&mut theirs, &other);
+    assert!(printer.job(1).unwrap().name.contains(" [ref "), "the tag is on the listed name");
+    let asked = asker(&printer);
+    assert_eq!(asked.reconcile_tagged(URL, "Quarterly report", Some(&Tag::random())).unwrap(), WsdReconciled::NotFound);
+    assert!(matches!(asked.reconcile_tagged(URL, "Quarterly report", Some(&their_tag)).unwrap(), WsdReconciled::Found(_)));
 }
 
 #[test]

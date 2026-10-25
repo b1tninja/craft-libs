@@ -849,7 +849,9 @@ impl WsdBackend {
 
     /// [`Self::reconcile`] for a request that carried a [`Tag`]: the job was named with the tag as a
     /// suffix of the title (cut to fit), so that is the name to look for. Without the tag here, a
-    /// tagged job is never found and sending again would print it twice.
+    /// tagged job is never found and sending again would print it twice. A printer that stored the
+    /// name shorter and lost the tag suffix is matched by title (a cut-short title included) and
+    /// user; a listed name that carries a different tag is not a match.
     pub fn reconcile_tagged(&self, printer: &str, job_title: &str, tag: Option<&Tag>) -> Result<Reconciled, PrintError> {
         let entry = self.entry(printer)?;
         let shape = self.config.ticket_shape;
@@ -858,6 +860,7 @@ impl WsdBackend {
         }
         let client = self.client(&entry);
         let name = comparable(&ticket_name(job_title, tag));
+        let title = comparable(job_title);
         // Without a user in the ticket the printer filled in its own, so the user cannot narrow it.
         let user = shape.carries_user().then_some(self.config.user_name.as_str());
         let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
@@ -865,7 +868,12 @@ impl WsdBackend {
         let url = entry.url.as_url();
         let mut found: Vec<(u32, JobMatch)> = Vec::new();
         for row in active.into_iter().chain(history) {
-            if comparable(&row.job_name) != name
+            // The name as sent, or one the printer stored shorter without the tag suffix (see
+            // `tag_support`): then the title decides, as in a listing. A name that carries a tag of
+            // its own is another print's, whatever its title.
+            let listed = comparable(&row.job_name);
+            let untagged_match = Tag::find_in(&listed).is_none() && crate::remote::title_matches(&listed, &title);
+            if (listed != name && !untagged_match)
                 || user.is_some_and(|user| row.user_name != user)
                 || found.iter().any(|(id, _)| *id == row.status.job_id)
             {

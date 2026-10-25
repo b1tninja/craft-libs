@@ -132,7 +132,8 @@ let job = Job { printer: Some("wsd:http://10.0.0.20:5357/print".into()), ..Job::
 let request = SubmitRequest::new(Document::pdf(&pdf_bytes), job).with_consent(craft_print::UserConfirmed::interactive());
 let submitted = registry.submit_job(request)?;            // accepted; not printed yet
 let Some(mut watch) = JobWatch::for_submitted(&submitted, WaitPolicy::default()) else { return Ok(()) };
-// In a UI frame or a worker loop; each tick makes at most one request, and only when one is due:
+// On a worker loop, not a UI frame: each tick makes at most one request, and only when one is due, and a network
+// backend blocks for up to its per-request timeout on it. The UI reads the latest status the worker saw.
 match watch.tick(registry) {
     WatchStep::Pending { next_in } => { /* come back in next_in */ }
     WatchStep::Update(status) => { /* status.state, status.sheet_fraction() */ }
@@ -195,7 +196,8 @@ craft_print::register(Box::new(wsd))?;
 let registry = craft_print::registry();
 let job = Job { printer: Some("wsd:http://10.0.0.20:5357/print".into()), title: "Quarterly report".into(), ..Job::default() };
 let mut print = PrintJob::new(job, BytesSource::new(DocumentFormat::Pdf, pdf_bytes)).with_consent(UserConfirmed::interactive());
-// In a worker loop or a frame loop. Each advance makes at most ONE bounded request, and only when one is due:
+// On a worker loop, not a UI frame. Each advance makes at most ONE bounded request, and only when one is due; a
+// network backend blocks for up to its per-request timeout on it:
 let step = print.advance(registry);          // step.next_in: when to come back; None: nothing happens on its own
 let view = print.snapshot();                 // cheap and immutable: for the UI, every frame
 // view.state, view.simple, view.progress, view.reasons, view.last_error, view.advice, view.attempts(), view.trail()

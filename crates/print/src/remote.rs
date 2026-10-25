@@ -93,8 +93,9 @@ impl RemoteJob {
 pub struct JobFilter {
     /// Only this user's jobs (jobs whose listing has no user pass: the source does not say).
     pub user: Option<String>,
-    /// Only jobs with this title (compared without any tag suffix; a title the printer cut short
-    /// matches if it is a non-empty prefix of this one).
+    /// Only jobs with this title (compared without any tag suffix). A listed title matches when it
+    /// equals this one, or when it is a title the printer cut short: a prefix of this one with at
+    /// least `MIN_CUT_CHARS` (8) characters. A shorter prefix ("R" for "Report") is some other job.
     pub title: Option<String>,
     /// Only jobs created at or after this time (jobs with no creation time pass).
     pub since: Option<SystemTime>,

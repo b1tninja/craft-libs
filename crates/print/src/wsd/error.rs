@@ -140,8 +140,9 @@ impl WsdError {
 
     /// Would trying the same request again later plausibly work? The condition is transient: HTTP
     /// 408, 425, 429 and 5xx except 501 and 505, a connection that failed, timed out or that the
-    /// printer closed, a deadline, and a fault whose code says so. A refused redirect and an
-    /// unclassified transport failure are not. It is exactly
+    /// printer closed, an I/O error that fits no other kind (and any transport kind added later),
+    /// a deadline, and a fault whose code says so. A refused redirect and a peer that did not speak
+    /// HTTP are not. It is exactly
     /// [`ErrorKind::is_retryable`] of [`Self::error_kind`]. Whether sending again is *safe* depends
     /// on the operation too: see [`Self::classify`].
     pub fn is_retryable(&self) -> bool {

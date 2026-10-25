@@ -793,10 +793,11 @@ impl ScanJob {
 
     /// [`Self::continuing`] from a [`ScanJobJournal`]. The job starts `NeedsAttention` if the journal says the
     /// outcome was unknown, or was cut off mid-scan ([`ScanJobJournal::effective_state`]), and stays
-    /// `CheckDeviceFirst`, with or without kept pages; else, with pages kept, `Interrupted`; else, with nothing kept,
-    /// a fresh `Preparing` job (which advises `RetryNow`). The last error, the warnings and the
-    /// attempt count carry over. `settings` is the original request; when its `pages` is `0` and the journal
-    /// knows the wanted count, that count is used, so `--continue DIR` needs no `--pages`. A journal written with a
+    /// `CheckDeviceFirst`, with or without kept pages; else `Interrupted` (`DoNotRetry`) if pages are kept or any
+    /// attempt is on record, so the job reads as the journal did; only a journal that never attempted anything
+    /// gives a fresh `Preparing` job. The last error, the warnings and the attempt count carry over. `settings` is the
+    /// original request; when its `pages` is `0` and the journal knows the wanted count, that count is used, so
+    /// `--continue DIR` needs no `--pages`. A journal written with a
     /// [`ScanJobJournal::version`] newer than [`ScanJobJournal::VERSION`] may mean something this reader cannot
     /// tell, so its outcome is treated as unknown too: `NeedsAttention` and `CheckDeviceFirst`, whatever its state.
     pub fn continuing_from(settings: ScanSettings, config: ScanJobConfig, journal: ScanJobJournal) -> Self {
@@ -813,12 +814,15 @@ impl ScanJob {
         job.last_error = journal.last_error;
         job.warnings = journal.warnings;
         // An unknown outcome is never a fresh job, even with nothing kept: the scanner may have moved.
-        if job.infos.is_empty() && !unknown {
-            return job;
-        }
         if unknown {
             job.state = ScanJobState::NeedsAttention;
             job.advice = RetryAdvice::CheckDeviceFirst;
+        } else if job.infos.is_empty() && job.attempts_total > 0 {
+            // Attempts on record but nothing kept (a cover open before the first page, a failed attempt): not `Preparing`,
+            // which with attempts reads as cut off mid-scan and advises `RetryNow`. A person decides; `begin_attempt`
+            // still starts it, numbered after the earlier attempts.
+            job.state = ScanJobState::Interrupted;
+            job.advice = RetryAdvice::DoNotRetry;
         }
         job
     }

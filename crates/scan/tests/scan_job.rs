@@ -447,10 +447,24 @@ fn a_journal_with_no_pages_keeps_its_attempt_count_error_and_warnings() {
 
     let resumed = ScanJob::continuing_from(request, ScanJobConfig::default(), journal);
     let snap = resumed.snapshot();
-    assert_eq!(snap.state, ScanJobState::Preparing, "nothing was kept, so it starts fresh");
+    assert_eq!(snap.state, ScanJobState::Interrupted, "an attempt is on record: it reads as the journal did, not as a fresh job");
+    assert_eq!(resumed.retry_advice(), RetryAdvice::DoNotRetry, "a person decides; nothing starts by itself");
     assert_eq!(snap.attempts_total, 1, "the next attempt must not reuse number 1");
     assert!(snap.last_error.is_some());
     assert_eq!(snap.warnings, ["kept for the next run"]);
+    // Written again before any attempt, the journal still reads Interrupted, not as cut off mid-scan.
+    assert_eq!(snap.into_journal().effective_state(), ScanJobState::Interrupted);
+}
+
+#[test]
+fn a_journal_that_never_attempted_anything_resumes_as_a_fresh_job() {
+    use craft_scan::job::ScanJobJournal;
+    let request = ScanSettings { pages: 5, ..ScanSettings::default() };
+    let journal: ScanJobJournal = ScanJob::new(request.clone(), ScanJobConfig::default()).snapshot().into_journal();
+    assert_eq!((journal.state, journal.attempts_total), (ScanJobState::Preparing, 0));
+    let resumed = ScanJob::continuing_from(request, ScanJobConfig::default(), journal);
+    assert_eq!(resumed.state(), ScanJobState::Preparing);
+    assert_eq!(resumed.retry_advice(), RetryAdvice::RetryNow);
 }
 
 #[test]

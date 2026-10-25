@@ -129,7 +129,9 @@ never reset the stall rule (that needs a changed reading) and never affect the c
   It is the only background thread this crate starts, and it lives from `with_events` until the last
   clone of the backend is dropped or `shutdown_events()` is called (both unsubscribe, stop and join).
   There is no async runtime, and no other thread: connections are handled one at a time on the
-  listener thread with short deadlines.
+  listener thread with short deadlines. Because one connection is served at a time, a long
+  `EventTuning::connection_deadline` lets one stalled client block every event for that long; the
+  default stays 3 seconds.
 * **A request is accepted only if all of this holds**, checked in this order, cheapest first:
   1. the **source address** is the host of a printer we hold a subscription with (anything else is
      closed without reading a byte);

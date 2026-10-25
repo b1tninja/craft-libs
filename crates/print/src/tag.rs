@@ -89,7 +89,8 @@ pub trait TagSupportExt {
     fn carries(&self) -> bool;
     /// Whether a job listing returns the tag reliably, so that a reconcile can match on it
     /// ([`TagSupport::Carried`]). A [`TagSupport::Partial`] backend carries the tag, but the device
-    /// may rewrite it, so a reconcile falls back to title, user and time.
+    /// may rewrite it, so a reconcile tries the tag first and falls back to title, user and time
+    /// only when no listed job still carries it.
     fn matchable(&self) -> bool;
 }
 

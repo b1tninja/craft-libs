@@ -159,15 +159,11 @@ fn a_lost_send_reply_is_reconciled_and_nothing_is_sent_twice() {
     let sends = || rig.printer.actions().iter().filter(|a| *a == "SendDocument").count();
     assert_eq!(sends(), 2);
 
-    // A printer may list a shorter job name without the tag, so a WS-Print listing is not matched
-    // by the tag alone: the earlier job with the same title is a candidate too, and the caller
-    // (not this crate) decides, newest first.
+    // The tag survived in the printer's listing, so it decides: the earlier job with the same
+    // title is not a candidate and the answer is not ambiguous.
     let found = job.reconcile(&rig.registry).unwrap();
-    let Reconciled::Ambiguous(candidates) = found else { panic!("{found:?}") };
-    assert_eq!(candidates.len(), 2);
-    assert_eq!(job.snapshot().advice, RetryAdvice::CheckDeviceFirst);
-    let remote = candidates[0].clone();
-    assert!(!remote.ours, "nothing is claimed as ours without a tag match");
+    let Reconciled::Found(remote) = found else { panic!("{found:?}") };
+    assert!(remote.ours, "the tag came back, so the job is ours");
     assert_eq!(remote.id.to_string(), format!("wsd:{URL}#2"));
     assert_eq!(remote.user.as_deref(), Some("craft"));
     assert_eq!(remote.created, None, "WS-Print job summaries carry no creation time");

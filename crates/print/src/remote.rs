@@ -239,29 +239,36 @@ impl Reconciled {
     }
 }
 
-/// Decide a [`Reconciled`] from a listing. With a tag the source can match, the jobs carrying our
-/// tag are the answer (and are marked `ours`); otherwise jobs match by title, user and time and are
-/// never `ours`.
+/// Decide a [`Reconciled`] from a listing. With a tag the source can match
+/// ([`TagSupport::Carried`]), the jobs carrying our tag are the answer (and are marked `ours`), and
+/// none of them is `NotFound`. With a tag the device may rewrite ([`TagSupport::Partial`]), a job
+/// that still carries it is the answer too, and a same-title job does not make it ambiguous; only
+/// when none does, jobs match by title, user and time, and are never `ours`. Without a tag, the
+/// title, user and time are all there is.
 pub fn reconcile_jobs(jobs: Vec<RemoteJob>, fingerprint: &Fingerprint, support: TagSupport) -> Reconciled {
-    let by_tag = fingerprint.tag.is_some() && support.matchable();
-    let mut found: Vec<RemoteJob> = if by_tag {
-        jobs.into_iter()
-            .filter(|job| job.tag == fingerprint.tag)
+    let tag = fingerprint.tag.filter(|_| support.carries());
+    let tagged = |jobs: &[RemoteJob]| -> Vec<RemoteJob> {
+        jobs.iter()
+            .filter(|job| tag.is_some() && job.tag == tag)
+            .cloned()
             .map(|mut job| {
                 job.ours = true;
                 job
             })
             .collect()
-    } else {
+    };
+    let mut found = tagged(&jobs);
+    if found.is_empty() && !(tag.is_some() && support.matchable()) {
         let filter = fingerprint.filter(false);
-        jobs.into_iter()
+        found = jobs
+            .into_iter()
             .filter(|job| filter.matches(job))
             .map(|mut job| {
                 job.ours = false;
                 job
             })
-            .collect()
-    };
+            .collect();
+    }
     found.sort_by_key(|job| std::cmp::Reverse(job.created));
     match found.len() {
         0 => Reconciled::NotFound,

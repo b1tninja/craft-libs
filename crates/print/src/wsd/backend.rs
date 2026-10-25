@@ -663,7 +663,9 @@ impl Backend for WsdBackend {
             fingerprint.user = None;
         }
         let support = self.tag_support();
-        let jobs = self.list_jobs(printer_native, &fingerprint.filter(support.matchable()))?;
+        // The tag may have survived or not: list everything the tag could mark and let the
+        // reconcile try it first and the title, user and time after.
+        let jobs = self.list_jobs(printer_native, &fingerprint.filter(support.carries()))?;
         Ok(reconcile_jobs(jobs, &fingerprint, support))
     }
 }

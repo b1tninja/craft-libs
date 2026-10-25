@@ -280,7 +280,7 @@ adapters do in this change.
 
 | Aspect | |
 |---|---|
-| Tag | `JobName` in the print ticket, suffix form (`TagSupport::Partial(TagPlacement::JobNameSuffix)`). The job name is cut to the protocol's 255 characters with the suffix kept, but a printer may store a shorter name and lose the suffix, so a reconcile matches by title (a cut-short title included), user and time rather than by the tag alone; with a same-title job already listed the answer is `Ambiguous`. `list_jobs` still marks `ours` from the suffix when the filter names the tag. |
+| Tag | `JobName` in the print ticket, suffix form (`TagSupport::Partial(TagPlacement::JobNameSuffix)`). The job name is cut to the protocol's 255 characters with the suffix kept, but a printer may store a shorter name and lose the suffix, so a reconcile tries the tag first (a job that still carries it is the answer, whatever else is listed with the same title) and only when no listed job does falls back to title (a cut-short title included), user and time, where a same-title job already listed makes the answer `Ambiguous`. `list_jobs` still marks `ours` from the suffix when the filter names the tag. |
 | Job id | `CreatePrintJob` reply (`JobId`); the neutral id is `wsd:<printer url>#<id>`. |
 | Listing | `GetActiveJobs` and `GetJobHistory` (`JobSummary`: id, state, name, user, counters); `GetJobElements` for one job when a summary lacks the name or user. |
 | User | `JobOriginatingUserName` (the backend sends a fixed name, never the account). |

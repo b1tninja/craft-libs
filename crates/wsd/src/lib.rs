@@ -19,6 +19,7 @@
 
 pub mod addressing;
 pub mod cancel;
+pub mod clock;
 pub mod discovery;
 pub mod envelope;
 pub mod error;

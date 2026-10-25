@@ -22,12 +22,13 @@
 //!   and an `AppSequence` that goes backwards for a known device is ignored.
 
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use roxmltree::Node;
 
 use crate::addressing::EndpointRef;
 use crate::cancel::CancelToken;
+use crate::clock::Instant;
 use crate::envelope::{addressing, new_uuid};
 use crate::error::{Error, Result};
 use crate::ns;

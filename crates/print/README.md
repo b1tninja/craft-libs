@@ -559,7 +559,7 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   WS-Print service of a test server; it is skipped otherwise.
 
 - **macOS/Linux:** CUPS `lpstat`, `lpoptions` and `lp`. Jobs stream through stdin. Exact-size
-  sheets use `fit-to-page=false`; shrink-to-fit uses IPP `print-scaling=auto-fit`. The IPP backend sends `print-scaling` (`auto-fit` for shrink-to-fit, `none` for actual size when the printer's default differs) only to a printer whose `print-scaling-supported` lists it, and then lists `JobHint::Scaling` as honoured; otherwise shrink-to-fit is a warning and the document goes as it is.
+  sheets use `fit-to-page=false`; shrink-to-fit uses IPP `print-scaling=auto-fit`. The IPP backend sends `print-scaling` (`auto-fit` for shrink-to-fit, `none` for actual size when the printer lists it, unless its published default is already `none`) only to a printer whose `print-scaling-supported` lists it, and then lists `JobHint::Scaling` as honoured; otherwise shrink-to-fit is a warning and the document goes as it is.
 - **Windows:** in this process, with no PowerShell, script or other program started, so
   printing works where App Control for Business or AppLocker enforce script rules. Printers
   come from `EnumPrinters` (local queues and `\\server\queue` connections) and the default from

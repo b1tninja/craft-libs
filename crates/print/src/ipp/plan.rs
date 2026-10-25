@@ -70,8 +70,10 @@ pub fn scaling_advertised(printer: &PrinterAttrs) -> bool {
 /// The scaling attribute to send, if any. Nothing is sent to a printer that has not said it takes
 /// `print-scaling`: shrink-to-fit is then a warning (a refusal in strict mode when the printer
 /// publishes a list without the keyword, as for the other settings) and the document goes as it is.
-/// Actual size is the default of the neutral job; `none` is sent only to a printer that lists it
-/// and whose own default is something else.
+/// Actual size is the default of the neutral job: nothing is sent when the printer's published
+/// default is already `none`; otherwise `none` is sent to a printer that lists it, an unpublished
+/// default included (an omitted attribute means the printer's own default, which may resize). A
+/// printer that does not list `none` and has a different default gets a warning, not an attribute.
 fn plan_scaling(scaling: Scaling, strict: bool, printer: &PrinterAttrs, warnings: &mut Vec<String>) -> Result<Option<&'static str>> {
     let keyword = scaling_keyword(scaling);
     match scaling {

@@ -22,9 +22,12 @@ let mut job = PrintJob::new(job, BytesSource::new(DocumentFormat::Pdf, bytes)).w
 loop {
     let step = job.advance(&registry);          // at most ONE bounded request per call
     publish(job.snapshot());                    // a cheap, immutable view for the UI
-    match step.next_in { Some(wait) => sleep_or_return_to_the_frame_loop(wait), None => break }
+    match step.next_in { Some(wait) => sleep(wait), None => break }
 }
 ```
+
+Run this loop on a worker thread, not in a UI frame: a network backend blocks for up to its
+per-request timeout on each `advance`. The UI reads the snapshot the worker published.
 
 * `advance(&Registry)` makes **at most one** request to a backend (a submit, a status read, a
   cancel, a reconcile) and only when one is due; otherwise it says how long until one is

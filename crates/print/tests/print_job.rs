@@ -396,6 +396,23 @@ fn a_printer_side_cancel_ends_the_print_cancelled_without_a_retry() {
 // ---- the tag ----
 
 #[test]
+fn the_title_limit_cuts_the_job_name_whatever_the_tag_placement() {
+    for placement in [TagPlacement::NativeAttribute, TagPlacement::DocumentName, TagPlacement::None] {
+        let fake = FakeBackend::ipp_like("net")
+            .with_printer("p1", true)
+            .with_tag_support(TagSupport::Carried(placement))
+            .with_title_limit(9)
+            .with_status_script(vec![Ok(status(JobState::Completed))]);
+        let rig = rig(&fake);
+        let mut job = print_job(&rig, "net:p1");
+        drive(&mut job, &rig);
+        let submissions = fake.submissions();
+        assert_eq!(submissions.first().map(|s| s.job.title.as_str()), Some("Quarterly"), "{placement:?}");
+        assert_eq!(fake.remote_jobs().last().map(|j| j.title.clone()), Some("Quarterly".into()), "{placement:?}");
+    }
+}
+
+#[test]
 fn the_tag_is_generated_once_and_appended_exactly_once_to_every_attempts_job_name() {
     let fake = FakeBackend::ipp_like("net")
         .with_printer("p1", true)

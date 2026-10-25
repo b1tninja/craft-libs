@@ -239,10 +239,11 @@ impl DateTime {
         if self.ahead { local - offset } else { local + offset }
     }
 
-    /// As a wall-clock time; `None` before the epoch.
+    /// As a wall-clock time; `None` before the epoch, or past what the platform's clock can hold
+    /// (a printer's year 40000 is no reason to panic).
     pub fn to_system_time(&self) -> Option<SystemTime> {
         let secs = u64::try_from(self.unix_seconds()).ok()?;
-        Some(UNIX_EPOCH + Duration::new(secs, u32::from(self.deci) * 100_000_000))
+        UNIX_EPOCH.checked_add(Duration::new(secs, u32::from(self.deci.min(9)) * 100_000_000))
     }
 
     /// The UTC date and time of a wall-clock time, to a tenth of a second (before the epoch is the epoch).
@@ -1234,6 +1235,25 @@ mod tests {
             deep = Value::Collection(vec![("m".into(), vec![deep])]);
         }
         assert_eq!(one(Attribute::new("x", deep)), Err(CodecError::TooDeep));
+    }
+
+    #[test]
+    fn a_date_past_the_platforms_clock_is_none_not_a_panic() {
+        let far = DateTime {
+            year: 65535,
+            month: 12,
+            day: 31,
+            hour: 23,
+            minute: 59,
+            second: 59,
+            deci: 200,
+            ahead: true,
+            offset_hours: 0,
+            offset_minutes: 0,
+        };
+        // Out of range on some platforms and representable on others: either way, no panic.
+        let _ = far.to_system_time();
+        assert!(UNIX_EPOCH.checked_add(Duration::from_secs(u64::MAX)).is_none());
     }
 
     #[test]

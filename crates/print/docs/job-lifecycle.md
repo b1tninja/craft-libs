@@ -97,7 +97,7 @@ fact and the system print queue UI follows the job. For our purposes it is the C
   request and only when one is due, otherwise says when to come back; every wait is measured on an
   injectable `Clock`. It backs off while the status does not change, retries failed polls under a
   `RetryPolicy`, sends one cancel when its `CancelToken` is set, and ends in a `WatchOutcome`
-  (Terminal, Forgotten, NoStatus, TimedOut, Failed). A UI ticks it from its frame loop or its worker.
+  (Terminal, Forgotten, NoStatus, TimedOut, Failed). Tick it on a worker thread, not in a UI frame: a network backend blocks for up to its per-request timeout, and the UI reads the latest status the worker saw.
 * `wait_for_job(registry, job, WaitPolicy)` is the blocking convenience for a CLI, built on `tick`.
   `max_wait` is finite (two minutes by default); when it runs out the job is untouched.
 

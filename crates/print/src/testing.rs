@@ -144,6 +144,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl FakeBackend {
+    /// Cut a job name to [`Self::with_title_limit`], as the fake's printer keeps it.
+    fn cut_title(&self, title: &mut String) {
+        if let Some(max) = self.config.title_max {
+            *title = title.chars().take(max).collect();
+        }
+    }
+
     /// A fake registered as `name` (the registry's id prefix: lowercase letters, digits, `-`, `_`).
     pub fn new(name: &'static str) -> Self {
         let config = Config {
@@ -530,14 +537,14 @@ impl Backend for FakeBackend {
         let placement = self.config.tag_support.placement();
         let tag = request.tag;
         let mut document_name = None;
-        if let Some(tag) = &tag {
-            match placement {
-                TagPlacement::JobNameSuffix => request.job.title = tag.apply_to(&request.job.title, self.config.title_max),
-                TagPlacement::DocumentName => document_name = Some(tag.apply_to(&request.job.title, self.config.title_max)),
-                _ => {}
+        match (&tag, placement) {
+            (Some(tag), TagPlacement::JobNameSuffix) => request.job.title = tag.apply_to(&request.job.title, self.config.title_max),
+            (Some(tag), TagPlacement::DocumentName) => {
+                document_name = Some(tag.apply_to(&request.job.title, self.config.title_max));
+                self.cut_title(&mut request.job.title);
             }
-        } else if let Some(max) = self.config.title_max {
-            request.job.title = request.job.title.chars().take(max).collect();
+            // The tag is not in the name (or there is none), but the name is still cut.
+            _ => self.cut_title(&mut request.job.title),
         }
         let (number, step) = {
             let mut recorded = lock(&self.recorded);

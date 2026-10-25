@@ -107,7 +107,7 @@ pub fn device_view(scanner: &Scanner, status: Option<HandlingStatus>, source_in_
         (IndicatorKey::MultiFeed, flag(|s| s.multiple_feed)),
         (IndicatorKey::Attention, flag(|s| s.attention)),
         // The lamp bit is an error flag: there is no readback, so a clear bit is still only "no error reported".
-        (IndicatorKey::LampError, flag(|s| s.lamp_error)),
+        (IndicatorKey::LampError, reported.map_or(Tri::NotReported, |s| if s.lamp_error { Tri::On } else { Tri::NotReported })),
     ] {
         view = view.with_indicator(Indicator::new(key, state));
     }

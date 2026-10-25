@@ -825,6 +825,19 @@ fn a_wia_status_maps_bit_for_bit() {
 }
 
 #[test]
+fn a_clear_lamp_bit_is_not_reported_never_off() {
+    use craft_job::IndicatorKey as K;
+    // Other bits are set, so the status is a real reading; the lamp bit is an error flag with no readback.
+    let wia = WiaLike { bits: 0x1 | 0x2, fail_listing: false };
+    let mut scanner = wia.scanner_details(WIA_ID).expect("details");
+    scanner.id = format!("wia:{WIA_ID}");
+    let view = device_view(&scanner, wia.status(WIA_ID), None);
+    assert_eq!(state_of(&view, K::FeederPaper), Some(Tri::On));
+    assert_eq!(state_of(&view, K::Jam), Some(Tri::Off), "fault bits are still read as given");
+    assert_eq!(state_of(&view, K::LampError), Some(Tri::NotReported));
+}
+
+#[test]
 fn the_wsd_all_clear_status_is_not_reported_never_off() {
     use craft_job::IndicatorKey as K;
     let mut scanner = common::scanner("wia:{x}", "Network scanner");

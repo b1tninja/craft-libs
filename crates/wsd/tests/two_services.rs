@@ -44,14 +44,14 @@ fn exercise(kind: ServiceKind, other: ServiceKind) {
     let meta = craft_wsd::metadata::transfer_get(&at_device).unwrap();
     assert_eq!(meta.model.as_ref().unwrap().manufacturer, "Example Works");
     assert_eq!(meta.kinds(), [kind]);
-    assert_eq!(meta.endpoint_for(kind).unwrap(), device.service_url());
-    assert!(matches!(meta.endpoint_for(other), Err(Error::NotFound(_))));
+    assert_eq!(meta.endpoint_for(kind, at_device.endpoint().host()).unwrap(), device.service_url());
+    assert!(matches!(meta.endpoint_for(other, at_device.endpoint().host()), Err(Error::NotFound(_))));
     assert_eq!(meta.host.as_ref().unwrap().types.len(), 2);
     let by_dialect = craft_wsd::metadata::get_metadata(&at_device, Some(craft_wsd::metadata::DIALECT_RELATIONSHIP)).unwrap();
     assert_eq!(by_dialect.hosted.len(), 1);
 
     // 3. Call a service operation with the descriptor's action table.
-    let svc = at_device.at(meta.endpoint_for(kind).unwrap());
+    let svc = at_device.at(meta.endpoint_for(kind, at_device.endpoint().host()).unwrap());
     let op = if kind == ServiceKind::Print { "GetPrinterElements" } else { "GetScannerElements" };
     let handled =
         svc.call(&d.call(op, format!("<{p}:{op}Request/>", p = d.prefix)), |n| Ok::<_, Error>(xml::child_text(n, d.namespace, "Handled"))).unwrap();

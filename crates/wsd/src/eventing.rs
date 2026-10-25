@@ -343,9 +343,10 @@ pub fn subscribe_with<T: Transport, X>(
 }
 
 /// A manager-addressed call: reference parameters become headers, and the manager's address (which
-/// must pass the connection policy) is the target.
+/// must pass the connection policy) is the target. The subscribe reply came from the client's own
+/// endpoint, so a manager at a loopback address is refused unless that endpoint is loopback too.
 fn manager_call<'a, T: Transport>(client: &'a SoapClient<T>, sub: &Subscription) -> Result<SoapClient<&'a T>> {
-    Ok(client.at(sub.manager.url()?))
+    Ok(client.at(sub.manager.url_from(client.endpoint().host())?))
 }
 
 /// Renew; the granted expiry if the device states one.
@@ -731,6 +732,48 @@ mod tests {
         // A manager at an address we may not talk to still parses, but cannot be used.
         let public = read(&ok.replace("http://127.0.0.1:5357/svc", "http://8.8.8.8/svc")).unwrap();
         assert!(matches!(public.manager.url(), Err(Error::Policy(_))));
+    }
+
+    #[test]
+    fn a_loopback_manager_from_a_device_on_the_network_is_never_posted_to() {
+        use crate::TransportKind;
+        use crate::policy::DeviceUrl;
+        use crate::transport::{Request, Response};
+        use std::cell::Cell;
+
+        /// Counts posts and refuses them, so a call that gets through the policy ends in a
+        /// transport error and one that does not ends in a policy error.
+        struct Counting(Cell<usize>);
+        impl Transport for Counting {
+            fn post(&self, _: &DeviceUrl, _: Request) -> Result<Response, Error> {
+                self.0.set(self.0.get() + 1);
+                Err(Error::transport(TransportKind::Refused, "no network in tests"))
+            }
+        }
+
+        let manager = |addr: &str| {
+            let xml = format!(
+                "<wse:SubscribeResponse xmlns:wse=\"{}\" xmlns:wsa=\"{}\"><wse:SubscriptionManager><wsa:Address>{addr}</wsa:Address></wse:SubscriptionManager></wse:SubscribeResponse>",
+                ns::WSE,
+                ns::WSA
+            );
+            parse_subscribe_response(xml::parse(&xml).unwrap().root_element()).unwrap()
+        };
+        let sub = manager("http://127.0.0.1:5357/m");
+        let t = Counting(Cell::new(0));
+        // The device is on the network: the loopback manager it named is refused before any post.
+        let lan = SoapClient::new(&t, DeviceUrl::parse("http://192.168.1.20/svc").unwrap());
+        assert!(matches!(renew(&lan, &sub, None), Err(Error::Policy(_))));
+        assert!(matches!(get_status(&lan, &sub), Err(Error::Policy(_))));
+        assert!(matches!(unsubscribe(&lan, &sub), Err(Error::Policy(_))));
+        assert_eq!(t.0.get(), 0);
+        // A device on this machine may name a loopback manager; a LAN manager is fine from the LAN.
+        let local = SoapClient::new(&t, DeviceUrl::parse("http://127.0.0.1:3911/svc").unwrap());
+        assert!(matches!(renew(&local, &sub, None), Err(Error::Transport { .. })));
+        assert_eq!(t.0.get(), 1);
+        let lan_sub = manager("http://192.168.1.20:5357/m");
+        assert!(matches!(renew(&lan, &lan_sub, None), Err(Error::Transport { .. })));
+        assert_eq!(t.0.get(), 2);
     }
 
     #[test]

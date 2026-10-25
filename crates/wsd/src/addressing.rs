@@ -5,6 +5,8 @@
 //! Parameters that are not plain text elements are dropped, because the clients here only ever
 //! echo simple identifiers (`wse:Identifier`).
 
+use std::net::IpAddr;
+
 use roxmltree::Node;
 
 use crate::error::{Error, Result};
@@ -89,8 +91,23 @@ impl EndpointRef {
     }
 
     /// The address as a policy-checked device URL: numeric private-network `http` only.
+    ///
+    /// This knows nothing of who sent the reference. For an address read from a device's reply use
+    /// [`Self::url_from`], which also refuses a loopback address from a non-loopback sender.
     pub fn url(&self) -> Result<DeviceUrl> {
         DeviceUrl::parse_as(&self.address, "endpoint")
+    }
+
+    /// [`Self::url`] for a reference that arrived in a message from `from`: a loopback address is
+    /// kept only when `from` is loopback too, the rule [`crate::discovery::Target::device_urls`]
+    /// applies, so a device cannot aim the caller at a service on this machine.
+    pub fn url_from(&self, from: IpAddr) -> Result<DeviceUrl> {
+        let url = self.url()?;
+        if url.reachable_from(from) {
+            Ok(url)
+        } else {
+            Err(Error::Policy(format!("endpoint address {url} is this machine, but the reply came from {from}", url = url.as_url())))
+        }
     }
 
     /// The element `name` (a prefixed name such as `wse:NotifyTo`; its prefix must be declared by
@@ -136,6 +153,12 @@ mod tests {
         assert_eq!(e.parameter("urn:x", "Ctx"), Some("c1"));
         assert_eq!(e.parameter(WSE, "Nope"), None);
         assert!(e.url().is_ok());
+        // A loopback address is usable from a loopback sender only.
+        assert!(e.url_from(IpAddr::from([127, 0, 0, 1])).is_ok());
+        assert!(e.url_from("::ffff:127.0.0.1".parse().unwrap()).is_ok());
+        assert!(matches!(e.url_from(IpAddr::from([192, 168, 1, 9])), Err(Error::Policy(_))));
+        let lan = parse("<wsa:Address>http://192.168.1.20/m</wsa:Address>").unwrap();
+        assert!(lan.url_from(IpAddr::from([192, 168, 1, 9])).is_ok());
         // The 2004/08 spelling and the final WS-Addressing namespace both read.
         let props =
             parse("<wsa:Address>urn:a</wsa:Address><wsa:ReferenceProperties><wse:Identifier>p</wse:Identifier></wsa:ReferenceProperties>").unwrap();

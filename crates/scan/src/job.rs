@@ -879,6 +879,8 @@ impl ScanJob {
         {
             self.forced_source = None;
             self.expected = expected_from(&self.settings);
+            // Starting over is a person's decision, with or without kept pages: it gets a fresh retry budget.
+            self.stalled = 0;
         }
         self.begin(at, how)
     }
@@ -901,6 +903,11 @@ impl ScanJob {
             },
             _ => None,
         };
+        // A start from `Failed` is always a person's (no automatic retry follows it): a fresh retry budget. An automatic
+        // retry also comes through here, from `Interrupted`, and keeps its count.
+        if self.state == ScanJobState::Terminal(Outcome::Failed) {
+            self.stalled = 0;
+        }
         let restart = how == Continuation::Restart;
         if restart && !self.infos.is_empty() {
             self.pages.clear();

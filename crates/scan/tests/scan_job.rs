@@ -547,6 +547,35 @@ fn a_failure_in_the_middle_of_a_page_is_unknown_even_with_nothing_kept() {
 }
 
 #[test]
+fn a_start_over_by_a_person_gets_a_fresh_retry_budget_even_with_nothing_kept() {
+    let policy = RetryPolicy { max_attempts: 3, base: Duration::from_millis(100), jitter_percent: 0, ..RetryPolicy::default() };
+    let first_retry = RetryAdvice::RetryAfter(Duration::from_millis(100));
+    // The budget is used up and the job is Failed; the person starts it again by hand.
+    let mut job = ScanJob::new(feeder_request(1), ScanJobConfig::default().with_retry(policy));
+    for n in 1..=3 {
+        job.begin_attempt(t(n)).expect("attempt");
+        job.finish_attempt(Err(native(InterruptKind::Busy)), t(n)).expect("finish");
+    }
+    assert_eq!(job.state(), ScanJobState::Terminal(Outcome::Failed));
+    job.begin_attempt(t(10)).expect("manual start");
+    job.finish_attempt(Err(native(InterruptKind::Busy)), t(10)).expect("finish");
+    assert_eq!(job.state(), ScanJobState::Interrupted, "a busy scanner is retried again, not given up on at once");
+    assert_eq!(job.retry_advice(), first_retry);
+
+    // Two failures on record, then the person names Restart: the count starts again.
+    let mut job = ScanJob::new(feeder_request(1), ScanJobConfig::default().with_retry(policy));
+    for n in 1..=2 {
+        job.begin_attempt(t(n)).expect("attempt");
+        job.finish_attempt(Err(native(InterruptKind::Busy)), t(n)).expect("finish");
+    }
+    assert_eq!(job.state(), ScanJobState::Interrupted);
+    job.begin_attempt_with(t(10), Continuation::Restart).expect("restart");
+    job.finish_attempt(Err(native(InterruptKind::Busy)), t(10)).expect("finish");
+    assert_eq!(job.state(), ScanJobState::Interrupted);
+    assert_eq!(job.retry_advice(), first_retry);
+}
+
+#[test]
 fn an_unreachable_scanner_before_any_page_is_safe_to_retry_within_the_budget() {
     let policy = RetryPolicy { max_attempts: 3, base: Duration::from_millis(100), jitter_percent: 0, ..RetryPolicy::default() };
     let mut job = ScanJob::new(feeder_request(1), ScanJobConfig::default().with_retry(policy));

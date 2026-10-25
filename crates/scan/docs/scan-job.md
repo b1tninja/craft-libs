@@ -134,10 +134,12 @@ stack out and put it back.
 * **`Append`**: keep the pages, ask for what is missing (`expected - kept`; the whole feeder when the total is
   unknown). The person has put the remaining sheets in. `NothingLeft` if the wanted count is already reached
   (use `finish`).
-* **`Restart`**: discard the kept pages and the retry count, and scan the whole job again. Pages already
+* **`Restart`**: discard the kept pages (if any) and the retry count, and scan the whole job again. Pages already
   `take_pages()`d are the app's.
-* With nothing kept, the two are the same, and `begin_attempt` (no argument) is enough. With pages kept,
-  `begin_attempt` returns `ContinuationRequired`.
+* With nothing kept, the two differ only in the retry count, which `Restart` resets; so does any start from
+  `Failed`, which is always a person's. An automatic retry (`begin_attempt` from `Interrupted`) keeps it. With
+  nothing kept, `begin_attempt` (no argument) is enough. With pages kept, `begin_attempt` returns
+  `ContinuationRequired`.
 * **`Resume`** (continue after the last good page without feeding again) does not exist. It would need a backend
   that can say it can; none can. `Continuation` is `#[non_exhaustive]` so it can be added.
 

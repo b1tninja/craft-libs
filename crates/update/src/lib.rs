@@ -6,6 +6,7 @@ pub mod app;
 pub mod desktop_entry;
 pub mod detect;
 pub mod distro;
+mod folders;
 pub mod http;
 pub mod install;
 pub mod manifest;
@@ -28,6 +29,8 @@ pub mod version;
 
 #[cfg(feature = "egui")]
 pub mod dialog;
+#[cfg(feature = "egui")]
+pub mod updater;
 
 pub use app::App;
 pub use http::{Http, Stop};

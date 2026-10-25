@@ -476,7 +476,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     let (content, _) = ui.allocate_exact_size(vec2(ui.available_width(), total), Sense::hover());
                     self.column_groups(ui, column, &heights, content, body);
                 });
-            self.column_scroll.insert(first.clone(), scrolled.state.offset.y);
+            // Match the drawn content, including rubber-band displacement in egui 0.37.
+            self.column_scroll.insert(first.clone(), scrolled.state.unclamped_offset().y);
         } else {
             self.column_groups(ui, column, &heights, body, body);
         }
@@ -594,7 +595,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             let response = ui.interact(button, self.id.with(("column-collapse", Some(first))), Sense::click());
             self.register_interaction(ui.ctx(), response.id);
             let button_label = if column.iconic { &self.style.expand_column_label } else { &self.style.collapse_column_label };
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), button_label));
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), button_label));
             // The arrows point where the column goes: towards the window edge when it collapses.
             let glyph = if (edge == Edge::Left) != column.iconic { "«" } else { "»" };
             let color = if response.hovered() || response.has_focus() { self.style.text } else { self.style.inactive_text };
@@ -610,7 +611,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let response = ui.interact(grip, self.id.with(("column-bar", Some(first))), Sense::click_and_drag());
         let response = if movable { response.on_hover_cursor(egui::CursorIcon::Grab) } else { response };
         self.register_interaction(ui.ctx(), response.id);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.move_column_label));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &self.style.move_column_label));
         if movable && response.drag_started() {
             let origin = ui.input(|i| i.pointer.press_origin()).or_else(|| ui.ctx().pointer_interact_pos()).unwrap_or(grip.center());
             let drag = GroupDrag {

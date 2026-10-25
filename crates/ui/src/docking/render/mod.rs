@@ -262,9 +262,8 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     };
                     let response = ui.interact(collapse, self.id.with(("collapse", &entry.panel)), Sense::click());
                     self.register_interaction(ui.ctx(), response.id);
-                    response.widget_info(|| {
-                        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), entry.open, self.label_of(&entry.panel))
-                    });
+                    response
+                        .widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), entry.open, self.label_of(&entry.panel)));
                     ui.painter().with_clip_rect(collapse).text(
                         collapse.center(),
                         egui::Align2::CENTER_CENTER,
@@ -406,13 +405,20 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         }
     }
 
+    /// Draw a panel body into `rect`.
+    ///
+    /// An unusable rect returns without painting. Otherwise the body runs in a clipped child scope,
+    /// and its minimum height is recorded against `rect.height()` for floating-size policy. Any
+    /// pointer press inside the body focuses the panel, including secondary and middle presses; with
+    /// native windows that press origin is stored for body-drag routing and the panel is recorded as
+    /// the pointed body. The panel's content map keeps the sizing entry for later frames.
     pub(super) fn contents(&mut self, ui: &mut Ui, panel: &P, rect: Rect) {
         if !crate::docking::targets::usable(rect) {
             return;
         }
         ui.painter().rect_filled(rect, 0.0, self.style.background);
         let mut child =
-            ui.new_child(UiBuilder::new().id(self.id.with(("body", panel))).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
+            ui.new_child(UiBuilder::new().scope_id(self.id.with(("body", panel))).max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
         self.content.body(&mut child, panel);
         let at = self.contents.get(panel).copied();

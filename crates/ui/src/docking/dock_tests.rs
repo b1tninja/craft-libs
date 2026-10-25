@@ -100,6 +100,8 @@ impl Driver {
         })
     }
 
+    /// Run three empty frames so floating areas finish their sizing pass, then
+    /// return the driver.
     fn start(mut driver: Self) -> Self {
         // Floating areas settle after their sizing pass.
         for _ in 0..3 {
@@ -108,6 +110,9 @@ impl Driver {
         driver
     }
 
+    /// One 800×600 frame with injected events and the driver's focus/right-to-left settings.
+    /// Renders the dock in a 600×600 scope, clears texture deltas, records shapes, and returns
+    /// `DockOutput`.
     fn frame(&mut self, events: Vec<Event>) -> DockOutput<u32> {
         let mut output = DockOutput::default();
         self.time += 1.0 / 60.0;
@@ -123,7 +128,7 @@ impl Driver {
             let mut style = DockStyle::from_ui(ui);
             style.right_to_left = rtl;
             ui.scope_builder(UiBuilder::new().max_rect(Rect::from_min_size(Pos2::ZERO, vec2(600.0, 600.0))), |ui| {
-                output = DockArea::new(Id::new(AREA)).show_content(ui, layout, &style, content);
+                output = DockArea::new(Id::unique(AREA)).show_content(ui, layout, &style, content);
             });
         });
         full.textures_delta.clear();
@@ -141,12 +146,15 @@ impl Driver {
         output
     }
 
+    /// Read the response rectangle for the dock widget named `name` and scoped to
+    /// `panel`.
     fn rect(&self, name: &str, panel: u32) -> Rect {
-        self.ctx.read_response(Id::new(AREA).with((name, Some(&panel)))).unwrap().rect
+        self.ctx.read_response(Id::unique(AREA).with((name, Some(&panel)))).unwrap().rect
     }
 
+    /// Read the response rectangle for `panel`'s tab.
     fn tab(&self, panel: u32) -> Rect {
-        self.ctx.read_response(Id::new(AREA).with(("tab", &panel))).unwrap().rect
+        self.ctx.read_response(Id::unique(AREA).with(("tab", &panel))).unwrap().rect
     }
 
     fn hold(&mut self, from: Pos2, to: Pos2) -> DockOutput<u32> {
@@ -361,7 +369,13 @@ fn in_a_scrolled_column_a_stack_previews_the_rect_at_the_scroll_offset() {
     let over = d.tab(2).center();
     d.step(vec![
         Event::PointerMoved(over),
-        Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -200.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE },
+        Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -200.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+            source: egui::MouseWheelSource::Unknown,
+        },
     ]);
     d.wait();
     let group = d.tab(3);
@@ -487,6 +501,8 @@ fn tab_dragged_to_the_window_edge_without_a_dock_makes_a_dock_of_that_panel() {
 }
 
 #[test]
+/// A group dropped on a column's tab strip joins as a tab, on a group body
+/// appends as its last tab, and in the empty space below starts a new group.
 fn a_column_takes_groups_anywhere_in_it_and_as_tabs() {
     let windows = [(5, [400.0, 40.0, 150.0, 120.0]), (6, [400.0, 220.0, 150.0, 120.0]), (7, [400.0, 400.0, 150.0, 120.0])];
     let mut d = Driver::new(with_floating(docked(Side::Start, &[&[&[2], &[3]]]), &windows));
@@ -509,6 +525,8 @@ fn a_column_takes_groups_anywhere_in_it_and_as_tabs() {
 }
 
 #[test]
+/// A column of five groups with a 160 pt minimum is taller than the window; scrolling up over its
+/// tab strip moves the last tab more than 100 pt into view.
 fn a_column_too_tall_for_the_window_scrolls() {
     let groups: [&[u32]; 5] = [&[2], &[3], &[4], &[5], &[6]];
     let mut d = Driver::with(docked(Side::Start, &[&groups]), TestContent { min_height: 160.0 }, false);
@@ -519,6 +537,7 @@ fn a_column_too_tall_for_the_window_scrolls() {
         d.step(vec![
             Event::PointerMoved(over),
             Event::MouseWheel {
+                source: egui::MouseWheelSource::Unknown,
                 unit: egui::MouseWheelUnit::Point,
                 delta: vec2(0.0, -200.0),
                 phase: egui::TouchPhase::Move,
@@ -532,6 +551,8 @@ fn a_column_too_tall_for_the_window_scrolls() {
 }
 
 #[test]
+/// Dragging a column bar to the window edge moves the column first; dragging it
+/// away from the dock floats every group in the column and shows a follow ghost.
 fn column_bar_drag_moves_the_column_and_away_from_a_dock_floats_its_groups() {
     let mut d = Driver::new(docked(Side::Start, &[&[&[2], &[3]], &[&[5]]]));
     // The second column to the window edge: it becomes the first.
@@ -559,6 +580,8 @@ fn column_bar_drag_moves_the_column_and_away_from_a_dock_floats_its_groups() {
 }
 
 #[test]
+/// Escape, focus loss, pointer exit and `cancel_drag` each end a held column drag without emitting
+/// actions or a group drop; the release changes nothing and the layout equals the original.
 fn column_drag_escape_focus_loss_pointer_exit_and_cancel_drag_leave_the_layout_unchanged() {
     let layout = docked(Side::Start, &[&[&[2], &[3]], &[&[5]]]);
     for case in ["escape", "focus", "exit", "cancel"] {
@@ -576,7 +599,7 @@ fn column_drag_escape_focus_loss_pointer_exit_and_cancel_drag_leave_the_layout_u
             }
             "exit" => d.step(vec![Event::PointerGone]),
             _ => {
-                cancel_drag::<u32>(&d.ctx, Id::new(AREA));
+                cancel_drag::<u32>(&d.ctx, Id::unique(AREA));
                 d.step(vec![Event::PointerMoved(target + vec2(1.0, 0.0))])
             }
         };
@@ -584,7 +607,7 @@ fn column_drag_escape_focus_loss_pointer_exit_and_cancel_drag_leave_the_layout_u
         let out = d.step(vec![Event::PointerMoved(target), button(target, false)]);
         assert!(out.actions.is_empty() && out.group_drag.is_none(), "{case}: {out:?}");
         assert_eq!(d.layout, layout, "{case}");
-        assert!(!is_dragging::<u32>(&d.ctx, Id::new(AREA)), "{case}");
+        assert!(!is_dragging::<u32>(&d.ctx, Id::unique(AREA)), "{case}");
     }
 }
 
@@ -688,6 +711,8 @@ fn right_to_left_mirrors_docks_their_edges_and_new_docks() {
 }
 
 #[test]
+/// Dropping a column's first tab just past its own edge anchors it after the
+/// other column's panel; a panel alone in its column stays in place.
 fn a_column_s_first_tab_dropped_on_its_own_column_edge_anchors_on_another_panel() {
     // Two columns, 0..240 and 240..480; the dragged tab is the first panel of the last one.
     let wide = |columns: &[&[&[u32]]]| {
@@ -711,6 +736,9 @@ fn a_column_s_first_tab_dropped_on_its_own_column_edge_anchors_on_another_panel(
 }
 
 #[test]
+/// A driver that never reported window focus can still drag tab 3 to a column edge (moving it after
+/// panel 4). When focus arrives and is then lost mid-drag, releasing emits no action and restores the
+/// original layout.
 fn a_window_that_never_reported_focus_drags_tabs_and_losing_focus_cancels_a_drag() {
     let mut layout = docked(Side::Start, &[&[&[2]], &[&[3, 4]]]);
     if let Some(Node::Split { size, .. }) = &mut layout.root {
@@ -726,13 +754,13 @@ fn a_window_that_never_reported_focus_drags_tabs_and_losing_focus_cancels_a_drag
     d.hold(d.tab(3).center(), to);
     d.focused = true;
     d.step(vec![Event::WindowFocused(true)]);
-    assert!(is_dragging::<u32>(&d.ctx, Id::new(AREA)));
+    assert!(is_dragging::<u32>(&d.ctx, Id::unique(AREA)));
     d.focused = false;
     d.step(vec![Event::WindowFocused(false)]);
     let out = d.step(vec![button(to, false)]);
     assert!(out.actions.is_empty(), "{out:?}");
     assert_eq!(d.layout, layout);
-    assert!(!is_dragging::<u32>(&d.ctx, Id::new(AREA)));
+    assert!(!is_dragging::<u32>(&d.ctx, Id::unique(AREA)));
 }
 
 #[test]

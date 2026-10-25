@@ -75,7 +75,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static, C: DockContent<P>> Do
             ctx: Context::default(),
             layout,
             content,
-            id: Id::new("dock-driver"),
+            id: Id::unique("dock-driver"),
             screen,
             area: screen,
             focused: true,

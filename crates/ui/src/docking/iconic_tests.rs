@@ -103,6 +103,9 @@ fn widening_an_iconic_column_shows_labels() {
 }
 
 #[test]
+/// An icon click activates its panel and opens a canvas-side flyout; another
+/// icon switches it, and the same icon closes it even with auto-collapse off. Escape
+/// and outside presses close it only with auto-collapse on; a programmatic raise opens it.
 fn icon_click_opens_a_flyout_on_the_canvas_side_and_auto_collapse_closes_it() {
     let mut d = DockDriver::new(docked(&[&[1, 2], &[3]], true), Content);
     let icon = hit(&d, Hit::Icon(2)).center();
@@ -160,18 +163,20 @@ fn icon_click_opens_a_flyout_on_the_canvas_side_and_auto_collapse_closes_it() {
 }
 
 #[test]
+/// Choosing Auto-Collapse Iconic Panels from the iconic column's menu emits a
+/// `DockEvent::ToggleAutoCollapse` event rather than mutating the layout directly.
 fn auto_collapse_toggle_is_a_column_menu_event() {
     use egui_kittest::{Harness, kittest::Queryable};
     let layout = docked(&[&[1, 2]], true);
     let mut h = Harness::builder().with_size(vec2(800.0, 600.0)).build_ui_state(
         |ui, events: &mut Vec<DockEvent<u32>>| {
-            let out = DockArea::new(egui::Id::new("menu")).show_content(ui, &layout, &DockStyle::from_ui(ui), &mut Content);
+            let out = DockArea::new(egui::Id::unique("menu")).show_content(ui, &layout, &DockStyle::from_ui(ui), &mut Content);
             events.extend(out.events);
         },
         Vec::new(),
     );
     h.run_steps(2);
-    let bar = h.ctx.read_response(egui::Id::new("menu").with(("column-bar", Some(&1u32)))).unwrap().rect.center();
+    let bar = h.ctx.read_response(egui::Id::unique("menu").with(("column-bar", Some(&1u32)))).unwrap().rect.center();
     h.input_mut().events.extend([
         egui::Event::PointerMoved(bar),
         egui::Event::PointerButton { pos: bar, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE },

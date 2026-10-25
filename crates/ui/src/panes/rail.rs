@@ -9,8 +9,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 use egui::{
-    Align, EventFilter, Frame, Id, ImageSource, Key, Layout, Margin, Modifiers, Rect, Response, Sense, Stroke, StrokeKind, Ui, WidgetInfo,
-    WidgetType, vec2,
+    Align, EventFilter, Frame, Id, ImageSource, Key, Layout, Margin, Modifiers, Rect, Response, Role, Sense, Stroke, StrokeKind, Ui, WidgetInfo, vec2,
 };
 
 use super::Edge;
@@ -102,6 +101,7 @@ pub struct Rail {
 }
 
 impl Rail {
+    /// Creates a rail with a stable global ID; use [`Id::unique`] for string or tuple keys.
     pub fn new(id: impl Into<Id>) -> Self {
         Self { id: id.into(), edge: Edge::End, rtl: false, width: RAIL_WIDTH, button: RAIL_BUTTON, frame: None }
     }
@@ -212,7 +212,7 @@ impl Rail {
                 .add_enabled_ui(item.enabled, |ui| {
                     let (rect, _) = ui.allocate_exact_size(vec2(self.button, self.button), Sense::hover());
                     let response = ui.interact(rect, id, Sense::click());
-                    response.widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), selected, &item.label));
+                    response.widget_info(|| WidgetInfo::selected(Role::Button, ui.is_enabled(), selected, &item.label));
                     if item.marker
                         && !selected
                         && let Some(label) = &item.marker_label

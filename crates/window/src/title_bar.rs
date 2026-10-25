@@ -81,7 +81,7 @@ pub fn double_click_command(action: DoubleClick, maximized: bool) -> Option<egui
 /// Returns the empty area's response, for an accessible label or a tooltip.
 pub fn empty_area(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
     prefetch();
-    let resp = ui.interact(rect, ui.id().with("title_bar_empty"), egui::Sense::click());
+    let resp = ui.interact(rect, ui.scope_id().with("title_bar_empty"), egui::Sense::click());
     let covered = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)).and_then(|p| ui.ctx().layer_id_at(p));
     let covered = covered.is_some_and(|top| covers(top, ui.layer_id(), resp.hovered()));
     let pass = ui.ctx().cumulative_pass_nr();
@@ -123,7 +123,7 @@ fn covers(top: egui::LayerId, strip: egui::LayerId, empty_hovered: bool) -> bool
 }
 
 fn movable_id() -> egui::Id {
-    egui::Id::new("title_bar_window_movable")
+    egui::Id::unique("title_bar_window_movable")
 }
 
 /// Whether AppKit may move the window when a drag starts in the title-bar band: false while the
@@ -227,7 +227,7 @@ mod tests {
                 empty_area(ui, Rect::from_min_size(Pos2::ZERO, vec2(400.0, 28.0)));
                 let _ = ui.put(Rect::from_min_max(pos2(10.0, 4.0), pos2(60.0, 24.0)), egui::Button::new("Menu"));
                 for (id, order, x) in [("float", Order::Middle, 100.0), ("overlay", Order::Foreground, 200.0)] {
-                    egui::Area::new(egui::Id::new(id)).order(order).fixed_pos(pos2(x, 0.0)).show(ui.ctx(), |ui| {
+                    egui::Area::new(egui::Id::unique(id)).order(order).fixed_pos(pos2(x, 0.0)).show(ui.ctx(), |ui| {
                         ui.allocate_exact_size(vec2(80.0, 28.0), egui::Sense::hover());
                     });
                 }

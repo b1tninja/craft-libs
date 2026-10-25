@@ -30,7 +30,7 @@ impl PaneContent<Pane> for MyPanes<'_> {
 }
 
 // Every frame, after the top and bottom bars and before the CentralPanel:
-let out = PaneHost::new("task-panes")
+let out = PaneHost::new(egui::Id::unique("task-panes"))
     .rtl(ui_is_rtl)
     .policy(SidePolicy::Columns)
     .show(ui, &open_panes, |pane| prefs.pane_state(pane), &mut MyPanes { app });
@@ -89,7 +89,7 @@ let items = [
     RailItem::new(Pane::Bookmarks, icons.source("bookmark"), tr("Bookmarks")).enabled(has_outline),
 ];
 // After the top and bottom bars, before PaneHost: the rail is the outermost panel on its edge.
-let rail = Rail::new("rail").edge(Edge::End).rtl(ui_is_rtl).show(ui, &items, app.pane.as_ref(), |ui| {
+let rail = Rail::new(egui::Id::unique("rail")).edge(Edge::End).rtl(ui_is_rtl).show(ui, &items, app.pane.as_ref(), |ui| {
     page_navigation(ui); // the foot: below the items, always visible; may draw nothing
 });
 match rail.request {
@@ -101,7 +101,7 @@ match rail.request {
 // and a `default_state` docked at the rail's edge.
 // Apps whose panes draw their own headers return false from `title_bar`.
 let open: Vec<Pane> = app.pane.into_iter().collect();
-let out = PaneHost::new("task-panes").rtl(ui_is_rtl).policy(SidePolicy::OneSlot).show(ui, &open, |_| None, &mut MyPanes { app });
+let out = PaneHost::new(egui::Id::unique("task-panes")).rtl(ui_is_rtl).policy(SidePolicy::OneSlot).show(ui, &open, |_| None, &mut MyPanes { app });
 egui::CentralPanel::default().show(ui, |ui| document(ui));
 ```
 
@@ -126,7 +126,7 @@ enabled one:
 let enabled = || items.iter().filter(|item| item.enabled);
 let target = enabled().find(|item| Some(&item.pane) == app.pane.as_ref()).or_else(|| enabled().next());
 if let Some(item) = target {
-    ctx.memory_mut(|m| m.request_focus(Rail::new("rail").item_id(&item.pane)));
+    ctx.memory_mut(|m| m.request_focus(Rail::new(egui::Id::unique("rail")).item_id(&item.pane)));
 }
 ```
 

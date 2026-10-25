@@ -39,6 +39,10 @@ struct Content {
     pressed: Vec<(u32, PointerButton)>,
     /// A panel body saw hovered or dropped files.
     saw_files: bool,
+    /// Input visible to a selected panel, including native control events while blocked.
+    input_probe: Option<u32>,
+    events: Vec<Event>,
+    raw_events: Vec<Event>,
     /// The panel with an app drag source, and where it was drawn.
     source: Option<u32>,
     /// How the source marks its drag as one that carries something.
@@ -47,8 +51,14 @@ struct Content {
     /// The source's drag so far, and how often its drag stopped.
     source_delta: egui::Vec2,
     source_stopped: usize,
+    /// How often the source's body saw a primary-button release in its input.
+    source_releases: usize,
     /// The source asks egui to run its window's pass again, once, the next time it draws.
     discard_next: bool,
+    /// The source asks for that many more passes, drawn or not, before the frame completes.
+    discard_passes: usize,
+    /// A drop site asks for its window's pass again when it reads a release.
+    discard_drop: bool,
     /// Panels whose bodies are app drop sites: where each saw the pointer, and where a release
     /// came with the pointer inside.
     drop_sites: Vec<u32>,
@@ -75,8 +85,14 @@ enum Marks {
 }
 
 impl DockContent<u32> for Content {
+    /// Test body that probes native input: records events/raw events, text focus and typing, button
+    /// focus, a click counter, drag source state, drop sites and payloads, file hover/drop, and
+    /// primary/secondary presses inside the body.
     fn body(&mut self, ui: &mut egui::Ui, panel: &u32) {
         ui.label(format!("panel {panel}"));
+        if self.input_probe == Some(*panel) {
+            (self.events, self.raw_events) = ui.input(|i| (i.events.clone(), i.raw.events.clone()));
+        }
         if self.text == Some(*panel) {
             let field = ui.text_edit_singleline(&mut self.typed);
             if std::mem::take(&mut self.focus_text) {
@@ -99,7 +115,13 @@ impl DockContent<u32> for Content {
             self.source_rect = Some(response.rect);
             self.source_delta += response.drag_delta();
             self.source_stopped += usize::from(response.drag_stopped());
-            if std::mem::take(&mut self.discard_next) {
+            self.source_releases += usize::from(ui.input(|i| i.pointer.primary_released()));
+            let discard = std::mem::take(&mut self.discard_next);
+            let more = self.discard_passes > 0;
+            if more {
+                self.discard_passes -= 1;
+            }
+            if discard || more {
                 ui.ctx().request_discard("the source's pass runs twice");
             }
             match self.marks {
@@ -117,6 +139,9 @@ impl DockContent<u32> for Content {
                 self.drops.push((*panel, pos));
                 if egui::DragAndDrop::has_payload_of_type::<u32>(ui.ctx()) {
                     self.payload_drops.push(*panel);
+                }
+                if std::mem::take(&mut self.discard_drop) {
+                    ui.ctx().request_discard("a drop site's pass runs twice");
                 }
             }
         }
@@ -1639,6 +1664,8 @@ fn the_bars_close_button_wins_over_the_resize_bands() {
 }
 
 #[test]
+/// Resize bands avoid the close button, are at most 6 pt deep, use 16 pt
+/// corners along each edge, and leave the bar below the top band inert.
 fn resize_bands_are_a_few_points_deep_and_leave_out_the_bar_buttons() {
     let rect = Rect::from_min_size(Pos2::ZERO, vec2(240.0, 300.0));
     let close = Rect::from_center_size(pos2(224.0, 9.0), vec2(18.0, 18.0));
@@ -1669,6 +1696,9 @@ fn resize_bands_are_a_few_points_deep_and_leave_out_the_bar_buttons() {
 }
 
 #[test]
+/// On macOS the close glyph sits 8 pt from the trailing corner in both directions; its hit area
+/// extends 10 pt away from the corner, reaches the bar bottom, leaves the drag area clear, and stays
+/// reachable outside AppKit's corner resize region.
 fn on_macos_the_close_glyph_sits_by_the_corner_and_its_hit_area_reaches_away_from_it() {
     use crate::docking::chrome::{ChromeStyle, TitleBar};
     use crate::docking::placement::BAR_HEIGHT;
@@ -1694,7 +1724,7 @@ fn on_macos_the_close_glyph_sits_by_the_corner_and_its_hit_area_reaches_away_fro
         let mut shown = None;
         let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(full), ..Default::default() }, |ui| {
             let style = ChromeStyle { right_to_left, ..ChromeStyle::from_ui(ui) };
-            let response = TitleBar::new(egui::Id::new("bar"), "Move").title("Panel").close("Close").close_at(hit, glyph).show(ui, bar, &style);
+            let response = TitleBar::new(egui::Id::unique("bar"), "Move").title("Panel").close("Close").close_at(hit, glyph).show(ui, bar, &style);
             shown = response.close.map(|close| (close.rect, response.bar.rect));
         });
         output.textures_delta.clear();
@@ -1769,6 +1799,9 @@ fn dimmed(d: &DockDriver<u32, Content>, viewport: egui::ViewportId) -> bool {
 }
 
 #[test]
+/// While input is blocked, a native window is dimmed, loses always-on-top,
+/// ignores clicks, drags, key presses and close requests, but still forwards key
+/// releases; unblocking restores normal input and activation.
 fn a_native_window_takes_no_input_while_the_app_blocks_it() {
     let mut d = blocked_driver();
     let id = id_of(&d);
@@ -1820,6 +1853,27 @@ fn a_native_window_takes_no_input_while_the_app_blocks_it() {
     assert!(out.actions.contains(&Action::Activate { panel: 6 }), "{:?}", out.actions);
     let out = d.window_step(id, vec![key.clone()]);
     assert_eq!(out.forwarded_events, vec![key]);
+}
+
+#[test]
+/// A blocked native window rejects typing but preserves native control-event order: IME reset
+/// completion and focus loss reach both event and raw-event readers, while a shortcut release is
+/// still forwarded to the host.
+fn a_blocked_native_window_preserves_ordered_ime_reset_completions() {
+    let mut d = blocked_driver();
+    let id = id_of(&d);
+    let viewport = d.viewport(id);
+    d.content.input_probe = Some(5);
+    d.input_blocked = true;
+    let request_id = d.ctx.request_ime_reset(viewport).unwrap();
+    let completed = Event::ImeResetCompleted { request_id };
+    let focus = Event::WindowFocused(false);
+    let release = Event::Key { key: Key::S, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::COMMAND };
+    let out = d.window_step(id, vec![Event::Text("blocked".into()), completed.clone(), release.clone(), focus.clone()]);
+    assert_eq!(d.content.events, vec![completed.clone(), focus.clone()], "panel input keeps control order while rejecting typing");
+    assert_eq!(d.content.raw_events, vec![completed, focus], "raw readers receive the same native controls");
+    assert_eq!(out.forwarded_events, vec![release], "shortcut releases still reach the host");
+    assert!(d.content.typed.is_empty());
 }
 
 #[test]
@@ -2419,6 +2473,8 @@ fn escape_and_cancel_drag_end_the_routing_of_an_app_drag() {
 }
 
 #[test]
+/// Dragging a tab onto a native window's body emits a tab `Move` rather than
+/// an app body drag and leaves the content's drops empty.
 fn a_tab_drag_onto_a_native_window_is_no_app_drag() {
     let mut d = app_drag(layout(true), 1, &[5]);
     let id = window(&d, 5).id;
@@ -2428,6 +2484,154 @@ fn a_tab_drag_onto_a_native_window_is_no_app_drag() {
     d.step(vec![]);
     assert!(matches!(out.actions.as_slice(), [Action::Move { panel: 1, anchor: 5 | 6, .. }]), "{:?}", out.actions);
     assert!(d.content.drops.is_empty(), "{:?}", d.content.drops);
+}
+
+/// `cancel_drag` from an app's per-area native input hook (`DockArea::native_input_hook`)
+/// runs while egui holds the `NativeInput` plugin lock. It must not try to lock that plugin
+/// again: in a debug build the original deadlocks, and egui's debug mutex panics after its
+/// 10 s deadlock bound.
+#[test]
+fn cancel_drag_from_a_native_input_hook_returns() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let mut d = driver(layout(true)).with_native_input_hook(move |ctx, _input| {
+        if flag.swap(false, Ordering::SeqCst) {
+            // `driver` uses this area id.
+            super::cancel_drag::<u32>(ctx, egui::Id::unique("dock-driver"));
+        }
+    });
+    let id = id_of(&d);
+    d.settle();
+
+    // The hook runs for the native window's input, inside `NativeInput::input_hook`.
+    cancel.store(true, Ordering::SeqCst);
+    d.window_step(id, vec![Event::PointerMoved(pos2(60.0, 150.0))]);
+    assert!(!cancel.load(Ordering::SeqCst), "the hook did not run");
+}
+
+/// An app drag with a release queued for the main window: `cancel_drag` from the per-area
+/// native input hook (inside `Plugin::input_hook`, with egui holding the `NativeInput` plugin
+/// lock) returns without deadlocking, withdraws that release, and leaves the owner's own
+/// release.
+#[test]
+fn cancel_drag_from_a_native_input_hook_withdraws_a_queued_release() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let mut d = app_drag(layout(true), 5, &[1]).with_native_input_hook(move |ctx, _input| {
+        if flag.swap(false, Ordering::SeqCst) {
+            // `driver` uses this area id.
+            super::cancel_drag::<u32>(ctx, egui::Id::unique("dock-driver"));
+        }
+    });
+    let id = window(&d, 5).id;
+    // The release is over the main window: it is queued for the main window's next pass.
+    let local = d.window_local(id, ORIGIN + vec2(100.0, 300.0)).unwrap();
+    d.window_hold(id, source(&d), local);
+    cancel.store(true, Ordering::SeqCst);
+    d.window_release(id, local);
+    assert!(!cancel.load(Ordering::SeqCst), "the hook did not run");
+    assert!(d.content.drops.is_empty(), "{:?}", d.content.drops);
+    assert_eq!(d.content.source_stopped, 0, "the owner's own release is still held");
+    d.step(vec![]);
+    d.step(vec![]);
+    assert!(d.content.drops.is_empty(), "{:?}", d.content.drops);
+    assert_eq!(d.content.source_stopped, 1, "the owner still gets its own release");
+    assert!(super::render::held_events(&d.ctx, egui::ViewportId::ROOT).is_empty());
+    assert!(super::render::held_events(&d.ctx, d.viewport(id)).is_empty());
+}
+
+/// A main-window owner that asks for its release pass to be discarded still gets its release
+/// exactly once, and the native target reads the payload exactly once.
+#[test]
+fn a_root_owner_that_discards_its_release_pass_drops_the_payload_once() {
+    let mut d = app_drag(layout(true), 1, &[5]);
+    d.content.marks = Marks::Payload;
+    let id = window(&d, 5).id;
+    let local = pos2(120.0, 200.0);
+    let point = d.host().windows[&d.viewport(id)].rect.min + local.to_vec2() - ORIGIN.to_vec2();
+    d.hold(source(&d), point);
+
+    d.content.discard_next = true;
+    d.release(point);
+    assert_eq!(d.content.drops, vec![(5, local)]);
+    assert_eq!(d.content.payload_drops, vec![5]);
+    // The owner's release may arrive in the same frame's rerun.
+    assert_eq!(d.content.source_stopped, 1);
+    assert_eq!(d.content.source_releases, 1, "the owner receives its release once");
+
+    d.step(vec![]);
+    assert_eq!(d.content.drops, vec![(5, local)], "the target drops once");
+    assert_eq!(d.content.payload_drops, vec![5], "the payload drops once");
+    assert_eq!(d.content.source_stopped, 1, "the owner gets its release once");
+    assert_eq!(d.content.source_releases, 1, "the owner receives its release once");
+    assert!(!egui::DragAndDrop::has_any_payload(&d.ctx));
+    assert!(super::render::held_events(&d.ctx, egui::ViewportId::ROOT).is_empty());
+}
+
+/// A native target that asks for its release pass to be discarded reads the release and the
+/// payload once; its rerun has no events, and the owner's held release follows a pass later.
+#[test]
+fn a_target_that_discards_its_release_pass_drops_the_payload_once() {
+    let mut d = app_drag(layout(true), 1, &[5]);
+    d.content.marks = Marks::Payload;
+    d.content.discard_drop = true;
+    let id = window(&d, 5).id;
+    let local = pos2(120.0, 200.0);
+    let point = d.host().windows[&d.viewport(id)].rect.min + local.to_vec2() - ORIGIN.to_vec2();
+    d.hold(source(&d), point);
+
+    d.release(point);
+    assert_eq!(d.content.drops, vec![(5, local)]);
+    assert_eq!(d.content.payload_drops, vec![5]);
+    assert_eq!(d.content.source_stopped, 0, "the owner's release is held for a later pass");
+    assert_eq!(d.content.source_releases, 0, "the owner's release is held for a later pass");
+
+    d.step(vec![]);
+    assert_eq!(d.content.drops, vec![(5, local)], "the target drops once");
+    assert_eq!(d.content.payload_drops, vec![5], "the payload drops once");
+    assert_eq!(d.content.source_stopped, 1, "the owner gets its release once");
+    assert_eq!(d.content.source_releases, 1, "the owner receives its release once");
+    assert!(!egui::DragAndDrop::has_any_payload(&d.ctx));
+    assert!(super::render::held_events(&d.ctx, egui::ViewportId::ROOT).is_empty());
+}
+
+/// Several discarded passes in one frame neither duplicate nor lose the routed release: the
+/// target's drop and payload read, and the owner's release, happen exactly once.
+#[test]
+fn repeated_discards_deliver_the_release_and_drop_once() {
+    let mut d = app_drag(layout(true), 1, &[5]);
+    d.content.marks = Marks::Payload;
+    let id = window(&d, 5).id;
+    let local = pos2(120.0, 200.0);
+    let point = d.host().windows[&d.viewport(id)].rect.min + local.to_vec2() - ORIGIN.to_vec2();
+    d.hold(source(&d), point);
+
+    d.ctx.memory_mut(|memory| memory.options.max_passes = std::num::NonZeroUsize::new(4).unwrap());
+    d.content.discard_passes = 3;
+    d.release(point);
+    assert_eq!(d.content.drops, vec![(5, local)], "the target drops once");
+    assert_eq!(d.content.payload_drops, vec![5], "the payload drops once");
+    assert_eq!(d.content.source_stopped, 1, "the owner gets its release once");
+    assert_eq!(d.content.source_releases, 1, "the owner receives its release once");
+
+    // The frame ran its fourth, completing pass here; the release and payload are gone.
+    d.step(vec![]);
+    assert_eq!(d.content.drops, vec![(5, local)]);
+    assert_eq!(d.content.payload_drops, vec![5]);
+    assert_eq!(d.content.source_stopped, 1);
+    assert_eq!(d.content.source_releases, 1);
+    assert!(!egui::DragAndDrop::has_any_payload(&d.ctx));
+    assert!(super::render::held_events(&d.ctx, egui::ViewportId::ROOT).is_empty());
 }
 
 #[test]

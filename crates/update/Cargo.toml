@@ -20,7 +20,6 @@ egui = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = "0.4"
-dirs = "6"
 getrandom = "0.3"
 tempfile = "3"
 sha2 = "0.10"
@@ -41,6 +40,6 @@ plist = "1"
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.55"
 dunce = "1"
-zip = { version = "8", default-features = false, features = ["deflate"] }
-winsafe = { version = "0.0.29", features = ["kernel", "version"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+winsafe = { version = "0.0.29", features = ["advapi", "kernel", "shell", "version"] }
 verifysign = "1"

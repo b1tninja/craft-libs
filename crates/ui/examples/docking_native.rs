@@ -14,6 +14,7 @@ impl DockContent<u32> for Panels {
         ui.label(format!("Body of panel {panel}"));
     }
 
+    /// Return the example content's logical and accessibility label, `Panel {panel}`.
     fn logical_label(&self, panel: &u32) -> String {
         format!("Panel {panel}")
     }
@@ -24,9 +25,11 @@ struct App {
 }
 
 impl eframe::App for App {
+    /// Render the dock, apply every returned action with default permissions, print floating
+    /// window places, and forward residual native-window events to the host.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let style = DockStyle::from_ui(ui);
-        let out = DockArea::new(egui::Id::new("dock")).show_content(ui, &self.layout, &style, &mut Panels);
+        let out = DockArea::new(egui::Id::unique("dock")).show_content(ui, &self.layout, &style, &mut Panels);
         if !out.actions.is_empty() {
             println!("actions {:?}", out.actions);
             if let Err(error) = self.layout.apply_all(out.actions, |_| Default::default()) {

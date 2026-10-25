@@ -13,7 +13,7 @@ use std::hash::Hash;
 use std::ops::RangeInclusive;
 
 use egui::{
-    Context, Frame, Id, Key, LayerId, Margin, Modifiers, Order, Pos2, Rect, Response, Sense, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    Context, Frame, Id, Key, LayerId, Margin, Modifiers, Order, Pos2, Rect, Response, Role, Sense, Ui, UiBuilder, Vec2, WidgetInfo, pos2, vec2,
 };
 
 use crate::docking::PanelLimits;
@@ -239,6 +239,7 @@ fn memory_id(id: Id) -> Id {
 
 /// Move focus to the next pane (the previous one with `reverse`) at the host's next frame. For
 /// apps that route F6 through their own commands; see [`PaneHost::f6`].
+/// Pass the same explicit [`Id`] used for the host; strings require [`Id::unique`].
 pub fn focus_next(ctx: &Context, id: impl Into<Id>, reverse: bool) {
     let key = memory_id(id.into());
     ctx.data_mut(|data| data.get_temp_mut_or_default::<Memory>(key).cycle = Some(reverse));
@@ -246,6 +247,8 @@ pub fn focus_next(ctx: &Context, id: impl Into<Id>, reverse: bool) {
 }
 
 impl PaneHost {
+    /// Creates a host with a stable global ID. Use [`Id::unique`] to turn a string or tuple
+    /// into an ID, and reuse that ID for [`focus_next`].
     pub fn new(id: impl Into<Id>) -> Self {
         Self {
             id: id.into(),
@@ -593,7 +596,7 @@ impl PaneHost {
             let stop = (!title_bar).then(|| {
                 let stop = ui.interact(body, s.id.with("body"), Sense::focusable_noninteractive());
                 let title = content.title(&s.pane);
-                stop.widget_info(|| WidgetInfo::labeled(WidgetType::Panel, true, &title));
+                stop.widget_info(|| WidgetInfo::labeled(Role::Pane, true, &title));
                 if focus {
                     stop.request_focus();
                 }

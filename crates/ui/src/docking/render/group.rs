@@ -36,6 +36,15 @@ const OVERFLOW_WIDTH: f32 = 22.0;
 const WHEEL_NOTCH: f32 = 40.0;
 
 impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
+    /// Draw one tab group at `rect`.
+    ///
+    /// An `active` index outside `panels` is a no-op. A lone protected panel is drawn stripless:
+    /// its whole rect is the body and its only tab has `Rect::NOTHING`. Side splits are offered
+    /// only for a `Frame` or `Floating` group whose selected panel accepts splits. Tab labels
+    /// shrink widest-first to the minimum width, then the remaining tabs move to the overflow menu;
+    /// hidden overflow tabs still appear in the drop target with `Rect::NOTHING`. `minimized` hides
+    /// the body but keeps the strip. Tabs, strip, header and drag bar are mirrored in right-to-left
+    /// layout.
     pub(super) fn group(&mut self, ui: &mut Ui, panels: &[P], active: usize, minimized: bool, rect: Rect, kind: GroupKind) {
         let Some(selected) = panels.get(active) else { return };
         self.record_float(panels, rect.size(), rect.size());
@@ -72,7 +81,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let header_width = if requested.is_finite() { requested.clamp(0.0, strip.width()) } else { 0.0 };
         if header_width > 0.0 {
             let header = mirror(Rect::from_min_max(pos2(strip.right() - header_width, strip.top()), strip.max));
-            let mut child = ui.new_child(UiBuilder::new().id(self.id.with(("header", selected))).max_rect(header));
+            let mut child = ui.new_child(UiBuilder::new().scope_id(self.id.with(("header", selected))).max_rect(header));
             child.set_clip_rect(header.intersect(ui.clip_rect()));
             self.content.group_header(&mut child, panels, selected, floating);
             // A press in the header focuses the shown panel, as a press on its tab does.
@@ -112,7 +121,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             let overflow = mirror(Rect::from_min_size(pos2(x, strip.top()), vec2(fit.overflow_width, strip.height())));
             let response = ui.interact(overflow, self.id.with(("overflow", selected)), Sense::click());
             self.register_interaction(ui.ctx(), response.id);
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.panels_label));
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &self.style.panels_label));
             ui.painter().with_clip_rect(overflow).text(overflow.center(), egui::Align2::CENTER_CENTER, "…", self.style.font.clone(), self.style.text);
             egui::Popup::menu(&response).show(|ui| {
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
@@ -169,7 +178,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let response = ui.interact(hit, self.id.with((name, owner.panels.first())), sense);
         let response = if movable { response.on_hover_cursor(egui::CursorIcon::Grab) } else { response };
         self.register_interaction(ui.ctx(), response.id);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.move_group_label));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &self.style.move_group_label));
         if movable && response.drag_started() {
             self.start_group_drag(ui, owner.panels, self.drag_source(owner));
         }
@@ -294,7 +303,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     }
                 });
             });
-            response.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &logical));
+            response.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &logical));
         }
         self.frame_items(ui, owner, panel);
     }
@@ -304,7 +313,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     pub(super) fn menu_action(&mut self, ui: &mut Ui, logical: &str) -> bool {
         let text = self.content.action_label(ui, logical, &self.style.font, self.style.text);
         let response = ui.button(text);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), logical));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), logical));
         if response.clicked() {
             ui.close();
         }
@@ -329,11 +338,14 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         anchors
     }
 
+    /// A stock menu button for `panel` whose visible text comes from
+    /// [`crate::docking::DockContent::label`] while its accessible name stays the logical `label_of`
+    /// value. The function only returns the response; the caller performs the menu action.
     pub(super) fn menu_label(&mut self, ui: &mut Ui, panel: &P) -> egui::Response {
         let logical = self.label_of(panel);
         let text = self.content.label(ui, panel, &logical, &self.style.font, self.style.text);
         let response = ui.button(text);
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &logical));
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &logical));
         response
     }
 
@@ -354,6 +366,14 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         ui.ctx().data(|d| d.get_temp::<bool>(key)).unwrap_or(false)
     }
 
+    /// Draw one tab inside `rect` and return its response.
+    ///
+    /// Clicking activates and focuses the panel. In a minimized group the first click expands and
+    /// records the time so that same click is not also interpreted as a double-click; a genuine
+    /// double-click toggles minimized only when the owner minimizes. Middle-click closes only when
+    /// the style enables it and the panel is closable. The context menu emits `Action`s, with float,
+    /// move and close entries gated by the panel's permissions. `owner: None` removes minimized
+    /// semantics and undock latching. An elided label exposes its full text as hover text.
     pub(super) fn tab(&mut self, ui: &mut Ui, panel: &P, rect: Rect, active: bool, group: Rect, owner: Option<&TabGroup<'_, P>>) {
         let minimized = owner.filter(|owner| self.minimizes(owner)).map(|owner| owner.minimized);
         let policy = self.permissions(panel);
@@ -412,7 +432,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                 let logical = self.style.float_label.clone();
                 let text = self.content.action_label(ui, &logical, &self.style.font, self.style.text);
                 let response = ui.button(text);
-                response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &logical));
+                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &logical));
                 if response.clicked() {
                     let size = self.float_size(panel, group.size());
                     let rect = clamp_float(Rect::from_min_size(group.min + vec2(24.0, 24.0), size), self.float_bounds);
@@ -438,14 +458,12 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                         }
                     });
                 });
-                response
-                    .response
-                    .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.move_panel_to_label));
+                response.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &self.style.move_panel_to_label));
             }
             if policy.closable && self.style.close_menu_items {
                 let text = self.content.action_label(ui, &self.style.close_label, &self.style.font, self.style.text);
                 let response = ui.button(text);
-                response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &self.style.close_label));
+                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &self.style.close_label));
                 if response.clicked() {
                     self.output.actions.push(Action::Close { panel: panel.clone() });
                     ui.close();

@@ -34,7 +34,7 @@ pub(crate) fn turned_false(ctx: &Context, key: Id, now: bool) -> bool {
 /// Whether the window being drawn lost focus this pass: focused on the previous pass, not now.
 pub(crate) fn lost(ctx: &Context) -> bool {
     let focused = ctx.input(|i| i.focused);
-    turned_false(ctx, Id::new("craft-ui-window-focus").with(ctx.viewport_id()), focused)
+    turned_false(ctx, Id::unique("craft-ui-window-focus").with(ctx.viewport_id()), focused)
 }
 
 #[cfg(test)]

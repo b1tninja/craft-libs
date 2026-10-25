@@ -243,9 +243,9 @@ fn destination(
 
 fn selected_folder(folder: &str, writable: bool) -> Result<PathBuf, String> {
     let path = if folder == "~" {
-        dirs::home_dir().ok_or("no home folder")?
+        crate::folders::home_dir().ok_or("no home folder")?
     } else if let Some(relative) = folder.strip_prefix("~/") {
-        dirs::home_dir().ok_or("no home folder")?.join(relative)
+        crate::folders::home_dir().ok_or("no home folder")?.join(relative)
     } else {
         PathBuf::from(folder)
     };
@@ -599,7 +599,7 @@ fn prepare_home(home: &Path) {
     for (_, dir) in home_env(home).iter().skip(1) {
         let _ = std::fs::create_dir_all(dir);
     }
-    let Some(real) = dirs::home_dir() else { return };
+    let Some(real) = crate::folders::home_dir() else { return };
     if real == home {
         return;
     }
@@ -1117,9 +1117,9 @@ pub(crate) mod linux {
             if let Some(dir) = std::env::var_os("HOST_XDG_DATA_HOME").map(PathBuf::from).filter(|p| p.is_absolute()) {
                 return Some(dir);
             }
-            return dirs::home_dir().map(|h| h.join(".local").join("share"));
+            return crate::folders::home_dir().map(|h| h.join(".local").join("share"));
         }
-        dirs::data_dir()
+        crate::folders::data_local_dir()
     }
 
     /// The app's 128 px icon, as bundled in `assets/app-icons`.
@@ -1222,7 +1222,7 @@ pub mod macos {
 
     use crate::version::Version;
 
-    use super::{App, InstallSource, Installed, Path, PathBuf, Paths, Release, process, staging_dir, swap_into_place};
+    use super::{App, InstallSource, Installed, Path, PathBuf, Paths, Release, process, swap_into_place};
 
     /// `/Applications` when we can write there, else `~/Applications`.
     fn applications_dir(existing: Option<&Installed>, destination: Option<&Path>) -> Result<PathBuf, String> {
@@ -1240,7 +1240,7 @@ pub mod macos {
             let _ = std::fs::remove_file(&probe);
             return Ok(system);
         }
-        let user = dirs::home_dir().ok_or("no home folder")?.join("Applications");
+        let user = crate::folders::home_dir().ok_or("no home folder")?.join("Applications");
         std::fs::create_dir_all(&user).map_err(|e| format!("couldn't create {} ({e})", user.display()))?;
         Ok(user)
     }
@@ -1408,7 +1408,7 @@ pub mod macos {
 
     /// Moves an app to the user's Trash (so it can be put back).
     pub fn move_to_trash(path: &Path) -> Result<(), String> {
-        let trash = dirs::home_dir().ok_or("no home folder")?.join(".Trash");
+        let trash = crate::folders::home_dir().ok_or("no home folder")?.join(".Trash");
         let name = path.file_name().ok_or("not an app")?;
         let mut dest = trash.join(name);
         if dest.exists() {
@@ -1562,7 +1562,7 @@ mod freebsd {
             run_as_root(&[OsStr::new("/bin/cp"), OsStr::new("-R"), &source, prefix.as_os_str()])?;
             return Ok((prefix.join("bin").join(app.id), rel.iter().map(|r| prefix.join(r)).collect(), true));
         }
-        let prefix = dirs::home_dir().ok_or("no home folder")?.join(".local");
+        let prefix = crate::folders::home_dir().ok_or("no home folder")?.join(".local");
         std::fs::create_dir_all(&prefix).map_err(|e| e.to_string())?;
         let status = process::command("/bin/cp").arg("-R").arg(&source).arg(&prefix).status().map_err(|e| e.to_string())?;
         if !status.success() {
@@ -1593,7 +1593,7 @@ mod freebsd {
         if files.is_empty() {
             return Err("the launcher has no record of these files".into());
         }
-        let prefix = if needs_root { PathBuf::from("/usr/local") } else { dirs::home_dir().ok_or("no home folder")?.join(".local") };
+        let prefix = if needs_root { PathBuf::from("/usr/local") } else { crate::folders::home_dir().ok_or("no home folder")?.join(".local") };
         let mut safe_files = Vec::new();
         for f in files {
             // Refuse paths that climb or escape install prefix (CWE-59).
@@ -2168,7 +2168,7 @@ mod tests {
     #[test]
     fn remove_files_refuses_escaping_paths() {
         assert!(freebsd::remove_files(&[PathBuf::from("/etc/shadow")], false).is_err());
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::folders::home_dir() {
             let prefix = home.join(".local");
             assert!(freebsd::remove_files(&[prefix.join("../escaped")], false).is_err());
         }

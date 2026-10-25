@@ -29,6 +29,8 @@ impl PaneContent<Pane> for Content {
     fn body(&mut self, ui: &mut Ui, pane: &Pane) {
         ui.label(format!("{pane:?} body"));
     }
+    /// Default docked pane state: end for Comments and Pivot, start otherwise,
+    /// with a 250 pt size.
     fn default_state(&self, pane: &Pane) -> PaneState {
         let edge = if matches!(pane, Pane::Comments | Pane::Pivot) { Edge::End } else { Edge::Start };
         PaneState::docked(edge, 250.0)
@@ -81,6 +83,8 @@ struct App {
 }
 
 impl App {
+    /// Create an app with `open` panes, empty state and log, no focused pane, no
+    /// document-focus requests, left-to-right layout and column side policy.
     fn new(open: &[Pane]) -> Self {
         Self {
             open: open.to_vec(),
@@ -96,17 +100,24 @@ impl App {
         }
     }
 
+    /// Render `PaneHost` with the app's open panes, policy and RTL flag, then a central document
+    /// panel. Applies pane requests to stored state and records requests, focused pane and
+    /// document-focus transitions.
     fn frame(&mut self, ui: &mut Ui) {
         let states = self.states.clone();
-        let out =
-            PaneHost::new("panes").rtl(self.rtl).policy(self.policy).show(ui, &self.open, |p| states.get(p).copied(), &mut Titled(self.title_bar));
+        let out = PaneHost::new(Id::unique("panes")).rtl(self.rtl).policy(self.policy).show(
+            ui,
+            &self.open,
+            |p| states.get(p).copied(),
+            &mut Titled(self.title_bar),
+        );
         let drag_document = self.drag_document;
         // A canvas fills the panel, without the default frame's margin.
         let panel = if drag_document { egui::CentralPanel::default().frame(Frame::NONE) } else { egui::CentralPanel::default() };
         let dragged = panel
             .show(ui, |ui| {
                 if drag_document {
-                    ui.interact(ui.max_rect(), Id::new("document-drag"), Sense::click_and_drag()).dragged()
+                    ui.interact(ui.max_rect(), Id::unique("document-drag"), Sense::click_and_drag()).dragged()
                 } else {
                     ui.label("Document").dragged()
                 }
@@ -134,6 +145,8 @@ impl App {
     }
 }
 
+/// Build an 800×600 harness around `App::frame`, mark input focused, and run
+/// two frames before returning it.
 fn harness(app: App) -> Harness<'static, App> {
     let mut h = Harness::builder().with_size(vec2(800.0, 600.0)).build_ui_state(|ui, app: &mut App| app.frame(ui), app);
     h.input_mut().focused = true;
@@ -141,8 +154,9 @@ fn harness(app: App) -> Harness<'static, App> {
     h
 }
 
+/// The stable response id for `pane` under the `panes` host scope.
 fn pane_id(pane: Pane) -> Id {
-    Id::new("panes").with(("pane", &pane))
+    Id::unique("panes").with(("pane", &pane))
 }
 
 fn rect(h: &Harness<'_, App>, id: Id) -> Option<Rect> {
@@ -185,9 +199,10 @@ fn drag(h: &mut Harness<'_, App>, from: Pos2, to: Pos2) {
     h.run_steps(2);
 }
 
-/// The rect a docked pane's panel takes.
+/// The rect a docked pane's panel takes. egui 0.37 keys a panel's persisted `PanelState` by the
+/// scope of the `Ui` it is shown in and the panel's id salt, not by the id alone.
 fn panel(h: &Harness<'_, App>, pane: Pane) -> Rect {
-    egui::containers::panel::PanelState::load(&h.ctx, pane_id(pane).with("panel")).unwrap().outer_rect
+    egui::containers::panel::PanelState::load(&h.ctx, h.ui_id().with(pane_id(pane).with("panel"))).unwrap().outer_rect
 }
 
 /// The drop previews painted in the last frame: 2 pt accent outlines with a 15% accent fill.
@@ -544,6 +559,8 @@ fn float_rect_is_finite_and_inside_the_bounds() {
 
 #[cfg(feature = "serde")]
 #[test]
+/// A `PaneState` with a docked edge, size and float rect serializes to JSON and
+/// deserializes back unchanged.
 fn pane_state_round_trips_through_json() {
     let state = PaneState { place: Place::Docked(Edge::End), size: Some(280.0), float_rect: Some([1.0, 2.0, 270.0, 480.0]) };
     let json = serde_json::to_string(&state).unwrap();
@@ -551,12 +568,15 @@ fn pane_state_round_trips_through_json() {
 }
 
 #[test]
+/// A pane body may request 400 pt inside its 250 pt side pane; the document region still begins at
+/// the pane's inner edge on both sides.
 fn a_body_wider_than_its_pane_is_clipped_and_the_document_starts_at_the_pane_edge() {
     struct Wide;
     impl PaneContent<Pane> for Wide {
         fn title(&self, pane: &Pane) -> String {
             format!("{pane:?}")
         }
+        /// A pane body that requests 400×40 pt inside its pane to exercise clipping.
         fn body(&mut self, ui: &mut Ui, _: &Pane) {
             ui.allocate_exact_size(vec2(400.0, 40.0), Sense::hover());
         }
@@ -566,7 +586,7 @@ fn a_body_wider_than_its_pane_is_clipped_and_the_document_starts_at_the_pane_edg
     }
     let mut h = Harness::builder().with_size(vec2(800.0, 600.0)).build_ui_state(
         |ui, document: &mut Rect| {
-            PaneHost::new("panes").show(ui, &[Pane::Nav, Pane::Comments], |_| None, &mut Wide);
+            PaneHost::new(Id::unique("panes")).show(ui, &[Pane::Nav, Pane::Comments], |_| None, &mut Wide);
             *document = ui.available_rect_before_wrap();
         },
         Rect::NOTHING,

@@ -40,6 +40,9 @@ struct Harness {
 }
 
 impl Harness {
+    /// Create a workflow harness with the requested theme, width and pixel scale,
+    /// zero animation and no cursor blink, and a canvas plus side tabs and floating
+    /// brushes layout, then settle it.
     fn new(dark: bool, width: f32, scale: f32) -> Self {
         let ctx = Context::default();
         ctx.set_theme(if dark { egui::Theme::Dark } else { egui::Theme::Light });
@@ -77,6 +80,9 @@ impl Harness {
         harness
     }
 
+    /// One 520 pt-high frame through the real wgpu test renderer. Applies returned actions with
+    /// canvas protection (round-tripping them through JSON when `serde` is enabled), validates the
+    /// layout, and records body ids and applied actions.
     fn step(&mut self, events: Vec<Event>) {
         self.frame += 1;
         let input = RawInput {
@@ -90,14 +96,14 @@ impl Harness {
         let mut actions = Vec::new();
         self.output = self.ctx.run_ui(input, |ui| {
             let style = DockStyle::from_ui(ui);
-            let out = DockArea::new(Id::new("workflow")).show(
+            let out = DockArea::new(Id::unique("workflow")).show(
                 ui,
                 &self.layout,
                 &style,
                 label,
                 |panel| if *panel == CANVAS { Permissions::PROTECTED } else { Permissions::default() },
                 |ui, panel| {
-                    self.body_ids.insert(*panel, ui.id());
+                    self.body_ids.insert(*panel, ui.scope_id());
                     if *panel == CANVAS {
                         let rect = ui.available_rect_before_wrap();
                         ui.painter().rect_filled(rect, 0.0, Color32::from_rgb(44, 53, 66));
@@ -174,14 +180,16 @@ impl Harness {
         self.layout.validate().unwrap();
     }
 
+    /// Run four empty workflow frames to settle sizing.
     fn settle(&mut self) {
         for _ in 0..4 {
             self.step(Vec::new());
         }
     }
 
+    /// The response rect of `panel`'s tab in the workflow dock.
     fn tab(&self, panel: u32) -> Rect {
-        self.ctx.read_response(Id::new("workflow").with(("tab", &panel))).unwrap().rect
+        self.ctx.read_response(Id::unique("workflow").with(("tab", &panel))).unwrap().rect
     }
 
     fn drag(&mut self, from: Pos2, to: Pos2) {

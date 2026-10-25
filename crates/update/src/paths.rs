@@ -39,8 +39,8 @@ impl Paths {
     /// The per-user folders named `dir` (`ArtCraft Launcher` on macOS and Windows,
     /// `artcraft-launcher` elsewhere, by convention).
     pub fn per_user(dir: &str) -> Result<Self, String> {
-        let data = dirs::data_local_dir().ok_or("no per-user data folder on this system")?.join(dir);
-        let cache = dirs::cache_dir().ok_or("no per-user cache folder on this system")?.join(dir);
+        let data = crate::folders::data_local_dir().ok_or("no per-user data folder on this system")?.join(dir);
+        let cache = crate::folders::cache_dir().ok_or("no per-user cache folder on this system")?.join(dir);
         Ok(Self { data, cache })
     }
 

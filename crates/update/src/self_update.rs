@@ -80,6 +80,9 @@ impl Install {
 /// release. The restart helper drops it, so it lasts one run.
 pub const PRETEND_VAR: &str = "ARTCRAFT_LAUNCHER_PRETEND_VERSION";
 
+/// Makes a development build believe it's an installed copy, to try the self-update.
+pub const DEV_VAR: &str = "CRAFT_UPDATE_DEV";
+
 /// The version this app counts as (see [`PRETEND_VAR`]).
 pub fn current_version(app: &App, fallback_pkg_version: &str) -> Option<Version> {
     let app_pretend = format!("{}_PRETEND_VERSION", app.id.replace('-', "_").to_uppercase());
@@ -110,8 +113,53 @@ fn marker(paths: &Paths) -> PathBuf {
 /// How this copy is installed, if it's one the app knows how to replace.
 pub fn current(app: &App) -> Option<Install> {
     let exe = std::env::current_exe().ok()?;
-    let exe = exe.canonicalize().unwrap_or(exe);
+    current_at(app, &exe, std::env::var_os(DEV_VAR).is_some())
+}
+
+/// [`current`] for a known executable and opt-in setting, without reading the ambient
+/// environment.
+fn current_at(app: &App, exe: &Path, opted_in: bool) -> Option<Install> {
+    let exe = exe.canonicalize().unwrap_or_else(|_| exe.to_path_buf());
+    if is_development_build(&exe, opted_in) {
+        return None;
+    }
     detect(app, &exe)
+}
+
+/// Cargo's cache-directory marker at the root of a target directory.
+const CARGO_CACHE_MARKER: &str = "CACHEDIR.TAG";
+
+/// Whether `exe` runs from a Cargo build tree, wherever `CARGO_TARGET_DIR` or
+/// `build.target-dir` put it. Normally Cargo caches rustc information in `.rustc_info.json` at
+/// the target root, and that marker alone identifies the tree; a folder that installers put the
+/// app in doesn't carry it, so this doesn't depend on the directory being called `target`. But
+/// the cache can be disabled (`CARGO_CACHE_RUSTC_INFO=0`) or a tree copied without the hidden
+/// file, so a profile output directory is also accepted when it has Cargo's `.fingerprint`,
+/// `deps` and `build` subdirectories and its target root carries `CACHEDIR.TAG`.
+/// `CACHEDIR.TAG` alone isn't Cargo-specific (the same signature marks any cache directory), so
+/// it only corroborates that profile layout.
+fn is_development_build(exe: &Path, opted_in: bool) -> bool {
+    !opted_in && exe.ancestors().skip(1).any(is_cargo_build_dir)
+}
+
+/// Whether `dir` is a Cargo target root (by its rustc-info cache marker) or a profile output
+/// directory inside one (by the cache-disabled fallback).
+fn is_cargo_build_dir(dir: &Path) -> bool {
+    if dir.join(".rustc_info.json").is_file() {
+        return true;
+    }
+    let Some(profile_parent) = dir.parent() else { return false };
+    let is_profile = [".fingerprint", "deps", "build"].into_iter().all(|name| dir.join(name).is_dir());
+    if !is_profile {
+        return false;
+    }
+    // The target root is the profile's parent, or its grandparent for cross-compiled output
+    // (`<target>/<triple>/<profile>`). It must carry Cargo's marker, as a file rather than a
+    // directory of that name.
+    if profile_parent.join(CARGO_CACHE_MARKER).is_file() {
+        return true;
+    }
+    profile_parent.parent().is_some_and(|root| root.join(CARGO_CACHE_MARKER).is_file())
 }
 
 /// Whether this installed copy can update itself.
@@ -127,9 +175,6 @@ fn detect(app: &App, exe: &Path) -> Option<Install> {
         && id == app.bundle_id()
     {
         return Some(Install::MacApp(bundle.to_path_buf()));
-    }
-    if exe.components().any(|c| c.as_os_str() == "target") && std::env::var_os("CRAFT_UPDATE_DEV").is_none() {
-        return None;
     }
     if exe.is_file() {
         return Some(Install::Standalone(exe.to_path_buf()));
@@ -147,12 +192,9 @@ fn detect(app: &App, exe: &Path) -> Option<Install> {
     // registry) or by default %LOCALAPPDATA%\Programs\<App Name>.
     let canonical = |p: PathBuf| p.canonicalize().unwrap_or(p);
     let recorded = msi_install_dir(app).map(canonical);
-    let default = dirs::data_local_dir().map(|d| canonical(d.join("Programs").join(app.name)));
+    let default = crate::folders::data_local_dir().map(|d| canonical(d.join("Programs").join(app.name)));
     if [recorded, default].into_iter().flatten().any(|d| d == dir) {
         return Some(Install::Msi(exe.to_path_buf()));
-    }
-    if exe.components().any(|c| c.as_os_str() == "target") && std::env::var_os("CRAFT_UPDATE_DEV").is_none() {
-        return None;
     }
     if exe.is_file() {
         return Some(Install::Standalone(exe.to_path_buf()));
@@ -195,9 +237,6 @@ fn detect(app: &App, exe: &Path) -> Option<Install> {
     // AUR builds (`<id>`, `<id>-bin`, `<id>-git`) are left to pacman and the AUR helper.
     if crate::detect::linux::has_pacman_db() && process::capture("pacman", &["-Q", &app.bundle_id()], t).is_some() {
         return Some(Install::Package(PackageKind::ArchPkg, exe.to_path_buf()));
-    }
-    if exe.components().any(|c| c.as_os_str() == "target") && std::env::var_os("CRAFT_UPDATE_DEV").is_none() {
-        return None;
     }
     if exe.is_file() {
         return Some(Install::Standalone(exe.to_path_buf()));
@@ -557,7 +596,7 @@ const PORTABLE_STAGING: &str = "launcher-update";
 /// `pid` to exit, does `finish` and starts `exe`. Run from the cache, the helper doesn't hold the
 /// installed exe that the step replaces.
 #[cfg(windows)]
-fn windows_helper(app: &App, paths: &Paths, pid: u32, exe: &Path, finish: &Finish) -> Result<(), String> {
+fn windows_helper(_app: &App, paths: &Paths, pid: u32, exe: &Path, finish: &Finish) -> Result<(), String> {
     let program = std::env::current_exe().map_err(|e| format!("couldn't find this program ({e})"))?;
     let dir = paths.cache.join(HELPER_DIR);
     // The previous update's copy, when it's still there.
@@ -1246,10 +1285,175 @@ mod tests {
         );
     }
 
+    /// A directory laid out like Cargo's target tree: `.rustc_info.json` at the root and the
+    /// executable below `profile` (with or without a target triple in between).
+    fn cargo_build_tree(dir: &Path, root: &str, relative_exe: &str) -> PathBuf {
+        let root = dir.join(root);
+        let exe = root.join(relative_exe);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(root.join(".rustc_info.json"), "{}").unwrap();
+        std::fs::write(&exe, "ELF").unwrap();
+        exe
+    }
+
+    /// A directory laid out like a Cargo target tree whose rustc-info cache was disabled: the
+    /// target root has `CACHEDIR.TAG`, but no `.rustc_info.json`. `profile` is relative to the
+    /// target root, so it may include a target triple.
+    fn cargo_build_tree_without_rustc_info(dir: &Path, profile: &str, exe: &str) -> PathBuf {
+        let root = dir.join("target");
+        let profile = root.join(profile);
+        for sub in [".fingerprint", "deps", "build"] {
+            std::fs::create_dir_all(profile.join(sub)).unwrap();
+        }
+        let exe = root.join(exe);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(root.join(CARGO_CACHE_MARKER), "Signature: 8a477f597d28d172789f06886806bc55\n").unwrap();
+        std::fs::write(&exe, "ELF").unwrap();
+        exe
+    }
+
+    /// `CARGO_TARGET_DIR` moves the build tree; the executable in it is still a development build,
+    /// whatever the profile or target triple is called.
+    #[test]
+    fn a_development_build_under_a_custom_target_dir_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        for exe in [
+            "debug/deps/craft_update-e8899812898c870d",
+            "release/artcraft-launcher",
+            "x86_64-pc-windows-gnu/debug/deps/craft_update-0123456789abcdef",
+            "x86_64-pc-windows-gnu/my-profile/deps/artcraft-launcher-0123456789abcdef",
+        ] {
+            let exe = cargo_build_tree(dir.path(), "builds/egui037-craft-libs", exe);
+            assert!(is_development_build(&exe, false), "{}", exe.display());
+        }
+    }
+
+    /// A Cargo build tree is not recognised by names: an installed copy in a folder literally
+    /// called `target` stays an installed copy.
+    #[test]
+    fn an_installed_copy_in_a_folder_called_target_is_not_a_development_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("target").join("ArtCraft Launcher");
+        std::fs::create_dir_all(&folder).unwrap();
+        let exe = folder.join("artcraft-launcher.exe");
+        std::fs::write(&exe, "MZ").unwrap();
+        assert!(!is_development_build(&exe, false), "a folder named target is not a build tree");
+    }
+
+    /// `CACHEDIR.TAG` has a generic signature, used by every cache directory; without Cargo's
+    /// profile layout it does not identify a development build.
+    #[test]
+    fn a_generic_cache_marker_is_not_a_cargo_target_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let exe = cache.join("ArtCraft Launcher").join("artcraft-launcher");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(cache.join("CACHEDIR.TAG"), "Signature: 8a477f597d28d172789f06886806bc55\n").unwrap();
+        std::fs::write(&exe, "ELF").unwrap();
+        assert!(!is_development_build(&exe, false), "a generic cache is not a Cargo build tree");
+    }
+
+    /// `CARGO_CACHE_RUSTC_INFO=0` leaves no `.rustc_info.json`; the profile layout plus the
+    /// target root's `CACHEDIR.TAG` still identify a development build, whatever the profile or
+    /// target triple is called.
+    #[test]
+    fn a_cargo_build_tree_without_rustc_info_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        for (profile, exe) in [
+            ("debug", "debug/deps/craft_update-e8899812898c870d"),
+            ("release", "release/artcraft-launcher"),
+            ("my-profile", "my-profile/artcraft-launcher"),
+            ("x86_64-pc-windows-gnu/my-profile", "x86_64-pc-windows-gnu/my-profile/deps/artcraft-launcher-0123456789abcdef"),
+        ] {
+            let exe = cargo_build_tree_without_rustc_info(dir.path(), profile, exe);
+            assert!(is_development_build(&exe, false), "{}", exe.display());
+        }
+    }
+
+    /// The fallback needs the complete profile layout and the target root's cache marker; a
+    /// partial layout or a missing marker isn't enough.
+    #[test]
+    fn an_incomplete_cargo_layout_is_not_a_development_build() {
+        let dir = tempfile::tempdir().unwrap();
+        for missing in [".fingerprint", "deps", "build"] {
+            let exe = cargo_build_tree_without_rustc_info(dir.path(), "debug", "debug/deps/artcraft-launcher");
+            std::fs::remove_dir_all(dir.path().join("target/debug").join(missing)).unwrap();
+            assert!(!is_development_build(&exe, false), "missing {missing}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let exe = cargo_build_tree_without_rustc_info(dir.path(), "debug", "debug/deps/artcraft-launcher");
+        std::fs::remove_file(dir.path().join("target").join(CARGO_CACHE_MARKER)).unwrap();
+        assert!(!is_development_build(&exe, false), "a profile layout without the target-root marker");
+    }
+
+    /// An installed copy that merely lives below a Cargo project isn't in that project's target
+    /// tree, even when the project has a build tree of its own.
+    #[test]
+    fn an_installed_copy_beneath_a_cargo_project_is_not_a_development_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("Cargo.toml"), "[package]\nname = \"installer\"\n").unwrap();
+        cargo_build_tree_without_rustc_info(&project, "debug", "debug/deps/installer-0123456789abcdef");
+        let exe = project.join("dist").join("artcraft-launcher");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "ELF").unwrap();
+        assert!(!is_development_build(&exe, false), "{}", exe.display());
+    }
+
+    /// Both markers must be files: a directory of the same name doesn't identify or corroborate
+    /// a build tree.
+    #[test]
+    fn marker_directories_are_not_development_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("builds").join("debug").join("deps").join("artcraft-launcher");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(dir.path().join("builds").join(".rustc_info.json")).unwrap();
+        std::fs::write(&exe, "ELF").unwrap();
+        assert!(!is_development_build(&exe, false), "a directory named .rustc_info.json");
+
+        let dir = tempfile::tempdir().unwrap();
+        let exe = cargo_build_tree_without_rustc_info(dir.path(), "debug", "debug/deps/artcraft-launcher");
+        let root = dir.path().join("target");
+        std::fs::remove_file(root.join(CARGO_CACHE_MARKER)).unwrap();
+        std::fs::create_dir(root.join(CARGO_CACHE_MARKER)).unwrap();
+        assert!(!is_development_build(&exe, false), "a directory named CACHEDIR.TAG");
+    }
+
+    /// `CRAFT_UPDATE_DEV` still lets a development build try the self-update.
+    #[test]
+    fn a_development_build_can_opt_in_to_updating_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = cargo_build_tree(dir.path(), "builds/egui037-craft-libs", "release/artcraft-launcher");
+        assert!(!is_development_build(&exe, true));
+    }
+
+    /// The opt-in also covers a build only recognised through the cache-disabled fallback.
+    #[test]
+    fn a_development_build_without_rustc_info_can_opt_in_to_updating_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = cargo_build_tree_without_rustc_info(dir.path(), "release", "release/artcraft-launcher");
+        assert!(!is_development_build(&exe, true));
+    }
+
     #[test]
     fn a_development_build_does_not_update_itself() {
-        // `cargo test` runs from target/, which no installer puts anywhere.
-        assert_eq!(current(&crate::suite::LAUNCHER), None);
+        // `cargo test` runs from a Cargo build tree, wherever `CARGO_TARGET_DIR` put it. This
+        // needs a normal Cargo target tree; the opt-in is passed explicitly so the result
+        // doesn't depend on `CRAFT_UPDATE_DEV`.
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        assert!(is_development_build(&exe, false), "{} should be inside a Cargo target directory", exe.display());
+        assert_eq!(current_at(&crate::suite::LAUNCHER, &exe, false), None);
+    }
+
+    /// The guard in `current_at` runs before platform detection, so a development executable is
+    /// rejected without probing the ambient host.
+    #[test]
+    fn current_at_rejects_a_development_build_before_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = cargo_build_tree(dir.path(), "builds/egui037-craft-libs", "debug/artcraft-launcher");
+        assert_eq!(current_at(&crate::suite::LAUNCHER, &exe, false), None);
     }
 
     #[test]

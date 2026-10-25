@@ -72,6 +72,14 @@ impl<'a> ResizeHandle<'a> {
         self
     }
 
+    /// Show the handle and return a resize proposal for the caller to apply.
+    ///
+    /// Invalid geometry or values make the handle inert. Pointer drags and arrow keys produce a
+    /// physical `delta` along the split axis; `reversed` flips only accessibility
+    /// increment/decrement/SetValue changes, not the pointer or arrow movement. A finite nonzero
+    /// delta marks the response changed. The accessibility role is `Splitter`, oriented
+    /// perpendicular to the movement axis, with Increment/Decrement and optional SetValue actions
+    /// and numeric value when configured.
     pub fn show(self, ui: &mut Ui) -> ResizeResponse {
         let hit = self.rect.expand2(match self.axis {
             SplitAxis::Horizontal => Vec2::new(self.hit_margin, 0.0),
@@ -162,7 +170,7 @@ impl<'a> ResizeHandle<'a> {
             {
                 egui::WidgetInfo::slider(enabled, f64::from(*value), self.label)
             } else {
-                egui::WidgetInfo::labeled(egui::WidgetType::Other, enabled, self.label)
+                egui::WidgetInfo::labeled(egui::Role::Unknown, enabled, self.label)
             }
         });
         ui.ctx().accesskit_node_builder(response.id, |node| {

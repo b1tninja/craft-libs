@@ -147,7 +147,7 @@ pub mod macos {
     pub fn candidates(app: &App) -> Vec<PathBuf> {
         let bundle = format!("{}.app", app.name);
         let mut out = vec![Path::new("/Applications").join(&bundle)];
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::folders::home_dir() {
             out.push(home.join("Applications").join(&bundle));
         }
         out
@@ -356,13 +356,13 @@ pub mod linux {
 
     /// `~/Applications`, where the launcher puts AppImages (the AppImageLauncher convention).
     pub fn appimage_dir() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join("Applications"))
+        crate::folders::home_dir().map(|h| h.join("Applications"))
     }
 
     /// Every folder searched for AppImages, the launcher's own first: `~/Applications`,
     /// `~/AppImages` (Gear Lever's default) and `~/.local/bin`.
     pub fn appimage_dirs() -> Vec<PathBuf> {
-        let Some(home) = dirs::home_dir() else { return Vec::new() };
+        let Some(home) = crate::folders::home_dir() else { return Vec::new() };
         vec![home.join("Applications"), home.join("AppImages"), home.join(".local").join("bin")]
     }
 
@@ -423,7 +423,7 @@ pub mod linux {
 
     fn find_binary(id: &str) -> Option<PathBuf> {
         let on_path = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|d| d.join(id)).find(|p| p.is_file()));
-        let usual = ["/usr/bin", "/usr/local/bin"].into_iter().map(PathBuf::from).chain(dirs::home_dir().map(|h| h.join(".local/bin")));
+        let usual = ["/usr/bin", "/usr/local/bin"].into_iter().map(PathBuf::from).chain(crate::folders::home_dir().map(|h| h.join(".local/bin")));
         on_path.or_else(|| usual.map(|d| d.join(id)).find(|p| p.is_file()))
     }
 

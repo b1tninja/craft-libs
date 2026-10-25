@@ -127,6 +127,8 @@ struct TabTest {
 }
 
 impl TabTest {
+    /// Create a two-tab test with duplicate `Layers` labels, the first selected and
+    /// enabled, click sense, a 90×26 pt rect and zero counters.
     fn new() -> Self {
         let ctx = Context::default();
         ctx.enable_accesskit();
@@ -144,6 +146,8 @@ impl TabTest {
         }
     }
 
+    /// Render the two tabs at fixed 90×26 rects with injected events. Clears texture deltas, counts
+    /// body paints, and updates the clicked/selected fixtures before returning the responses.
     fn frame(&mut self, events: Vec<Event>) -> (Vec<Response>, FullOutput) {
         self.time += 0.05;
         let ctx = self.ctx.clone();
@@ -154,7 +158,7 @@ impl TabTest {
         let mut output = ctx.run_ui(raw, |ui| {
             ui.add_enabled_ui(self.enabled, |ui| {
                 for (i, label) in self.labels.iter().enumerate() {
-                    let r = Tab::new(ui.id().with(("tab", i)), label, self.selected == i)
+                    let r = Tab::new(ui.scope_id().with(("tab", i)), label, self.selected == i)
                         .sense(self.sense)
                         .focus_stroke(Stroke::new(1.0, Color32::LIGHT_BLUE))
                         .show_at(ui, self.rect.translate(vec2(i as f32 * 100.0, 0.0)), |ui, response| {

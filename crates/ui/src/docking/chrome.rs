@@ -202,6 +202,15 @@ impl<'a> FloatingFrame<'a> {
         shown.inner
     }
 
+    /// Draw the resize handles around `rect` and return `(resized, started, responses)`.
+    ///
+    /// `resized` is set only for an enabled, uncancelled handle whose clamped next rect differs
+    /// from the current one. `started` names the handle whose drag began, which can remain set after
+    /// Escape or focus loss cancels that drag. Keyboard arrow steps move an edge by 8 pt; pointer
+    /// drags derive the next rect from the cursor relative to the press origin. Limits clamp the
+    /// proposal. Stored pointer anchors are removed on cancellation or once the primary button is
+    /// released. Handles are accessibility buttons; the diagonal one is painted while hovered,
+    /// dragged or focused.
     fn handles(&self, ui: &mut Ui, rect: Rect, bounds: Rect, style: &ChromeStyle) -> (Option<Rect>, Option<Id>, Vec<Response>) {
         let mut resized = None;
         let mut started = None;
@@ -222,7 +231,7 @@ impl<'a> FloatingFrame<'a> {
                 egui::CursorIcon::ResizeNeSw
             };
             let response = ui.interact(handle, self.id.with(name), Sense::drag()).on_hover_cursor(cursor);
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), self.resize_label));
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), self.resize_label));
             let anchor_id = response.id.with("pointer-anchor");
             crate::layout::drag_focus(ui, &response);
             if response.drag_started()
@@ -372,6 +381,15 @@ impl<'a> TitleBar<'a> {
         self
     }
 
+    /// Draw the title bar into `rect` and return its responses.
+    ///
+    /// `close_at` rects are in logical points, already mirrored in a right-to-left layout; without it
+    /// the × is a square the bar's height centered 10 pt in from the trailing edge. Menu and close
+    /// buttons reserve space on the trailing side, the draggable bar excludes them, and a title is
+    /// truncated to the bar's remaining width. The bar senses clicks and drags, while double-click
+    /// behavior (for example minimizing or closing) is the caller's. A right-to-left style mirrors
+    /// the layout; `move_label` remains the accessible name of the drag surface. The bar's own id
+    /// is used, with `"menu"` and `"close"` child ids for the buttons.
     pub fn show(self, ui: &mut Ui, rect: Rect, style: &ChromeStyle) -> TitleResponse {
         let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
         painter.rect_filled(rect, 0.0, style.title_background);
@@ -395,7 +413,7 @@ impl<'a> TitleBar<'a> {
         let (close_rect, menu_rect) = (close_rect.map(mirror), menu_rect.map(mirror));
         let bar = ui.interact(bar_rect, self.id, Sense::click_and_drag());
         let bar = if self.movable { bar.on_hover_cursor(egui::CursorIcon::Grab) } else { bar };
-        bar.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), self.move_label));
+        bar.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), self.move_label));
         if let Some(title) = self.title {
             let galley = truncated(ui, title, (bar_rect.width() - 12.0).max(0.0), style.font.clone());
             let x = if style.right_to_left { bar_rect.right() - 6.0 - galley.size().x } else { bar_rect.left() + 6.0 };
@@ -406,7 +424,7 @@ impl<'a> TitleBar<'a> {
         }
         let button = |ui: &mut Ui, rect: Rect, name: &str, label: &str| {
             let response = ui.interact(rect, self.id.with(name), Sense::click());
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label));
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
             let color = if response.hovered() || response.has_focus() { style.text } else { style.weak_text };
             (response, Stroke::new(1.2, color))
         };

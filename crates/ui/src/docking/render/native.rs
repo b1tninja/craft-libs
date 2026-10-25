@@ -9,7 +9,7 @@
 //! drag between OS windows (see `cross.rs`), and so do the app's drags in panel bodies
 //! (`body_drag.rs`).
 
-use std::{fmt::Debug, hash::Hash};
+use std::{fmt::Debug, hash::Hash, sync::Arc};
 
 use egui::{
     Color32, Context, CursorIcon, Event, Id, Key, LayerId, Modifiers, Order, Pos2, RawInput, Rect, ResizeDirection, Sense, Ui, UiBuilder, Vec2,
@@ -585,7 +585,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             self.cross.pointed = None;
             self.floating_body(ui, window, body, full);
             if own && !blocked && ui.ctx().text_edit_focused() {
-                ui.ctx().with_plugin(|input: &mut NativeInput| input.typing_next.insert(viewport));
+                let _ = body_input(ui.ctx()).lock().typing_next.insert(viewport);
             }
             self.cross.held |= ui.ctx().dragged_id().is_some_and(|id| self.owned_interactions.contains(&id));
             if debug_close() {
@@ -895,6 +895,15 @@ pub(super) struct NativeInput {
     hooks: std::collections::HashMap<Id, egui::mutex::Mutex<InputHook>>,
     /// The dock area of each native window shown this frame.
     windows: std::collections::HashMap<ViewportId, Id>,
+}
+
+/// Each dock area's app drag in a panel body, the events waiting for a window's next input, and
+/// the windows whose text fields have the keyboard. Kept outside [`NativeInput`]: egui calls
+/// [`egui::Plugin::input_hook`] with the plugin locked, and an app's input hook may call
+/// [`crate::docking::cancel_drag`] or [`crate::docking::send_keys`], which must reach this state
+/// without locking the plugin again. The lock here is dropped before that hook runs.
+#[derive(Default)]
+pub(super) struct NativeBodyInput {
     /// Each dock area's app drag in a panel body.
     pub routes: std::collections::HashMap<Id, BodyRoute>,
     /// Pointer events routed to each window, for its next input.
@@ -913,63 +922,94 @@ pub(super) struct NativeInput {
     keys: std::collections::HashMap<ViewportId, (u64, Vec<Event>)>,
 }
 
+/// The app drag routing and routed events shared by every native input hook of `ctx`.
+pub(super) fn body_input(ctx: &Context) -> Arc<egui::mutex::Mutex<NativeBodyInput>> {
+    ctx.data_mut(|data| data.get_temp_mut_or_default::<Arc<egui::mutex::Mutex<NativeBodyInput>>>(body_input_key()).clone())
+}
+
+/// The temp-data key for the context's native body-routing state.
+///
+/// All dock areas in a context deliberately use this one container: its `routes` map is keyed by
+/// dock-area `Id`, and queued, held and key events by target viewport. The key is unique only so
+/// this state does not collide with unrelated temporary data.
+fn body_input_key() -> Id {
+    Id::unique("craft-ui docking native body input")
+}
+
 pub(in crate::docking) type InputHook = Box<dyn FnMut(&Context, &mut RawInput) + Send>;
 
 impl egui::Plugin for NativeInput {
+    /// The egui plugin's diagnostic name, `craft-ui docking native input`.
     fn debug_name(&self) -> &'static str {
         "craft-ui docking native input"
     }
 
+    /// Route this viewport's input without deadlocking.
+    ///
+    /// Only the root viewport advances the frame pass; queued, held and key entries older than the
+    /// current pass are pruned. Events waiting for this viewport are taken before routing, so events
+    /// enqueued by routing wait for its next input. A held release is only released once a later
+    /// root pass exists. Earlier routed events are spliced before the window's own events, and any
+    /// accepted route requests a root repaint. The dock area's application hook is called only
+    /// after the routing mutex is dropped because it may cancel a drag and re-enter the shared
+    /// body state.
     fn input_hook(&mut self, ctx: &Context, input: &mut RawInput) {
         let viewport = input.viewport_id;
-        if viewport == ViewportId::ROOT {
-            self.pass += 1;
-            // Every window draws in the main window's pass: events for one that has not drawn
-            // since the last pass are for a window that is gone.
-            let pass = self.pass;
-            self.queued.retain(|_, (at, _)| *at + 1 >= pass);
-            self.held.retain(|_, (at, _)| *at + 1 >= pass);
-            self.keys.retain(|_, (at, _)| *at + 1 >= pass);
-            self.typing = std::mem::take(&mut self.typing_next);
-            self.typing_at = ctx.cumulative_pass_nr_for(ViewportId::ROOT);
-            // eframe has run `App::raw_input_hook`, where an app's native menu reports its key
-            // equivalents (macOS: AppKit's menu takes them before the key window sees them).
-            // While a native window has the keyboard, the main window gets no keys of its own,
-            // so these are the menu's: those a focused text field there acts on are its own.
-            if let Some(window) = typing_window_of(&self.typing, &input.viewports) {
-                let (moved, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut input.events).into_iter().partition(text_key);
-                input.events = kept;
-                if !moved.is_empty() {
-                    let entry = self.keys.entry(window).or_default();
-                    entry.0 = pass;
-                    entry.1.extend(moved);
-                    ctx.request_repaint_of(window);
+        let body = body_input(ctx);
+        let mut routed = false;
+        {
+            let mut body = body.lock();
+            let body = &mut *body;
+            if viewport == ViewportId::ROOT {
+                body.pass += 1;
+                // Every window draws in the main window's pass: events for one that has not
+                // drawn since the last pass are for a window that is gone.
+                let pass = body.pass;
+                body.queued.retain(|_, (at, _)| *at + 1 >= pass);
+                body.held.retain(|_, (at, _)| *at + 1 >= pass);
+                body.keys.retain(|_, (at, _)| *at + 1 >= pass);
+                body.typing = std::mem::take(&mut body.typing_next);
+                body.typing_at = ctx.cumulative_pass_nr_for(ViewportId::ROOT);
+                // eframe has run `App::raw_input_hook`, where an app's native menu reports its key
+                // equivalents (macOS: AppKit's menu takes them before the key window sees them).
+                // While a native window has the keyboard, the main window gets no keys of its own,
+                // so these are the menu's: those a focused text field there acts on are its own.
+                if let Some(window) = typing_window_of(&body.typing, &input.viewports) {
+                    let (moved, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut input.events).into_iter().partition(text_key);
+                    input.events = kept;
+                    if !moved.is_empty() {
+                        let entry = body.keys.entry(window).or_default();
+                        entry.0 = pass;
+                        entry.1.extend(moved);
+                        ctx.request_repaint_of(window);
+                    }
                 }
             }
+            // Taken before routing, which may queue more for this window's next input. A held
+            // release waits for a later main-window pass: a discarded pass reruns within its own.
+            let waiting = body.queued.remove(&viewport);
+            let keys = body.keys.remove(&viewport).map(|(_, mut keys)| {
+                text_clipboard_keys(ctx, viewport, &mut keys);
+                keys
+            });
+            let held = if body.held.get(&viewport).is_some_and(|(at, _)| *at < body.pass) { body.held.remove(&viewport) } else { None };
+            for route in body.routes.values_mut() {
+                routed |= route.route(input, &mut body.queued, &mut body.held, body.pass);
+            }
+            // Before the window's own events: they happened earlier, and a held release must
+            // not end a press that follows it.
+            let earlier = held
+                .into_iter()
+                .flat_map(|(_, events)| events)
+                .chain(waiting.into_iter().flat_map(|(_, events)| events.into_iter().map(|(_, e)| e)))
+                .chain(keys.into_iter().flatten());
+            input.events.splice(0..0, earlier);
         }
-        // Taken before routing, which may queue more for this window's next input. A held
-        // release waits for a later main-window pass: a discarded pass reruns within its own.
-        let waiting = self.queued.remove(&viewport);
-        let keys = self.keys.remove(&viewport).map(|(_, mut keys)| {
-            text_clipboard_keys(ctx, viewport, &mut keys);
-            keys
-        });
-        let held = if self.held.get(&viewport).is_some_and(|(at, _)| *at < self.pass) { self.held.remove(&viewport) } else { None };
-        let mut routed = false;
-        for route in self.routes.values_mut() {
-            routed |= route.route(input, &mut self.queued, &mut self.held, self.pass);
-        }
-        // Before the window's own events: they happened earlier, and a held release must not
-        // end a press that follows it.
-        let earlier = held
-            .into_iter()
-            .flat_map(|(_, events)| events)
-            .chain(waiting.into_iter().flat_map(|(_, events)| events.into_iter().map(|(_, e)| e)))
-            .chain(keys.into_iter().flatten());
-        input.events.splice(0..0, earlier);
         if routed {
             ctx.request_repaint_of(ViewportId::ROOT);
         }
+        // After the routing lock is dropped: the app's hook may call `cancel_drag`, which locks
+        // the same body state through egui's temporary data, not this plugin.
         if let Some(hook) = self.windows.get(&input.viewport_id).and_then(|area| self.hooks.get(area)) {
             (hook.lock())(ctx, input);
         }
@@ -1024,8 +1064,11 @@ pub(in crate::docking) fn typing_window(ctx: &Context) -> Option<ViewportId> {
     // Between frames (in `App::raw_input_hook`) a main-window pass has ended since the swap, and
     // `typing_next` is the whole of the last pass, which the next swap hands to the routing.
     let passes = ctx.cumulative_pass_nr_for(ViewportId::ROOT);
-    let typing =
-        ctx.with_plugin(|input: &mut NativeInput| if passes > input.typing_at { input.typing_next.clone() } else { input.typing.clone() })?;
+    let body = body_input(ctx);
+    let typing = {
+        let input = body.lock();
+        if passes > input.typing_at { input.typing_next.clone() } else { input.typing.clone() }
+    };
     ctx.input_for(ViewportId::ROOT, |i| typing_window_of(&typing, &i.raw.viewports))
 }
 
@@ -1034,14 +1077,15 @@ pub(in crate::docking) fn send_keys(ctx: &Context, viewport: ViewportId, events:
     if events.is_empty() {
         return;
     }
-    let queued = ctx.with_plugin(|input: &mut NativeInput| {
+    {
+        let body = body_input(ctx);
+        let mut input = body.lock();
+        let pass = input.pass;
         let entry = input.keys.entry(viewport).or_default();
-        entry.0 = input.pass;
+        entry.0 = pass;
         entry.1.extend(events);
-    });
-    if queued.is_some() {
-        ctx.request_repaint_of(viewport);
     }
+    ctx.request_repaint_of(viewport);
 }
 
 /// Set or clear the input hook of the dock area `area` for this frame, and forget its native
@@ -1113,7 +1157,7 @@ pub(in crate::docking) fn wayland(ctx: &Context, session: Session) -> bool {
         Session::Unknown if !root(|v| v.native_pixels_per_point.is_some()) => return false,
         Session::Wayland | Session::Unknown => {}
     }
-    let key = Id::new("craft-ui-dock-window-positions");
+    let key = Id::unique("craft-ui-dock-window-positions");
     if ctx.data(|d| d.get_temp::<bool>(key).unwrap_or(false)) {
         return false;
     }
@@ -1145,7 +1189,8 @@ fn block_input(ui: &mut Ui) -> Vec<Event> {
     let opacity = ui.opacity();
     ui.disable();
     ui.set_opacity(opacity);
-    let kept = |e: &Event| matches!(e, Event::Screenshot { .. } | Event::WindowFocused(_));
+    // Native reset acknowledgements are ordered control messages, even while widgets are blocked.
+    let kept = |e: &Event| matches!(e, Event::WindowFocused(_) | Event::ImeResetCompleted { .. });
     let released = ui.input(|i| i.events.iter().filter(|e| matches!(e, Event::Key { pressed: false, .. })).cloned().collect());
     ui.input_mut(|i| {
         i.events.retain(kept);

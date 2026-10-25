@@ -15,6 +15,8 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use ui_fixture::{Pseudo, fixture, with_long_label};
 
+#[path = "support/fonts.rs"]
+mod test_fonts;
 mod ui_fixture;
 
 struct Fx {
@@ -59,14 +61,20 @@ impl Fx {
         self.km.bindings(&CommandRef::from(id)).iter().map(|b| b.to_string()).collect()
     }
 
+    /// Whether any outcome recorded by the dialog harness is `Outcome::Cancel`.
     fn canceled(&self) -> bool {
         self.outcomes.iter().any(|o| matches!(o, Outcome::Cancel))
     }
 }
 
+/// Build an egui_kittest harness around `Fx`.
+///
+/// Installs and checks the pinned fonts every frame, selects window or inline dialog mode, records
+/// emitted outcomes, and flags any key press still present after the dialog ran.
 fn harness(fx: Fx, size: Vec2) -> Harness<'static, Fx> {
-    let mut h = Harness::builder().with_size(size).build_ui_state(
+    let mut h = Harness::builder().with_size(size).with_context_setup(test_fonts::configure).build_ui_state(
         |ui, fx: &mut Fx| {
+            test_fonts::assert_coverage(ui.ctx());
             let Fx { km, options, state, text, window, sets, outcomes, keys_left } = fx;
             let dialog = ShortcutsDialog::new(km, text.as_ref()).options(options);
             let dialog = match sets {

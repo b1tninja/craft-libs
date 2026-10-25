@@ -2,6 +2,7 @@
 //! has an 8 pt margin, so in an 800 pt wide window the rail and panes span x 8..792.
 
 use egui::accesskit::{Role, Toggled};
+use egui::load::Bytes;
 use egui::{Event, ImageSource, Key, Modifiers, PointerButton, Pos2, Rect, Ui, vec2};
 use egui_kittest::{Harness, kittest::NodeT, kittest::Queryable};
 
@@ -22,8 +23,20 @@ enum Tool {
 
 const TOOLS: [Tool; 6] = [Tool::Comments, Tool::Bookmarks, Tool::Pages, Tool::Layers, Tool::Files, Tool::Tags];
 
+/// A tiny valid icon for the rail's images. The tests install the SVG loader below; without a
+/// loadable image, egui paints its failed-image placeholder ("⚠️"), which the harness's missing
+/// glyph policy rejects.
+const ICON_SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"
+    viewBox="0 0 24 24"><rect width="24" height="24" fill="#000"/></svg>"##;
+
 fn items() -> Vec<RailItem<Tool>> {
-    TOOLS.iter().map(|t| RailItem::new(*t, ImageSource::Uri(format!("rail-test://{t:?}").into()), format!("{t:?}"))).collect()
+    TOOLS
+        .iter()
+        .map(|t| {
+            let icon = ImageSource::Bytes { uri: format!("bytes://rail-test/{t:?}.svg").into(), bytes: Bytes::Static(ICON_SVG) };
+            RailItem::new(*t, icon, format!("{t:?}"))
+        })
+        .collect()
 }
 
 /// The one-slot task pane the rail opens, at the rail's edge.
@@ -80,14 +93,19 @@ impl App {
 
     fn frame(&mut self, ui: &mut Ui) {
         let foot = self.foot;
-        let out = Rail::new("rail").edge(self.edge).rtl(self.rtl).show(ui, &self.items, self.open.as_ref(), |ui| {
+        let out = Rail::new(Id::unique("rail")).edge(self.edge).rtl(self.rtl).show(ui, &self.items, self.open.as_ref(), |ui| {
             if foot {
                 let _ = ui.button("Foot");
             }
         });
         if self.pane {
             let open: Vec<Tool> = self.open.into_iter().collect();
-            let panes = PaneHost::new("panes").rtl(self.rtl).policy(SidePolicy::OneSlot).show(ui, &open, |_| None, &mut Content { edge: self.edge });
+            let panes = PaneHost::new(Id::unique("panes")).rtl(self.rtl).policy(SidePolicy::OneSlot).show(
+                ui,
+                &open,
+                |_| None,
+                &mut Content { edge: self.edge },
+            );
             self.pane_focused = panes.focused;
         }
         self.document = egui::CentralPanel::default().show(ui, |ui| ui.label("Document")).response.rect;
@@ -106,14 +124,17 @@ impl App {
 }
 
 fn harness(app: App, height: f32) -> Harness<'static, App> {
-    let mut h = Harness::builder().with_size(vec2(800.0, height)).build_ui_state(|ui, app: &mut App| app.frame(ui), app);
+    let mut h = Harness::builder()
+        .with_context_setup(egui_extras::install_image_loaders)
+        .with_size(vec2(800.0, height))
+        .build_ui_state(|ui, app: &mut App| app.frame(ui), app);
     h.input_mut().focused = true;
     h.run_steps(2);
     h
 }
 
 fn item(h: &Harness<'_, App>, tool: Tool) -> Rect {
-    h.ctx.read_response(Rail::new("rail").item_id(&tool)).unwrap().rect
+    h.ctx.read_response(Rail::new(Id::unique("rail")).item_id(&tool)).unwrap().rect
 }
 
 fn click(h: &mut Harness<'_, App>, at: Pos2) {
@@ -184,7 +205,8 @@ fn a_disabled_item_sends_nothing_and_the_marker_shows_only_while_closed() {
     assert!(shown[0].x > item(&h, Tool::Layers).center().x, "the marker sits at the top-right corner");
     let description = |h: &Harness<'_, App>, label: &str| h.get_by_label(label).accesskit_node().description();
     assert_eq!(description(&h, "Layers").as_deref(), Some("Has layers"));
-    assert_eq!(description(&h, "Comments"), None, "no description while the pane is open");
+    // egui 0.37 uses tooltip text as the default accessible description.
+    assert_eq!(description(&h, "Comments").as_deref(), Some("Comments"), "no marker description while the pane is open");
 
     // Closed, Comments shows its marker too.
     click_item(&mut h, Tool::Comments);
@@ -217,7 +239,7 @@ fn the_rail_is_outermost_and_the_open_pane_sits_between_it_and_the_document() {
         app.open = Some(Tool::Comments);
         let h = harness(app, 600.0);
         let rail = h.state().out().rect;
-        let pane_id = Id::new("panes").with(("pane", &Tool::Comments));
+        let pane_id = Id::unique("panes").with(("pane", &Tool::Comments));
         // The resize handle lies on the pane's inner edge; the pane is 250 wide.
         let inner = h.ctx.read_response(pane_id.with("resize")).unwrap().rect.center().x;
         let pane = if left {
@@ -256,7 +278,13 @@ fn in_a_short_window_the_items_scroll_and_the_foot_stays_visible() {
     let over = item(&h, Tool::Comments).center();
     h.input_mut().events.extend([
         Event::PointerMoved(over),
-        Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: vec2(0.0, -500.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE },
+        Event::MouseWheel {
+            source: egui::MouseWheelSource::Unknown,
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(0.0, -500.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        },
     ]);
     h.run_steps(3);
     let tags = item(&h, Tool::Tags);
@@ -279,7 +307,7 @@ fn items_are_named_toggle_buttons_and_the_keyboard_moves_between_and_activates_t
     assert_eq!(pages.toggled(), Some(Toggled::False));
     assert!(h.get_by_label("Bookmarks").accesskit_node().is_disabled());
 
-    h.ctx.memory_mut(|m| m.request_focus(Rail::new("rail").item_id(&Tool::Comments)));
+    h.ctx.memory_mut(|m| m.request_focus(Rail::new(Id::unique("rail")).item_id(&Tool::Comments)));
     h.run_steps(2);
     assert_eq!(focused(&h), Some(Tool::Comments));
     key(&mut h, Key::ArrowUp);
@@ -307,8 +335,8 @@ fn an_empty_rail_draws_and_bad_sizes_fall_back() {
     assert_eq!((rail.right(), rail.width()), (R, RAIL_WIDTH));
     assert_eq!(h.state().out().request, None);
 
-    let mut h = Harness::builder().with_size(vec2(400.0, 300.0)).build_ui(|ui| {
-        let out = Rail::new("bad").width(f32::NAN).button_size(f32::INFINITY).show(ui, &items(), None, |_| {});
+    let mut h = Harness::builder().with_context_setup(egui_extras::install_image_loaders).with_size(vec2(400.0, 300.0)).build_ui(|ui| {
+        let out = Rail::new(Id::unique("bad")).width(f32::NAN).button_size(f32::INFINITY).show(ui, &items(), None, |_| {});
         assert_eq!(out.rect.width(), RAIL_WIDTH);
     });
     h.run_steps(2);
@@ -320,7 +348,7 @@ fn a_disabled_item_takes_no_tab_focus_and_a_focused_item_disabled_hands_focus_on
     app.items[1].enabled = false;
     let mut h = harness(app, 600.0);
     let focused_id = |h: &Harness<'_, App>| h.ctx.memory(|m| m.focused());
-    let id = |tool: Tool| Rail::new("rail").item_id(&tool);
+    let id = |tool: Tool| Rail::new(Id::unique("rail")).item_id(&tool);
     h.ctx.memory_mut(|m| m.request_focus(id(Tool::Comments)));
     h.run_steps(2);
     key(&mut h, Key::Tab);

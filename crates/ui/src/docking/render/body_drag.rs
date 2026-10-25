@@ -20,7 +20,7 @@ use std::{collections::HashMap, fmt::Debug, hash::Hash};
 use egui::{Context, Event, Id, Key, PointerButton, Pos2, RawInput, Rect, ViewportId};
 
 use super::Renderer;
-use super::native::{NativeInput, WindowDrag, content_of};
+use super::native::{WindowDrag, body_input, content_of};
 use crate::docking::desktop::{Over, window_at};
 use crate::docking::{Drag, GroupDrag};
 
@@ -151,27 +151,33 @@ impl BodyRoute {
 /// blocking, [`crate::docking::cancel_drag`]), and events it queued that no window has read
 /// yet are taken back, so a release queued before the stop reaches no window.
 fn end_route(ctx: &Context, area: Id, remove: bool) {
-    let queued = ctx.with_plugin(|input: &mut NativeInput| {
-        let route = input.routes.get_mut(&area)?;
-        let mut gone: Vec<ViewportId> = route.target.take().into_iter().collect();
-        route.ended = true;
-        if remove {
-            input.routes.remove(&area);
-        } else {
-            for (viewport, (_, events)) in &mut input.queued {
-                let before = events.len();
-                events.retain(|(from, _)| *from != area);
-                if events.len() != before && !gone.contains(viewport) {
-                    gone.push(*viewport);
+    let body = body_input(ctx);
+    let queued = {
+        let mut input = body.lock();
+        let input = &mut *input;
+        if let Some(route) = input.routes.get_mut(&area) {
+            let mut gone: Vec<ViewportId> = route.target.take().into_iter().collect();
+            route.ended = true;
+            if remove {
+                input.routes.remove(&area);
+            } else {
+                for (viewport, (_, events)) in &mut input.queued {
+                    let before = events.len();
+                    events.retain(|(from, _)| *from != area);
+                    if events.len() != before && !gone.contains(viewport) {
+                        gone.push(*viewport);
+                    }
                 }
             }
+            for viewport in &gone {
+                queue(&mut input.queued, input.pass, area, *viewport, Event::PointerGone);
+            }
+            Some(!gone.is_empty())
+        } else {
+            None
         }
-        for viewport in &gone {
-            queue(&mut input.queued, input.pass, area, *viewport, Event::PointerGone);
-        }
-        Some(!gone.is_empty())
-    });
-    if queued.flatten() == Some(true) {
+    };
+    if queued == Some(true) {
         ctx.request_repaint_of(ViewportId::ROOT);
     }
 }
@@ -187,14 +193,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     /// routing the map, and end it where it cannot go on. `native`: viewports are native.
     pub(super) fn map_body_route(&mut self, ctx: &Context, native: bool) {
         let desktop = self.desktop();
-        let owner = ctx.with_plugin(|input: &mut NativeInput| {
-            let route = input.routes.get_mut(&self.id)?;
-            route.desktop = desktop;
-            Some(route.window)
-        });
+        let owner = {
+            let body = body_input(ctx);
+            let mut input = body.lock();
+            input.routes.get_mut(&self.id).map(|route| {
+                route.desktop = desktop;
+                route.window
+            })
+        };
         // Windows are no longer native, or the owner closed.
         let natives = &self.cross.viewports;
-        if owner.flatten().is_some_and(|window| !native || window.is_some_and(|w| !natives.iter().any(|(id, _)| *id == w))) {
+        if owner.is_some_and(|window| !native || window.is_some_and(|w| !natives.iter().any(|(id, _)| *id == w))) {
             end_route(ctx, self.id, true);
         }
         if native {
@@ -211,7 +220,11 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     /// is over. An Escape in any of the app's windows, a focus loss and input blocking end it.
     pub(super) fn route_body_drag(&mut self, ctx: &Context, window: Option<u64>) {
         let (area, viewport, dragged) = (self.id, ctx.viewport_id(), ctx.dragged_id());
-        let route = ctx.with_plugin(|input: &mut NativeInput| input.routes.get(&area).map(|r| (r.owner, r.id))).flatten();
+        let route = {
+            let body = body_input(ctx);
+            let input = body.lock();
+            input.routes.get(&area).map(|r| (r.owner, r.id))
+        };
         let stops = self.input_blocked || self.cross.focus_lost || ctx.input(|i| i.key_pressed(Key::Escape));
         match route {
             Some((owner, id)) if owner == viewport && dragged != Some(id) => end_route(ctx, area, true),
@@ -220,7 +233,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             None => {
                 let Some(id) = dragged.filter(|id| !stops && self.starts_in_body(ctx, *id)) else { return };
                 let route = BodyRoute { area, owner: viewport, window, id, desktop: self.desktop(), target: None, ended: false };
-                ctx.with_plugin(|input: &mut NativeInput| input.routes.insert(area, route));
+                let _ = body_input(ctx).lock().routes.insert(area, route);
             }
         }
     }
@@ -266,7 +279,9 @@ pub(in crate::docking) fn mark_app_drag(ctx: &Context, area: Id) {
 /// The events held for `viewport`'s input in a later pass.
 #[cfg(test)]
 pub(in crate::docking) fn held_events(ctx: &Context, viewport: ViewportId) -> Vec<Event> {
-    ctx.with_plugin(|input: &mut NativeInput| input.held.get(&viewport).map(|(_, events)| events.clone())).flatten().unwrap_or_default()
+    let body = body_input(ctx);
+    let events = body.lock().held.get(&viewport).map(|(_, events)| events.clone());
+    events.unwrap_or_default()
 }
 
 /// Where the last press in one of the area's panel bodies in `viewport` began.

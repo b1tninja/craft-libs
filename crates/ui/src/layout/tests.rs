@@ -107,6 +107,8 @@ struct HandleTest {
 }
 
 impl HandleTest {
+    /// Create a handle test with horizontal axis, a 4×140 pt rect, the label
+    /// `Resize panels`, enabled state and value 100.
     fn new() -> Self {
         let ctx = Context::default();
         ctx.enable_accesskit();
@@ -120,6 +122,8 @@ impl HandleTest {
         }
     }
 
+    /// Run one enabled `ResizeHandle` in a 400×200 frame and return its response plus the frame
+    /// output; texture deltas are cleared.
     fn frame(&mut self, events: Vec<Event>) -> (ResizeResponse, FullOutput) {
         let ctx = self.ctx.clone();
         let mut result = None;
@@ -127,7 +131,7 @@ impl HandleTest {
             ctx.run_ui(RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0))), events, ..Default::default() }, |ui| {
                 result = Some(
                     ui.add_enabled_ui(self.enabled, |ui| {
-                        ResizeHandle::new(Id::new("divider"), self.axis, self.rect, &self.label, handle_style())
+                        ResizeHandle::new(Id::unique("divider"), self.axis, self.rect, &self.label, handle_style())
                             .value(self.value, 0.0..=300.0)
                             .show(ui)
                     })

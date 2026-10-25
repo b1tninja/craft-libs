@@ -2,7 +2,7 @@
 
 The vocabulary that printing and scanning crates would otherwise each define for themselves, plus
 two plain records (`JobView`, `DeviceView`) so a UI can show a print job and a scan job, a printer
-and a scanner, the same way. A leaf crate: `std` only, no dependencies, no I/O, no threads,
+and a scanner, the same way. A leaf crate: `std` only, no dependencies by default (the optional `serde` feature adds `serde`), no I/O, no threads,
 `unsafe` forbidden, builds for `wasm32-unknown-unknown`. Data types and small helpers only.
 
 ## In

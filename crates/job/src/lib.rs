@@ -3,8 +3,8 @@
 //! rules with the one function that turns them into advice, and plain data records a UI can show
 //! the same way for both: [`JobView`] and [`DeviceView`].
 //!
-//! A leaf crate: `std` only, no I/O, no threads, no dependencies, builds for
-//! `wasm32-unknown-unknown`. It has no lifecycle object or state machine, no error kinds, no
+//! A leaf crate: `std` only, no I/O, no threads, no dependencies by default (the optional `serde` feature adds
+//! `serde`), builds for `wasm32-unknown-unknown`. It has no lifecycle object or state machine, no error kinds, no
 //! attempt tracking, no reconciliation engine and no UI; those belong to the domain crates. See
 //! the crate README.
 //!

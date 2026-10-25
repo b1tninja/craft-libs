@@ -418,6 +418,21 @@ fn a_glass_guess_alone_does_not_shrink_the_expected_count() {
 }
 
 #[test]
+fn a_glass_answer_that_kept_no_page_does_not_shrink_the_expected_count() {
+    use craft_scan::Acquired;
+    // The backend names the glass but the attempt ends with nothing kept: there is no one-page scan to complete, so
+    // the request for 20 pages stands for the retry.
+    let request = ScanSettings { source: Source::Auto, pages: 20, ..ScanSettings::default() };
+    let mut job = ScanJob::new(request, ScanJobConfig::default().with_capabilities(true, true, None));
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    let error =
+        ScanError::Incomplete { message: "the glass stopped".into(), acquired: Acquired { source: Source::Glass, pages: Vec::new() }, cause: None };
+    job.finish_attempt(Err(error), t(2)).expect("finish");
+    let _ = plan;
+    assert_eq!(job.snapshot().expected_pages, Some(20), "no page was kept from the glass");
+}
+
+#[test]
 fn auto_does_not_fall_back_without_a_glass_or_after_pages_or_for_a_jam() {
     let auto = || ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
 

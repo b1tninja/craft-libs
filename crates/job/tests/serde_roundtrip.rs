@@ -23,6 +23,7 @@ fn ids_are_strings() {
     assert!(serde_json::from_str::<JobId>("\"nocolon\"").is_err());
     assert!(serde_json::from_str::<JobId>("\"Bad:1\"").is_err());
     assert!(serde_json::from_str::<BackendName>("\"\"").is_err());
+    assert!(serde_json::from_str::<BackendName>("\"wia:1\"").is_err());
     assert_eq!(round(&Tag::from_seed(3)), format!("\"{}\"", Tag::from_seed(3)));
     assert!(serde_json::from_str::<Tag>("\"ABC\"").is_err());
 }

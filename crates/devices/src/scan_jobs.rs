@@ -546,7 +546,7 @@ pub fn detail_text(program: &str, dir: &Path, record: &JobRecord) -> String {
     }
     match record.manual_duplex {
         Some(duplex) if record.backs_remaining() => out.push_str(&format!(
-            "  backs: put the next part of the flipped stack in the feeder (the back of sheet {} is next) and run {program} scan --continue {d} --append --yes; --restart scans the backs again and keeps the fronts\n",
+            "  backs: put the next part of the flipped stack in the feeder (the back of sheet {} is next) and run {program} scan --continue {d} --append --yes\n",
             duplex.cursor
         )),
         None if record.can_add_sheets() => out.push_str(&format!(

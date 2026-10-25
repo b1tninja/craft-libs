@@ -102,8 +102,9 @@ is off by default and changes nothing in a default build. The crate itself never
 * **Names** are lowercase `snake_case` (`needs_attention`, `completed_with_errors`, `not_reported`,
   `job_name_suffix`). Struct fields keep their Rust names. This is the wire format and is meant to stay
   stable; new fields and variants are added, not renamed.
-* **Ids and tags are strings**: `JobId`, `DeviceId`, `BackendName` as `"<backend>:<native>"` (read back
-  through `FromStr`, so a bad id is an error), `Tag` as its 8 hex characters.
+* **Ids and tags are strings**: `JobId` and `DeviceId` as `"<backend>:<native>"` (read back through
+  `FromStr`, so a bad id is an error). `BackendName` is the bare name (`"wia"`, never namespaced; a name
+  with a `:` or an empty one is an error). `Tag` is its 8 hex characters.
 * **`Timestamp`** is milliseconds (`u64`). **Durations** (`RetryAdvice::RetryAfter`, `Fingerprint::window`)
   are whole milliseconds; finer precision is dropped. `RetryAdvice::RetryAfter(1.5 s)` is
   `{"retry_after":1500}`; `RetryNow` is `"retry_now"`.

@@ -1050,7 +1050,8 @@ impl ScanJob {
         // An Auto request that was answered from the glass (the backend chose it, or switched inside the call) can get
         // one page: the same expectation the job's own fallback sets, so one glass page is a complete scan. Only when no page
         // was kept before (as `auto_fallback_to_glass` requires): after a stopped feeder the stack is still short.
-        if running.requested == Source::Auto && used == Some(Source::Glass) && running.pages_before == 0 && self.expected.is_some() {
+        // `reported`, not `used`: a source the job only guessed is not one the backend answered from.
+        if running.requested == Source::Auto && reported == Some(Source::Glass) && running.pages_before == 0 && self.expected.is_some() {
             self.expected = Some(count(self.infos.len()).max(1));
         }
         self.in_flight = None;

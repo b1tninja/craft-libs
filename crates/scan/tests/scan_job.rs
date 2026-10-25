@@ -405,6 +405,19 @@ fn a_journal_from_a_newer_format_seeds_an_unknown_outcome() {
 }
 
 #[test]
+fn a_glass_guess_alone_does_not_shrink_the_expected_count() {
+    // The feeder is known empty, so Auto is guessed to use the glass; the attempt then fails before the backend says
+    // which source it used. The guess is not an answer: the request for 20 pages stands for the retry.
+    let request = ScanSettings { source: Source::Auto, pages: 20, ..ScanSettings::default() };
+    let mut job = ScanJob::new(request, ScanJobConfig::default().with_capabilities(true, true, None));
+    job.observe_status(EsclLike::new(AdfState::Empty, 0).status(ESCL_ID));
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    assert_eq!(plan.source_guess, Some(Source::Glass));
+    job.finish_attempt(Err(ScanError::Failed("the scanner stopped answering".into())), t(2)).expect("finish");
+    assert_eq!(job.snapshot().expected_pages, Some(20), "a guessed glass is not a reported glass");
+}
+
+#[test]
 fn auto_does_not_fall_back_without_a_glass_or_after_pages_or_for_a_jam() {
     let auto = || ScanSettings { source: Source::Auto, pages: 5, ..ScanSettings::default() };
 

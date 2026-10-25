@@ -193,7 +193,13 @@ pub fn retry<T>(
         };
         match advise_error(&error, attempt, policy, jitter) {
             RetryAdvice::RetryNow if !cancel.is_cancelled() => {}
-            RetryAdvice::RetryAfter(wait) if !cancel.is_cancelled() => sleep_cancellable(clock, cancel, wait),
+            RetryAdvice::RetryAfter(wait) if !cancel.is_cancelled() => {
+                sleep_cancellable(clock, cancel, wait);
+                // A cancel that landed during the wait ends the loop before another try.
+                if cancel.is_cancelled() {
+                    return Err(error);
+                }
+            }
             _ => return Err(error),
         }
         attempt = attempt.saturating_add(1);
@@ -306,6 +312,32 @@ mod tests {
             Err(error(ErrorKind::Busy, RetrySafety::Safe))
         });
         assert_eq!(calls, 1);
+    }
+
+    /// A clock whose sleep cancels the token, as a cancel that arrives while the loop waits.
+    struct CancelsWhileSleeping(CancelToken);
+
+    impl Clock for CancelsWhileSleeping {
+        fn now(&self) -> Duration {
+            Duration::ZERO
+        }
+        fn sleep(&self, _: Duration) {
+            self.0.cancel();
+        }
+    }
+
+    #[test]
+    fn a_cancel_during_the_backoff_wait_stops_the_loop_before_another_try() {
+        let cancel = CancelToken::new();
+        let clock = CancelsWhileSleeping(cancel.clone());
+        let mut jitter = Jitter::new(1);
+        let mut calls = 0;
+        let got: Result<(), _> = retry(&policy(), &clock, &cancel, &mut jitter, |_| {
+            calls += 1;
+            Err(error(ErrorKind::Busy, RetrySafety::Safe))
+        });
+        assert_eq!(calls, 1, "the cancel landed during the wait, so no second try is made");
+        assert_eq!(got.map_err(|e| e.kind()), Err(ErrorKind::Busy), "the last error comes back");
     }
 
     #[test]

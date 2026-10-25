@@ -114,7 +114,7 @@ is off by default and changes nothing in a default build. The crate itself never
   `IndicatorKey` is its snake_case name; an unknown name reads back as `IndicatorKey::Other(..)` under the
   same limits (so `Other("jam")` reads back as `Jam`).
 * **Forward compatibility**: unknown fields are ignored; optional fields and collections may be missing
-  (they default); a value this version does not know reads as `JobState::Unknown`,
+  (they default; `Progress::done` is required, so a record that lost it is an error and not "no progress yet"); a value this version does not know reads as `JobState::Unknown`,
   `DeviceState::Unknown`, `DeviceConnection::Unknown`, `Tri::NotReported` or `TagPlacement::None`.
   `JobKind`, `Severity`, `RetrySafety`, `RetryAdvice`, `TagSupport` and `PaperSource` have no such fallback and
   fail on an unknown value: a retry rule is not guessed.

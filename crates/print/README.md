@@ -120,6 +120,12 @@ next is asked for, one request at a time, with the job's id:
 
 ```rust,no_run
 use craft_print::{Document, Job, JobWatch, SubmitRequest, WaitPolicy, WatchStep};
+use craft_print::wsd::WsdBackend;
+
+// Once, at start-up: the process-wide registry holds only the built-in spooler until a backend is registered.
+let wsd = WsdBackend::new();
+wsd.add_named("http://10.0.0.20:5357/print", "Front office")?; // the app chose this printer
+craft_print::register(Box::new(wsd))?;
 
 let registry = craft_print::registry();
 let job = Job { printer: Some("wsd:http://10.0.0.20:5357/print".into()), ..Job::default() };
@@ -179,6 +185,12 @@ timer or runtime, waits on an injectable `Clock` and keeps everything in memory.
 
 ```rust,no_run
 use craft_print::{BytesSource, DocumentFormat, Job, PrintJob, UserConfirmed};
+use craft_print::wsd::WsdBackend;
+
+// Once, at start-up: the process-wide registry holds only the built-in spooler until a backend is registered.
+let wsd = WsdBackend::new();
+wsd.add_named("http://10.0.0.20:5357/print", "Front office")?; // the app chose this printer
+craft_print::register(Box::new(wsd))?;
 
 let registry = craft_print::registry();
 let job = Job { printer: Some("wsd:http://10.0.0.20:5357/print".into()), title: "Quarterly report".into(), ..Job::default() };

@@ -146,8 +146,11 @@ never reset the stall rule (that needs a changed reading) and never affect the c
   6. the action is one of the types **we subscribed to**, and the body's first element is that event's
      element in the WS-Print namespace (a wrong namespace or an action/body mismatch is dropped);
   7. a message id seen recently on this subscription is a duplicate and is acknowledged but not acted on.
-  Failures answer a bare status (400, 404, 411, 413, 429 or 503) with no detail, and are counted
-  (`EventStats`) for diagnostics. Valid events are answered `202 Accepted`.
+  Failures answer a bare status with no detail: 400 (malformed), 403 (a wrong identifier), 404 (an
+  unknown path or subscription), 405 (not `POST`), 408 (the connection deadline passed), 411 (no
+  length), 413 (a body over the cap), 415 (not a SOAP content type), 429 (over the rate limit) or
+  431 (the header block is too large). They are counted (`EventStats`) for diagnostics. Valid events
+  are answered `202 Accepted`.
 * **Bounded everything:** one connection at a time; 8 KiB of headers; 64 KiB of body; a 3 second
   total deadline per connection; a token bucket (default burst 50, 20 per second); at most 16
   subscriptions; 256 remembered message ids per subscription; wakes coalesce into one counter per

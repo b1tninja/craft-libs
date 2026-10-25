@@ -193,7 +193,9 @@ impl WsdError {
             // back (the reply, a list, a multipart message) is the printer's doing.
             Self::TooLarge(what, _) if REQUEST_LABELS.contains(what) => class(K::InvalidRequest, P::Prepare, S::Safe),
             Self::TooLarge(..) | Self::Xml(_) | Self::Protocol(_) => class(K::Failed, net(P::Reply), reached),
-            Self::Timeout => class(K::Timeout, net(P::Reply), reached),
+            // The caller's deadline had already passed when the exchange was about to start (an
+            // exchange that runs past it ends as a transport timeout instead): nothing was sent.
+            Self::Timeout => class(K::Timeout, P::Prepare, S::Safe),
             Self::Transport { kind, stage, .. } => {
                 use TransportKind as T;
                 let kind_of = match kind {
@@ -527,8 +529,10 @@ mod tests {
             (WsdError::NotFound("n".into()), Op::Query, K::NotFound, P::Prepare, S::Safe, None),
             (WsdError::Cancelled, Op::Send, K::Cancelled, P::Prepare, S::Safe, None),
             (WsdError::TooLarge("the request", 1), Op::Send, K::InvalidRequest, P::Prepare, S::Safe, None),
-            (WsdError::Timeout, Op::Send, K::Timeout, P::Reply, S::OutcomeUnknown, None),
-            (WsdError::Timeout, Op::Status, K::Timeout, P::Poll, S::Idempotent, None),
+            // The deadline passed before the exchange started: nothing was sent, whatever the operation.
+            (WsdError::Timeout, Op::Create, K::Timeout, P::Prepare, S::Safe, None),
+            (WsdError::Timeout, Op::Send, K::Timeout, P::Prepare, S::Safe, None),
+            (WsdError::Timeout, Op::Status, K::Timeout, P::Prepare, S::Safe, None),
             // Transport, at the default stage of each kind: a connect failure sent nothing, whatever
             // the operation; the rest may have arrived (a create and a send are then unknown, a
             // query, a status poll and a cancel idempotent).
@@ -716,7 +720,13 @@ mod tests {
                     assert!(c.kind.is_retryable(), "{what}: only a transient condition has a wait");
                 }
                 if c.kind.is_retryable() {
-                    assert_ne!(c.phase, Phase::Prepare, "{what}: a transient failure happened on the wire");
+                    // The one retryable error that never reached the wire: the deadline had passed
+                    // before the exchange started, so a fresh deadline can try again.
+                    if matches!(e, WsdError::Timeout) {
+                        assert_eq!((c.phase, c.safety), (Phase::Prepare, RetrySafety::Safe), "{what}: nothing was sent");
+                    } else {
+                        assert_ne!(c.phase, Phase::Prepare, "{what}: a transient failure happened on the wire");
+                    }
                 }
                 if c.phase == Phase::Poll {
                     assert_eq!(op, Op::Status, "{what}");

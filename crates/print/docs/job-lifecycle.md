@@ -170,7 +170,7 @@ is pinned by `the_retry_table_for_every_kind` in `src/wsd/error.rs`.
 | Transport `connect_timeout` (stage connect) | `Timeout` | yes | Connect | Safe | Safe | none |
 | Transport `connection_closed` (stage reply; request, if it was being written) | `Unavailable` | yes | Reply (Request) | OutcomeUnknown | Idempotent | none |
 | Transport `timeout` (stage reply) | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
-| The caller's deadline passed | `Timeout` | yes | Reply | OutcomeUnknown | Idempotent | none |
+| The caller's deadline passed before the request was sent | `Timeout` | yes | Prepare | Safe | Safe | none |
 | Transport `invalid_response` (a peer that did not speak HTTP) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |
 | Transport `io` (an I/O error that fits no other kind) | `Unavailable` | yes | Reply | OutcomeUnknown | Idempotent | none |
 | Transport `redirect` (refused) | `Failed` | no | Reply | OutcomeUnknown | Idempotent | none |

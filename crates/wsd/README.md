@@ -42,8 +42,9 @@ let elements = client.call(&call, read_scanner_elements)?;
 Device metadata and events work the same way:
 
 ```rust,ignore
+let device_host = device_url.host(); // IpAddr is Copy; the client takes the DeviceUrl by value
 let meta = metadata::transfer_get(&SoapClient::new(&transport, device_url))?;
-let scanner_url = meta.endpoint_for(ServiceKind::Scan, device_url.host())?; // only policy-admitted addresses
+let scanner_url = meta.endpoint_for(ServiceKind::Scan, device_host)?; // only policy-admitted addresses
 let sub = eventing::subscribe(&client, &SubscribeRequest::new(EndpointRef::new(my_sink_url)))?;
 eventing::dispatch(&posted_bytes, &my_sink)?;                 // from the application's listener
 ```

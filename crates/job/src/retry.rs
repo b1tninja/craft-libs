@@ -194,7 +194,7 @@ impl RetryAdvice {
 /// 2. [`RetrySafety::OutcomeUnknown`]: [`RetryAdvice::CheckDeviceFirst`], whatever the attempts
 ///    left (the question "did it arrive?" does not go away when the budget does), and never an
 ///    automatic retry;
-/// 3. `attempts_so_far >= max_attempts`: [`RetryAdvice::DoNotRetry`];
+/// 3. `attempts_so_far >= max_attempts` (0 counts as 1, the failed attempt itself): [`RetryAdvice::DoNotRetry`];
 /// 4. otherwise the policy's backoff, jittered from `jitter_seed` and raised to the device's
 ///    `retry_after` hint capped at `max_retry_after`: [`RetryAdvice::RetryNow`] when that wait is
 ///    zero, else [`RetryAdvice::RetryAfter`]. The wait never exceeds the larger of `max_delay` and
@@ -206,7 +206,8 @@ pub fn advise(facts: &RetryFacts, policy: &RetryPolicy) -> RetryAdvice {
     if !facts.safety.allows_automatic_retry() {
         return RetryAdvice::CheckDeviceFirst;
     }
-    if facts.attempts_so_far >= policy.max_attempts {
+    // The attempt that just failed counts: a caller that says 0 (as `delay` reads it) means the first.
+    if facts.attempts_so_far.max(1) >= policy.max_attempts {
         return RetryAdvice::DoNotRetry;
     }
     let unit = Jitter::new(facts.jitter_seed ^ u64::from(facts.attempts_so_far).wrapping_mul(0x9E37_79B9_7F4A_7C15)).unit();
@@ -297,6 +298,9 @@ mod tests {
         assert_eq!(advise(&f(true, Safe, 5), &p), DoNotRetry);
         assert_eq!(advise(&f(true, Safe, 99), &p), DoNotRetry);
         assert_eq!(advise(&f(true, Safe, 1), &RetryPolicy::none()), DoNotRetry);
+        // 0 attempts so far is the failed attempt itself (as in `delay`): a policy of one try never retries
+        assert_eq!(advise(&f(true, Safe, 0), &RetryPolicy::none()), DoNotRetry);
+        assert_eq!(advise(&f(true, Safe, 0), &p), RetryAfter(MS(100)));
         // an unknown outcome is checked, never retried, even with budget left or spent
         assert_eq!(advise(&f(true, OutcomeUnknown, 1), &p), CheckDeviceFirst);
         assert_eq!(advise(&f(true, OutcomeUnknown, 99), &p), CheckDeviceFirst);

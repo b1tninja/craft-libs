@@ -37,11 +37,21 @@ craft-<name> = { git = "https://github.com/storytold/craft-libs", rev = "<commit
 - [`craft-docpath`](crates/docpath/src/lib.rs): decides whether a path or `file:` URL stored in a
   document may be opened. Paths stored in documents are followed only when they are local or on the
   document's own network share; other network paths, device paths and non-file URLs are refused.
+- [`craft-fonts-build`](crates/fonts-build/README.md): embeds the optional craft-fonts faces
+  from an app's `build.rs` (`CRAFT_FONTS_DIR`, `CRAFT_FONTS_REQUIRED`, script filters) as a table
+  of `EmbeddedFace`s. No dependencies; the app picks the faces.
 - [`craft-i18n`](crates/i18n/README.md): translations over the embedded craft-i18n catalogs:
   lookup with fallback (`pt-br` → `pt` → English), plurals, language names, the system locale and
   a pseudo locale. The catalogs stay a fully optional build input; apps keep `tl!` and their
   language setting.
 - [`craft-job`](crates/job/README.md): the small vocabulary printing and scanning share: `NativeCode`, `<backend>:<native>` job and device ids, and retry safety with one retry-advice function. No lifecycle, tracking or I/O.
+- [`craft-jpeg`](crates/jpeg/README.md): clean-room decoder for 12-bit and arithmetic-coded
+  JPEG (T.81 SOF0/SOF1 at 12 bits, SOF9, SOF10), from PhotoCraft, and a frame probe for routing.
+  Metadata stays in each app.
+- [`craft-keymap`](crates/keymap/README.md): keyboard bindings: chords and their text forms,
+  scopes, conflicts, user overrides stored through craft-settings and import of other
+  applications' shortcut sets. Command catalogs, file readers and the shortcut editor UI stay
+  in each app.
 - [`craft-media`](crates/media/README.md): bit-level I/O (`bitstream`), clean-room MP4/MOV
   (`isobmff`) and Matroska/WebM (`matroska`) demuxers and muxers, from FilmCraft, and an ISO BMFF
   box reader. Containers only; codecs stay in each app.

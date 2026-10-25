@@ -12,14 +12,30 @@ workspace = true
 
 [dependencies]
 egui = { workspace = true }
+log = "0.4"
 serde = { version = "1", features = ["derive"], optional = true }
+
+# Fading a native window while it is dragged (`NSWindow.alphaValue`); winit already uses these.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSWindow"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSString"] }
 
 [features]
 serde = ["dep:serde"]
+# Floating windows may move to their own OS windows (desktop egui backends with viewports).
+native-windows = []
+# `docking::testing`: a headless driver for application docking tests.
+testing = []
 
 [dev-dependencies]
 egui = { workspace = true, features = ["default_fonts"] }
 serde_json = "1"
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
 egui_kittest = { version = "0.36", features = ["wgpu"] }
+eframe = { version = "0.36", default-features = false, features = ["wgpu", "x11", "default_fonts"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[[example]]
+name = "docking_native"
+required-features = ["native-windows"]

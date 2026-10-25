@@ -171,7 +171,30 @@ fn resize_handle_preserves_pointer_drag_lifecycle_and_reports_per_frame_delta() 
     let (response, _) = h.frame(vec![pointer(center + vec2(16.0, 0.0), false)]);
     assert!(response.response.drag_stopped());
     assert_eq!(response.delta, 0.0);
+    assert!(!response.response.has_focus());
+    let (response, _) = h.frame(vec![key(Key::ArrowRight)]);
+    assert!(h.ctx.memory(|m| m.focused()).is_none(), "after a pointer drag no widget has focus, so app shortcuts work");
+    assert_eq!(response.delta, 0.0, "arrow keys are left to the app");
     assert_eq!(h.value, 100.0, "the component never owns pane state");
+}
+
+#[test]
+fn tab_focused_handle_keeps_focus_through_a_pointer_drag_and_arrow_resizing() {
+    let mut h = HandleTest::new();
+    let center = h.rect.center();
+    h.settle();
+    h.frame(vec![key(Key::Tab)]);
+    let (response, _) = h.frame(vec![]);
+    assert!(response.response.has_focus(), "Tab reaches the handle");
+    h.frame(vec![Event::PointerMoved(center), pointer(center, true)]);
+    h.frame(vec![Event::PointerMoved(center + vec2(12.0, 0.0))]);
+    h.frame(vec![pointer(center + vec2(12.0, 0.0), false)]);
+    let (response, _) = h.frame(vec![key(Key::ArrowRight)]);
+    assert!(response.response.has_focus());
+    assert_eq!(response.delta, 8.0);
+    let (response, _) = h.frame(vec![key(Key::ArrowLeft)]);
+    assert!(response.response.has_focus());
+    assert_eq!(response.delta, -8.0);
 }
 
 #[test]

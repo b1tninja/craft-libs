@@ -31,6 +31,8 @@ const MAX_TOKENS: usize = 16 << 20;
 const MAX_OBJECT_NODES: usize = 32_000;
 const MAX_OBJECT_TOKENS: usize = 1 << 20;
 const MAX_SECTIONS: usize = 256;
+/// The most the page objects of repeated copies ([`Repeat`]) may take, in bytes.
+const MAX_REPEATED: usize = 64 << 20;
 /// A page without a MediaBox (invalid, but readers accept it) is US Letter.
 const DEFAULT_MEDIA: [f64; 4] = [0.0, 0.0, 612.0, 792.0];
 /// Sheet sizes this close, in points (0.18 mm), are the same size.
@@ -814,8 +816,12 @@ pub(crate) struct Sheet {
     /// The page object (number, generation); `None` for a page written inside its parent.
     obj: Option<(u32, u16)>,
     dict: Dict,
+    /// The MediaBox, inherited or not.
+    media: [f64; 4],
     /// The visible box (CropBox within MediaBox), in the page's own unrotated space.
     pub(crate) bounds: [f64; 4],
+    /// `/Resources` inherited from the page tree; `None` when the page has its own or none.
+    resources: Option<Arc<Obj>>,
     /// `/Rotate`, 0, 90, 180 or 270.
     pub(crate) rotate: u32,
     /// What the page's annotations print, and whether Windows would print them alike.
@@ -842,14 +848,17 @@ pub(crate) struct Annots {
     /// flag says, so it would print some annotation the file says to omit, or omit one the file
     /// says to print.
     windows_differs: bool,
+    /// `/Annots` lists at least one annotation.
+    annotated: bool,
 }
 
 impl Annots {
     fn unreadable() -> Self {
-        Self { printable: Some(b"unreadable".to_vec()), windows_differs: true }
+        Self { printable: Some(b"unreadable".to_vec()), windows_differs: true, annotated: true }
     }
 
     fn note(&mut self, subtype: &[u8], flags: i64) {
+        self.annotated = true;
         let inert = matches!(subtype, b"Link" | b"Popup");
         let hidden = flags & ANNOT_HIDDEN != 0;
         let prints = !inert && !hidden && flags & ANNOT_PRINT != 0;
@@ -878,6 +887,7 @@ pub(crate) struct Sheets<'a> {
     data: &'a [u8],
     pub(crate) sheets: Vec<Sheet>,
     trailer: Dict,
+    catalog: Dict,
     /// The newest cross-reference section is a stream (so is the update's).
     xref_stream: bool,
     startxref: usize,
@@ -891,6 +901,7 @@ struct Inherited {
     media: Option<Arc<Obj>>,
     crop: Option<Arc<Obj>>,
     rotate: Option<Arc<Obj>>,
+    resources: Option<Arc<Obj>>,
 }
 
 /// Read the sheets of a print-ready PDF.
@@ -948,10 +959,14 @@ pub(crate) fn read(data: &[u8]) -> Result<Sheets<'_>, Error> {
             _ => None,
         };
         let mut dict = reader.resolve(&node).and_then(|d| d.dict().cloned()).ok_or_else(|| unreadable("a page is missing"))?;
+        // A null value is the same as no entry (ISO 32000-1, 7.3.9), so it inherits.
+        let own = |key: &[u8]| get(&dict, key).filter(|v| **v != Obj::Null).cloned().map(Arc::new);
+        let parent_resources = inherited.resources.clone();
         let here = Inherited {
-            media: get(&dict, b"MediaBox").cloned().map(Arc::new).or(inherited.media),
-            crop: get(&dict, b"CropBox").cloned().map(Arc::new).or(inherited.crop),
-            rotate: get(&dict, b"Rotate").cloned().map(Arc::new).or(inherited.rotate),
+            media: own(b"MediaBox").or(inherited.media),
+            crop: own(b"CropBox").or(inherited.crop),
+            rotate: own(b"Rotate").or(inherited.rotate),
+            resources: own(b"Resources").or(inherited.resources),
         };
         let kids = get(&dict, b"Kids").cloned().and_then(|k| reader.resolve(&k));
         let is_node = get(&dict, b"Type").and_then(Obj::name) == Some(b"Pages") || (get(&dict, b"Type").is_none() && kids.is_some());
@@ -1017,7 +1032,15 @@ pub(crate) fn read(data: &[u8]) -> Result<Sheets<'_>, Error> {
                 _ => Annots::unreadable(),
             },
         };
-        sheets.push(Sheet { obj, dict, bounds, rotate, annots });
+        // A reference to a missing object is null too. Only the cross-reference table is
+        // looked at: resolving a shared Resources dictionary for every page would parse it again.
+        let own_resources = match get(&dict, b"Resources") {
+            None | Some(Obj::Null) => false,
+            Some(Obj::Ref(num, _)) => matches!(reader.entries.get(num), Some(Entry::At(_) | Entry::In(..))),
+            Some(_) => true,
+        };
+        let resources = if own_resources { None } else { parent_resources };
+        sheets.push(Sheet { obj, dict, media, bounds, resources, rotate, annots });
     }
     if reader.budget.exhausted {
         return Err(unreadable("the parser memory budget was exceeded"));
@@ -1025,7 +1048,7 @@ pub(crate) fn read(data: &[u8]) -> Result<Sheets<'_>, Error> {
     if sheets.is_empty() {
         return Err(Error::Spool("the print-ready PDF has no pages".into()));
     }
-    Ok(Sheets { data, sheets, trailer, xref_stream, startxref: start, size })
+    Ok(Sheets { data, sheets, trailer, catalog, xref_stream, startxref: start, size })
 }
 
 /// How sheets of another size than the paper are printed.
@@ -1116,6 +1139,26 @@ pub(crate) fn plan(sheets: &[Sheet], paper: (f64, f64), fit: Fit) -> Result<Vec<
     Ok(edits)
 }
 
+/// The whole document printed `copies` times in one job, for collated copies the driver can't
+/// make: each copy's pages follow the previous copy's. On two-sided paper, a document with an odd
+/// number of sheets gets a blank page after every copy but the last, so each copy starts on a
+/// sheet of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Repeat {
+    pub(crate) copies: u32,
+    pub(crate) two_sided: bool,
+}
+
+fn rect_obj(r: [f64; 4]) -> Obj {
+    Obj::Array(r.into_iter().map(num_obj).collect())
+}
+
+/// Starts object `num` in an update, recording where it is.
+fn new_object(out: &mut Vec<u8>, num: u32, generation: u16, written: &mut Vec<(u32, u16, usize)>) {
+    written.push((num, generation, out.len()));
+    out.extend_from_slice(format!("{num} {generation} obj\n").as_bytes());
+}
+
 /// Boxes a reframed page drops: they were in the old geometry.
 const OLD_GEOMETRY: [&[u8]; 6] = [b"MediaBox", b"CropBox", b"BleedBox", b"TrimBox", b"ArtBox", b"Rotate"];
 
@@ -1134,7 +1177,25 @@ impl Sheets<'_> {
     /// original bytes, then the new versions of the edited pages, the content streams a
     /// reframed page wraps its own in, and a cross-reference section of the same kind as the
     /// newest one, chained to it with `/Prev`.
+    ///
     pub(crate) fn update(&self, edits: &[Edit]) -> Result<Vec<u8>, Error> {
+        // Only a repeat can be turned down, so there is always a PDF.
+        Ok(self.write(edits, None)?.unwrap_or_else(|| self.data.to_vec()))
+    }
+
+    /// [`update`](Self::update) with every copy of `repeat` in the one PDF. The edited pages
+    /// are not written in place: the update adds a page tree of its own, every copy's pages as
+    /// new page objects that share the original content and resources, and a new version of
+    /// the catalog pointing to it. Each new page carries the boxes, rotation and resources it
+    /// inherited, since its parent is the new tree. `None` when the copies can't be one PDF:
+    /// the PDF is encrypted (strings are encrypted with keys made from their object's number),
+    /// a page has annotations (an annotation belongs to one page; whether a renderer draws it on
+    /// others is unknown), or the job would be too large.
+    pub(crate) fn repeated(&self, edits: &[Edit], repeat: Repeat) -> Result<Option<Vec<u8>>, Error> {
+        self.write(edits, Some(repeat))
+    }
+
+    fn write(&self, edits: &[Edit], repeat: Option<Repeat>) -> Result<Option<Vec<u8>>, Error> {
         let refuse = |why: &str| Error::Spool(format!("the print-ready PDF can't be fitted to the paper: {why}"));
         let mut out = self.data.to_vec();
         if !out.ends_with(b"\n") {
@@ -1143,13 +1204,10 @@ impl Sheets<'_> {
         let mut next = self.size;
         // Each new object's number, generation and offset.
         let mut written: Vec<(u32, u16, usize)> = Vec::new();
-        fn new_object(out: &mut Vec<u8>, num: u32, generation: u16, written: &mut Vec<(u32, u16, usize)>) {
-            written.push((num, generation, out.len()));
-            out.extend_from_slice(format!("{num} {generation} obj\n").as_bytes());
-        }
+        let repeat = repeat.filter(|r| r.copies > 1);
+        let mut edited = HashMap::new();
         for edit in edits {
             let sheet = self.sheets.get(edit.sheet).ok_or_else(|| refuse("no such sheet"))?;
-            let (num, generation) = sheet.obj.ok_or_else(|| refuse("a page is not an object of its own"))?;
             let mut dict = sheet.dict.clone();
             dict.retain(|(k, _)| k != b"Rotate");
             if let Some(frame) = &edit.frame {
@@ -1208,12 +1266,126 @@ impl Sheets<'_> {
                 dict.push((b"Contents".to_vec(), Obj::Array(contents)));
             }
             dict.push((b"Rotate".to_vec(), Obj::Num(edit.rotate.to_string().into_bytes())));
-            new_object(&mut out, num, generation, &mut written);
-            write_dict(&mut out, &dict);
+            if repeat.is_some() {
+                edited.insert(edit.sheet, dict);
+            } else {
+                let (num, generation) = sheet.obj.ok_or_else(|| refuse("a page is not an object of its own"))?;
+                new_object(&mut out, num, generation, &mut written);
+                write_dict(&mut out, &dict);
+                out.extend_from_slice(b"\nendobj\n");
+            }
+        }
+        if let Some(Repeat { copies, two_sided }) = repeat {
+            let refuse = |why: &str| Error::Spool(format!("the copies can't be written: {why}"));
+            if get(&self.trailer, b"Encrypt").is_some() || self.sheets.iter().any(|s| s.annots.annotated) {
+                return Ok(None);
+            }
+            let Some(&Obj::Ref(root, root_generation)) = get(&self.trailer, b"Root") else {
+                return Ok(None);
+            };
+            let blank = two_sided && self.sheets.len() % 2 == 1;
+            let per_copy = self.sheets.len() + usize::from(blank);
+            let count =
+                usize::try_from(copies).ok().and_then(|c| per_copy.checked_mul(c)).map(|n| n - usize::from(blank)).filter(|&n| n <= MAX_PAGES);
+            let Some(count) = count else { return Ok(None) };
+            let tree = next;
+            next = next.checked_add(1).ok_or_else(|| refuse("too many objects"))?;
+            let parent = (b"Parent".to_vec(), Obj::Ref(tree, 0));
+            // Bytes written once, and bytes written once per copy (a page, its xref entry and kid).
+            let (mut once, mut each) = (0usize, 0usize);
+            let within =
+                |once: usize, each: usize| each.checked_mul(copies as usize).and_then(|n| n.checked_add(once)).is_some_and(|n| n <= MAX_REPEATED);
+            // Inherited inline resources are written once, as an object of their own, and every
+            // page that inherited them refers to it.
+            let mut shared: HashMap<*const Obj, Obj> = HashMap::new();
+            let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(per_copy);
+            let mut last = Dict::new();
+            for (i, sheet) in self.sheets.iter().enumerate() {
+                let mut dict = edited.remove(&i).unwrap_or_else(|| sheet.dict.clone());
+                dict.retain(|(k, _)| k != b"Parent");
+                // The boxes as read, not the inherited objects: those can be anything.
+                for (key, value) in [(&b"MediaBox"[..], rect_obj(sheet.media)), (b"CropBox", rect_obj(sheet.bounds))] {
+                    if get(&dict, key).is_none_or(|v| *v == Obj::Null) {
+                        dict.retain(|(k, _)| k != key);
+                        dict.push((key.to_vec(), value));
+                    }
+                }
+                if get(&dict, b"Rotate").is_none_or(|v| *v == Obj::Null) {
+                    dict.retain(|(k, _)| k != b"Rotate");
+                    dict.push((b"Rotate".to_vec(), Obj::Num(sheet.rotate.to_string().into_bytes())));
+                }
+                if let Some(resources) = &sheet.resources {
+                    let value = match &**resources {
+                        Obj::Ref(..) => Obj::clone(resources),
+                        _ => match shared.get(&Arc::as_ptr(resources)) {
+                            Some(r) => r.clone(),
+                            None => {
+                                let num = next;
+                                next = next.checked_add(1).ok_or_else(|| refuse("too many objects"))?;
+                                let at = out.len();
+                                new_object(&mut out, num, 0, &mut written);
+                                write_obj(&mut out, resources);
+                                out.extend_from_slice(b"\nendobj\n");
+                                once += out.len() - at;
+                                if !within(once, each) {
+                                    return Ok(None);
+                                }
+                                shared.insert(Arc::as_ptr(resources), Obj::Ref(num, 0));
+                                Obj::Ref(num, 0)
+                            }
+                        },
+                    };
+                    dict.retain(|(k, _)| k != b"Resources");
+                    dict.push((b"Resources".to_vec(), value));
+                }
+                dict.push(parent.clone());
+                let mut body = Vec::new();
+                write_dict(&mut body, &dict);
+                each += body.len() + 64;
+                if !within(once, each) {
+                    return Ok(None);
+                }
+                bodies.push(body);
+                last = dict;
+            }
+            if blank {
+                let mut page = vec![(b"Type".to_vec(), Obj::Name(b"Page".to_vec())), parent.clone(), (b"Resources".to_vec(), Obj::Dict(Vec::new()))];
+                for key in [&b"MediaBox"[..], b"CropBox", b"Rotate"] {
+                    if let Some(value) = get(&last, key) {
+                        page.push((key.to_vec(), value.clone()));
+                    }
+                }
+                let mut body = Vec::new();
+                write_dict(&mut body, &page);
+                bodies.push(body);
+            }
+            let mut kids = Vec::with_capacity(count);
+            for body in bodies.iter().cycle().take(count) {
+                let num = next;
+                next = next.checked_add(1).ok_or_else(|| refuse("too many objects"))?;
+                new_object(&mut out, num, 0, &mut written);
+                out.extend_from_slice(body);
+                out.extend_from_slice(b"\nendobj\n");
+                kids.push(Obj::Ref(num, 0));
+            }
+            new_object(&mut out, tree, 0, &mut written);
+            let node = vec![
+                (b"Type".to_vec(), Obj::Name(b"Pages".to_vec())),
+                (b"Kids".to_vec(), Obj::Array(kids)),
+                (b"Count".to_vec(), Obj::Num(count.to_string().into_bytes())),
+            ];
+            write_dict(&mut out, &node);
+            out.extend_from_slice(b"\nendobj\n");
+            let mut catalog = self.catalog.clone();
+            // Page labels and the open action name pages of the old tree.
+            catalog.retain(|(k, _)| k != b"Pages" && k != b"PageLabels" && k != b"OpenAction");
+            catalog.push((b"Pages".to_vec(), Obj::Ref(tree, 0)));
+            new_object(&mut out, root, root_generation, &mut written);
+            write_dict(&mut out, &catalog);
             out.extend_from_slice(b"\nendobj\n");
         }
         if written.is_empty() {
-            return Ok(self.data.to_vec());
+            return Ok(Some(self.data.to_vec()));
         }
         written.sort_by_key(|(num, _, _)| *num);
         let mut trailer: Dict = Vec::new();
@@ -1260,7 +1432,7 @@ impl Sheets<'_> {
             write_dict(&mut out, &trailer);
             out.extend_from_slice(format!("\nstartxref\n{at}\n%%EOF\n").as_bytes());
         }
-        Ok(out)
+        Ok(Some(out))
     }
 }
 

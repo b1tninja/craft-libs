@@ -26,10 +26,10 @@ wsd = ["dep:craft-wsd", "dep:roxmltree"]
 # consent. Not built on wasm32. Without it the crate is whole.
 ipp = ["dep:craft-wsd"]
 # Test doubles for apps that print through this crate: `craft_print::testing` (registry-level fake
-# backends), with `wsd`, `craft_print::wsd::testing` (an in-memory WS-Print printer) and with `ipp`,
-# `craft_print::ipp::testing` (an in-memory IPP printer), both built on craft-wsd's `testing` feature. Off by default; enabling it adds no dependency to a build
-# without `wsd`, and none beyond craft-wsd's own `testing` feature with it. Never enable it in a
-# shipped binary.
+# backends) and, with `wsd`, `craft_print::wsd::testing` (an in-memory WS-Print printer, built on
+# craft-wsd's `testing` feature). There is no in-memory IPP printer: the fake IPP printer is
+# fakeprint. Off by default; enabling it adds no dependency to a build without `wsd`, and none
+# beyond craft-wsd's own `testing` feature with it. Never enable it in a shipped binary.
 testing = ["craft-wsd?/testing"]
 
 [lints]

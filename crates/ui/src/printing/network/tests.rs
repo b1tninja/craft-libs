@@ -451,7 +451,7 @@ fn frame(f: &Frames<'_>, events: Vec<egui::Event>) -> (Response, egui::FullOutpu
         egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 480.0))), events, ..Default::default() },
         |ui| {
             let host = Host { validate, query, sheets_ok: true, formats: &[PDF] };
-            response = state.borrow_mut().show(ui, egui::Id::new("net"), &host, &l);
+            response = state.borrow_mut().show(ui, egui::Id::unique("net"), &host, &l);
         },
     );
     output.textures_delta.clear();

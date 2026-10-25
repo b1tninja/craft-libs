@@ -174,10 +174,9 @@ impl State {
                 });
                 ui.end_row();
 
-                let caption = ui.label(labels.duplex);
+                ui.label(labels.duplex);
                 ui.vertical(|ui| {
-                    ui.add_enabled(in_play && choices.duplex.is_enabled(), egui::Checkbox::new(&mut settings.duplex, labels.duplex_both_sides))
-                        .labelled_by(caption.id);
+                    ui.add_enabled(in_play && choices.duplex.is_enabled(), egui::Checkbox::new(&mut settings.duplex, labels.duplex_both_sides));
                     let note = if choices.feeder.is_unsupported() { feeder_reason } else { labels.note_for(&choices.duplex, labels.reasons.duplex) };
                     quiet(ui, note);
                 });

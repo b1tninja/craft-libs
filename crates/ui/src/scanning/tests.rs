@@ -532,7 +532,7 @@ fn frame(ctx: &egui::Context, state: &mut State, discover: &Discover, load: &Loa
     let mut response = Response::default();
     let output = ctx.run_ui(
         egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(260.0, 520.0))), events, ..Default::default() },
-        |ui| response = state.show(ui, egui::Id::new("scan"), &labels(), discover, load),
+        |ui| response = state.show(ui, egui::Id::unique("scan"), &labels(), discover, load),
     );
     let mut output = output;
     output.textures_delta.clear();

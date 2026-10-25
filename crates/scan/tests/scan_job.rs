@@ -262,7 +262,10 @@ fn a_page_writer_that_follows_the_documented_loop_keeps_every_page_and_survives_
     // The worker ends between two polls: two more pages were pushed and the result carries all four.
     let result = scripted(&plan, 2, Source::Feeder, Some(native(InterruptKind::FeederEmpty)));
     assert!(matches!(&result, Err(ScanError::Incomplete { acquired, .. }) if acquired.pages.len() == 2));
+    let polled_state = job.snapshot().state;
     job.finish_attempt(result, t(2)).expect("finish");
+    assert_eq!(polled_state, ScanJobState::Acquiring, "what the poll loop published while the worker ran");
+    assert_eq!(job.snapshot().state, ScanJobState::Interrupted, "finish_attempt changed the state: the loop must publish it once more");
     assert_eq!(job.pages().len(), 4, "finish_attempt added pages the last poll never saw");
     assert_eq!(job.pages()[written..].len(), 2, "so the writer must flush once more after it");
     written = job.pages().len();

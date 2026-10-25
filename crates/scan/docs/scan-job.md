@@ -28,11 +28,13 @@ loop {
         write(&job.pages()[written..]); written = job.pages().len(); // optional: the bytes are borrowed while it runs
         publish(job.snapshot());                        // cheap: no page bytes
         if user_pressed_stop { job.cancel(now()); }     // requests plan.cancel
+        park_timeout(POLL);                             // 50-250 ms: a poll per UI refresh, not a busy loop
     }
     // A worker that panicked returned nothing: record it as a failed attempt, then hand over acquire's result.
     let result = worker.join().unwrap_or_else(|_| Err(ScanError::Failed("the scan worker stopped".into())));
     job.finish_attempt(result, now())?;
     write(&job.pages()[written..]); written = job.pages().len();   // pages the last poll never saw
+    publish(job.snapshot());                            // the state finish_attempt reached: the last one subscribers see
 
     match job.retry_advice() {
         RetryAdvice::RetryNow => continue,                      // first attempt, glass fallback
@@ -48,10 +50,17 @@ loop {
 gets only `plan.settings` (it is `Send`: settings plus the two tokens) and returns the `Result` of `acquire`.
 The controlling thread polls `record_progress`, forwards a stop request (the GUI's button, the CLI's Ctrl-C
 handler setting a flag the main loop turns into `job.cancel(now())`), and calls `finish_attempt` when the worker
-joins. `finish_attempt` can add pages the last poll never saw (the worker may end between two polls), so a writer
-flushes `job.pages()[written..]` once more after it. `written` indexes `job.pages()`, which is empty again after a
-`Restart` (the plan then says `kept_pages == 0`): the writer replaces the old page files and starts `written` at 0, or
-the next slice would index past the end. The job itself is never shared across threads and needs no lock. A short-lived CLI run is exactly this loop:
+joins. The loop waits between polls (an interval of a UI refresh, or the worker's own wake-up if the app has
+one): without a wait it would spin a core and publish the same snapshot thousands of times while a scan runs without
+new pages.
+
+`finish_attempt` changes the state and can add pages the last poll never saw (the worker may end between two polls).
+So after it a writer flushes `job.pages()[written..]` once more, and the loop publishes `job.snapshot()` once more:
+the publishes inside the poll loop never carry the state `finish_attempt` reached. `written` indexes `job.pages()`,
+which is empty again after a `Restart` (the plan then says `kept_pages == 0`): the writer replaces the old page files
+and starts `written` at 0, or the next slice would index past the end.
+
+The job itself is never shared across threads and needs no lock. A short-lived CLI run is exactly this loop:
 one process, one job, each page written to the job's output folder once `record_progress` has counted it (read
 from `job.pages()`; `take_pages()` refuses while the attempt runs, so a CLI that writes only at the end calls it
 after `finish_attempt`), a small journal the app writes, and an exit code from `exit_class()` (section 11).

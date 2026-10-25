@@ -19,16 +19,20 @@ let mut job = ScanJob::new(settings, ScanJobConfig::default().with_scanner(&deta
 
 loop {
     let plan = job.begin_attempt(now())?;               // or begin_attempt_with(now(), Continuation::Append)
+    if plan.kept_pages == 0 {                           // nothing kept: a first attempt, or a start over
+        remove_page_files(); written = 0;               // Restart emptied job.pages(): the cursor starts again too
+    }
     let worker = spawn(move || craft_scan::acquire(&plan.settings));   // plan.settings is Send
     while !worker.is_finished() {
         let new = job.record_progress(&plan.progress);  // moves arrived pages into the job; returns how many
-        write(&job.pages()[written..]); written += new; // optional: the bytes are borrowed while the attempt runs
+        write(&job.pages()[written..]); written = job.pages().len(); // optional: the bytes are borrowed while it runs
         publish(job.snapshot());                        // cheap: no page bytes
         if user_pressed_stop { job.cancel(now()); }     // requests plan.cancel
     }
     // A worker that panicked returned nothing: record it as a failed attempt, then hand over acquire's result.
     let result = worker.join().unwrap_or_else(|_| Err(ScanError::Failed("the scan worker stopped".into())));
     job.finish_attempt(result, now())?;
+    write(&job.pages()[written..]); written = job.pages().len();   // pages the last poll never saw
 
     match job.retry_advice() {
         RetryAdvice::RetryNow => continue,                      // first attempt, glass fallback
@@ -44,7 +48,10 @@ loop {
 gets only `plan.settings` (it is `Send`: settings plus the two tokens) and returns the `Result` of `acquire`.
 The controlling thread polls `record_progress`, forwards a stop request (the GUI's button, the CLI's Ctrl-C
 handler setting a flag the main loop turns into `job.cancel(now())`), and calls `finish_attempt` when the worker
-joins. The job itself is never shared across threads and needs no lock. A short-lived CLI run is exactly this loop:
+joins. `finish_attempt` can add pages the last poll never saw (the worker may end between two polls), so a writer
+flushes `job.pages()[written..]` once more after it. `written` indexes `job.pages()`, which is empty again after a
+`Restart` (the plan then says `kept_pages == 0`): the writer replaces the old page files and starts `written` at 0, or
+the next slice would index past the end. The job itself is never shared across threads and needs no lock. A short-lived CLI run is exactly this loop:
 one process, one job, each page written to the job's output folder once `record_progress` has counted it (read
 from `job.pages()`; `take_pages()` refuses while the attempt runs, so a CLI that writes only at the end calls it
 after `finish_attempt`), a small journal the app writes, and an exit code from `exit_class()` (section 11).

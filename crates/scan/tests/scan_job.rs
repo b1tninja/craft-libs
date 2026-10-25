@@ -248,6 +248,34 @@ fn an_empty_feeder_under_a_whole_feeder_request_is_feeder_empty_not_a_scan_of_no
 }
 
 #[test]
+fn a_page_writer_that_follows_the_documented_loop_keeps_every_page_and_survives_a_restart() {
+    // The cursor of docs/scan-job.md section 1: `written` indexes job.pages().
+    let mut job = ScanJob::new(feeder_request(6), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    assert_eq!(plan.kept_pages, 0);
+    let progress = plan.settings.progress.clone().expect("a progress token");
+    for _ in 0..2 {
+        progress.push_page(page(8));
+    }
+    assert_eq!(job.record_progress(&plan.progress), 2);
+    let mut written = job.pages().len();
+    // The worker ends between two polls: two more pages were pushed and the result carries all four.
+    let result = scripted(&plan, 2, Source::Feeder, Some(native(InterruptKind::FeederEmpty)));
+    assert!(matches!(&result, Err(ScanError::Incomplete { acquired, .. }) if acquired.pages.len() == 2));
+    job.finish_attempt(result, t(2)).expect("finish");
+    assert_eq!(job.pages().len(), 4, "finish_attempt added pages the last poll never saw");
+    assert_eq!(job.pages()[written..].len(), 2, "so the writer must flush once more after it");
+    written = job.pages().len();
+
+    // The person starts over: the plan has no kept pages and the pages are gone, so the cursor must start again.
+    let plan = job.begin_attempt_with(t(3), Continuation::Restart).expect("restart");
+    assert_eq!(plan.kept_pages, 0);
+    assert!(job.pages().is_empty() && written > job.pages().len(), "a stale cursor would index past the end");
+    written = 0;
+    assert!(job.pages()[written..].is_empty());
+}
+
+#[test]
 fn a_short_stack_under_a_counted_request_is_an_interruption_the_person_resolves() {
     // The WIA-shaped fake: one sheet in the tray, five wanted; the driver answers busy after page one.
     let mut job = ScanJob::new(feeder_request(5), ScanJobConfig::default());

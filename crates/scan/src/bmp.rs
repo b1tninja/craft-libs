@@ -14,6 +14,10 @@
 /// Most pixels [`to_rgba`] decodes (1 GiB of RGBA).
 pub const MAX_PREVIEW_PIXELS: usize = 1 << 28;
 
+/// Most pixels an RLE body may declare. A short stream can skip almost everything (a delta or an end of line jumps
+/// whole rows), so its length alone does not bound the output; this does, at 64 MiB of RGBA.
+const MAX_RLE_PIXELS: usize = 1 << 24;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Compression {
     Rgb,
@@ -279,9 +283,9 @@ pub fn to_rgba(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         }
         Compression::Rle8 | Compression::Rle4 => {
             let data = bytes.get(info.data_at()?..)?;
-            // Every pair of bytes paints at most 255 pixels, and a delta skips at most 255 x 255: a
-            // stream this short cannot account for a picture this large.
-            if count > data.len().saturating_mul(1 << 14) {
+            // A pair paints at most 255 pixels, but a delta or an end of line skips whole rows, so the stream
+            // length is only a weak bound: cap the declared size as well, before anything is allocated.
+            if count > MAX_RLE_PIXELS || count > data.len().saturating_mul(1 << 14) {
                 return None;
             }
             let indices = rle_indices(data, cols, rows, info.compression == Compression::Rle4)?;

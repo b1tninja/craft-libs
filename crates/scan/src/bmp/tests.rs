@@ -168,6 +168,23 @@ fn giant_claims_fail_fast_without_allocating() {
 }
 
 #[test]
+fn a_short_rle_body_cannot_claim_a_huge_picture() {
+    // 8192 x 8192 is under the preview cap and a 4 KB body passes a length-only check, but a stream can skip whole
+    // rows, so the declaration itself is capped: refused up front, before the 64 MiB index buffer.
+    let started = std::time::Instant::now();
+    let mut body = vec![0u8, 1];
+    body.resize(4096, 0);
+    let palette = [[0u8; 4]; 256];
+    for height in [8192, -8192] {
+        assert!(to_rgba(&make(8192, height, 8, 1, 0, &palette, None, &body)).is_none(), "rle8 {height}");
+        assert!(to_rgba(&make(8192, height, 4, 2, 0, &[[0; 4]; 16], None, &body)).is_none(), "rle4 {height}");
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "refusal must be quick");
+    // A modest RLE picture still decodes.
+    assert!(to_rgba(&make(4, 2, 8, 1, 0, &palette, None, &[4, 1, 0, 0, 4, 2, 0, 1])).is_some());
+}
+
+#[test]
 fn truncated_files_give_none_at_every_cut() {
     let full = make(5, 3, 24, 0, 0, &[], None, &[7; 48]);
     assert!(to_rgba(&full).is_some());

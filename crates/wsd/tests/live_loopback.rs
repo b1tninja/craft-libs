@@ -42,9 +42,9 @@ fn metadata_names_the_print_service_by_type() {
     let meta = metadata::transfer_get(&client(device.clone())).expect("WS-Transfer Get");
     assert!(meta.model.is_some() && meta.device.is_some(), "{meta:?}");
     assert_eq!(meta.kinds(), [ServiceKind::Print]);
-    let hosted = meta.endpoint_for(ServiceKind::Print).expect("a print service address the policy allows");
+    let hosted = meta.endpoint_for(ServiceKind::Print, device.host()).expect("a print service address the policy allows");
     assert_eq!((hosted.host(), hosted.port()), (service.host(), service.port()));
-    assert!(meta.endpoint_for(ServiceKind::Scan).is_err());
+    assert!(meta.endpoint_for(ServiceKind::Scan, device.host()).is_err());
     let by_dialect = metadata::get_metadata(&client(device), Some(DIALECT_RELATIONSHIP)).expect("GetMetadata");
     assert_eq!(by_dialect.hosted.len(), meta.hosted.len());
 }

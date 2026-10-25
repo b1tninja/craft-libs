@@ -106,6 +106,13 @@ impl DeviceUrl {
         self.host
     }
 
+    /// Whether a URL learned from a message sent by `from` may be connected to. A loopback host
+    /// names this machine, so it is allowed only when the sender was itself loopback: a device on
+    /// the network cannot point the caller at a local service.
+    pub fn reachable_from(&self, from: IpAddr) -> bool {
+        !self.host.is_loopback() || from.to_canonical().is_loopback()
+    }
+
     /// The port; 80 when the URL gave none.
     pub fn port(&self) -> u16 {
         self.port

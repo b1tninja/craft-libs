@@ -120,10 +120,9 @@ impl Target {
     pub fn device_urls(&self, from: IpAddr) -> (Vec<DeviceUrl>, usize) {
         let mut urls: Vec<DeviceUrl> = Vec::new();
         let mut dropped = 0;
-        let local_source = from.to_canonical().is_loopback();
         for x in &self.xaddrs {
             match DeviceUrl::parse(x) {
-                Ok(u) if u.host().is_loopback() && !local_source => dropped += 1,
+                Ok(u) if !u.reachable_from(from) => dropped += 1,
                 Ok(u) if !urls.contains(&u) => urls.push(u),
                 Ok(_) => {}
                 Err(_) => dropped += 1,

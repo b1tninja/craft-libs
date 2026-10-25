@@ -12,6 +12,8 @@
 //! Addresses are only ever turned into connectable URLs through the [`DeviceUrl`] policy, so a
 //! device cannot steer a client to a public address or a host name.
 
+use std::net::IpAddr;
+
 use roxmltree::Node;
 
 use crate::addressing::EndpointRef;
@@ -78,11 +80,13 @@ impl ServiceEntry {
         self.types.contains(q)
     }
 
-    /// Every endpoint address the connection policy allows, in the order given, without duplicates.
-    pub fn urls(&self) -> Vec<DeviceUrl> {
+    /// Every endpoint address the connection policy allows, in the order given, without
+    /// duplicates. `from` is the address the metadata was fetched from: a loopback endpoint is kept
+    /// only when `from` is loopback too.
+    pub fn urls(&self, from: IpAddr) -> Vec<DeviceUrl> {
         let mut out: Vec<DeviceUrl> = Vec::new();
         for e in &self.endpoints {
-            if let Ok(u) = e.url()
+            if let Ok(u) = e.url_from(from)
                 && !out.contains(&u)
             {
                 out.push(u);
@@ -167,11 +171,12 @@ impl DeviceMetadata {
         self.hosted_service(&kind.descriptor().service_type_qname())
     }
 
-    /// Every connectable endpoint of every hosted service of this type, policy-checked.
-    pub fn service_endpoints(&self, service_type: &QName) -> Vec<DeviceUrl> {
+    /// Every connectable endpoint of every hosted service of this type, policy-checked. `from` is
+    /// the address the metadata was fetched from (see [`ServiceEntry::urls`]).
+    pub fn service_endpoints(&self, service_type: &QName, from: IpAddr) -> Vec<DeviceUrl> {
         let mut out: Vec<DeviceUrl> = Vec::new();
         for h in self.hosted.iter().filter(|h| h.has_type(service_type)) {
-            for u in h.urls() {
+            for u in h.urls(from) {
                 if !out.contains(&u) {
                     out.push(u);
                 }
@@ -183,8 +188,8 @@ impl DeviceMetadata {
     /// The endpoint to talk to for `service_type`: the first policy-allowed address of the first
     /// hosted service of that type. A device that hosts the type only at a public address or a
     /// host name is [`Error::NotFound`], not silently used.
-    pub fn service_endpoint(&self, service_type: &QName) -> Result<DeviceUrl> {
-        match self.service_endpoints(service_type).into_iter().next() {
+    pub fn service_endpoint(&self, service_type: &QName, from: IpAddr) -> Result<DeviceUrl> {
+        match self.service_endpoints(service_type, from).into_iter().next() {
             Some(u) => Ok(u),
             None if self.hosted_service(service_type).is_some() => {
                 Err(Error::NotFound(format!("service {service_type} is hosted, but at no address this client may connect to")))
@@ -194,8 +199,8 @@ impl DeviceMetadata {
     }
 
     /// [`Self::service_endpoint`] for a service kind (print or scan).
-    pub fn endpoint_for(&self, kind: ServiceKind) -> Result<DeviceUrl> {
-        self.service_endpoint(&kind.descriptor().service_type_qname())
+    pub fn endpoint_for(&self, kind: ServiceKind, from: IpAddr) -> Result<DeviceUrl> {
+        self.service_endpoint(&kind.descriptor().service_type_qname(), from)
     }
 
     /// Which service kinds the device hosts (by hosted type), in [`ServiceKind::ALL`] order.
@@ -312,6 +317,9 @@ mod tests {
         DeviceMetadata::from_element(doc.root_element())
     }
 
+    /// A loopback sender, which is where these test documents are served from.
+    const LOCAL: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
     /// The scan service's namespace.
     fn scan_ns() -> &'static str {
         ServiceKind::Scan.descriptor().namespace
@@ -338,9 +346,9 @@ mod tests {
         // The same prefix `svc` bound to different namespaces: only the namespace decides.
         let print = read(&document(print_ns, "svc", "PrinterServiceType", "http://127.0.0.1:5357/print")).unwrap();
         let scan = read(&document(scan_ns(), "svc", "ScannerServiceType", "http://127.0.0.1:3920/scan")).unwrap();
-        assert_eq!(print.endpoint_for(ServiceKind::Print).unwrap().as_url(), "http://127.0.0.1:5357/print");
-        assert!(matches!(print.endpoint_for(ServiceKind::Scan), Err(Error::NotFound(_))));
-        assert_eq!(scan.endpoint_for(ServiceKind::Scan).unwrap().port(), 3920);
+        assert_eq!(print.endpoint_for(ServiceKind::Print, LOCAL).unwrap().as_url(), "http://127.0.0.1:5357/print");
+        assert!(matches!(print.endpoint_for(ServiceKind::Scan, LOCAL), Err(Error::NotFound(_))));
+        assert_eq!(scan.endpoint_for(ServiceKind::Scan, LOCAL).unwrap().port(), 3920);
         assert_eq!(print.kinds(), [ServiceKind::Print]);
         assert_eq!(scan.kinds(), [ServiceKind::Scan]);
         // A look-alike type in another namespace is not the service.
@@ -349,15 +357,28 @@ mod tests {
     }
 
     #[test]
+    fn a_loopback_service_address_from_a_device_on_the_network_is_not_used() {
+        let m = read(&document(scan_ns(), "wscn", "ScannerServiceType", "http://127.0.0.1:3920/scan")).unwrap();
+        let t = ServiceKind::Scan.descriptor().service_type_qname();
+        let lan = IpAddr::from([192, 168, 1, 9]);
+        assert!(m.service_endpoints(&t, lan).is_empty());
+        assert!(matches!(m.endpoint_for(ServiceKind::Scan, lan), Err(Error::NotFound(msg)) if msg.contains("no address")));
+        assert_eq!(m.service_endpoints(&t, LOCAL).len(), 1);
+        // A private address stays usable from the network.
+        let m = read(&document(scan_ns(), "wscn", "ScannerServiceType", "http://192.168.1.20:3920/scan")).unwrap();
+        assert_eq!(m.service_endpoints(&t, lan).len(), 1);
+    }
+
+    #[test]
     fn public_and_hostname_service_addresses_are_not_used() {
         for bad in ["http://8.8.8.8/svc", "http://scanner.local/svc", "https://127.0.0.1/svc", "urn:uuid:1"] {
             let m = read(&document(scan_ns(), "wscn", "ScannerServiceType", bad)).unwrap();
             let t = ServiceKind::Scan.descriptor().service_type_qname();
-            assert!(m.service_endpoints(&t).is_empty(), "{bad}");
+            assert!(m.service_endpoints(&t, LOCAL).is_empty(), "{bad}");
         }
         // Hosted, but only at an address the policy refuses: an error that says so.
         let m = read(&document(scan_ns(), "wscn", "ScannerServiceType", "http://8.8.8.8/svc")).unwrap();
-        assert!(matches!(m.endpoint_for(ServiceKind::Scan), Err(Error::NotFound(msg)) if msg.contains("no address")));
+        assert!(matches!(m.endpoint_for(ServiceKind::Scan, LOCAL), Err(Error::NotFound(msg)) if msg.contains("no address")));
     }
 
     #[test]
@@ -374,9 +395,9 @@ mod tests {
             ns::WSA
         );
         let m = read(&text).unwrap();
-        let urls = m.service_endpoints(&QName::new("urn:t", "Svc"));
+        let urls = m.service_endpoints(&QName::new("urn:t", "Svc"), LOCAL);
         assert_eq!(urls.iter().map(DeviceUrl::as_url).collect::<Vec<_>>(), ["http://10.0.0.7:80/b", "http://[fe80::1]:8080/c"]);
-        assert_eq!(m.service_endpoint(&QName::new("urn:t", "Svc")).unwrap(), urls[0]);
+        assert_eq!(m.service_endpoint(&QName::new("urn:t", "Svc"), LOCAL).unwrap(), urls[0]);
     }
 
     #[test]
@@ -432,7 +453,7 @@ mod tests {
             let text = good.replacen("<wsdp:Hosted>", &format!("{bad}<wsdp:Hosted>"), 1);
             let m = read(&text).unwrap();
             assert_eq!(m.hosted.len(), 1, "only the well-formed entry is kept");
-            assert_eq!(m.endpoint_for(ServiceKind::Print).unwrap().as_url(), "http://127.0.0.1:5357/print");
+            assert_eq!(m.endpoint_for(ServiceKind::Print, LOCAL).unwrap().as_url(), "http://127.0.0.1:5357/print");
         }
         // An ambiguous Host entry is dropped the same way and leaves the services readable.
         let text = good.replacen("<wsdp:Host>", "<wsdp:Host><wsdp:Types>wsdp:Device</wsdp:Types><wsdp:Types>wsdp:Device</wsdp:Types>", 1);

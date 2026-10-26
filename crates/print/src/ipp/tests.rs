@@ -1233,6 +1233,16 @@ fn job_ids_are_typed_and_round_trip() {
     let v6 = IppBackend::job_id("ipp://[fd00::5]:8631/p", 1).unwrap();
     assert_eq!(IppBackend::parse_job_id(&v6).unwrap().printer_uri, "ipp://[fd00::5]:8631/p");
     assert!(IppBackend::job_id("ipp://example.com/", 1).is_err());
+    // Every id made here is one the parser takes back; the numbers it refuses are refused at the start.
+    for number in [1, 2, i32::MAX as u32] {
+        let made = IppBackend::job_id(URI, number).unwrap();
+        assert_eq!(IppBackend::parse_job_id(&made).unwrap().job_number, number);
+    }
+    for number in [0, i32::MAX as u32 + 1, u32::MAX] {
+        let e = IppBackend::job_id(URI, number).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidRequest, "{number}");
+        assert!(IppBackend::parse_native(&format!("{URI}#{number}")).is_err(), "the parser refuses {number} too");
+    }
     for bad in [
         "ipp://127.0.0.1:631/ipp/print",
         "ipp://127.0.0.1:631/ipp/print#",

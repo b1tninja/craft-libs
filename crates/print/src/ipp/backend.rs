@@ -338,10 +338,15 @@ impl IppBackend {
 
     /// The job id of job number `job_number` on the printer at `printer_uri`: the typed way to name a
     /// job this backend made (or one a person typed in), so nothing concatenates strings. The URI is
-    /// canonicalised and must pass the printer URI policy ([`ErrorKind::InvalidRequest`] otherwise);
-    /// the printer need not be added to any backend. The inverse is [`Self::parse_native`] (or
-    /// [`Self::parse_job_id`]).
+    /// canonicalised and must pass the printer URI policy ([`ErrorKind::InvalidRequest`] otherwise),
+    /// and the job number must be a valid IPP `job-id` (1 to 2147483647, RFC 8011), so every id made
+    /// here is one [`Self::parse_native`] accepts; the printer need not be added to any backend. The
+    /// inverse is [`Self::parse_native`] (or [`Self::parse_job_id`]).
     pub fn job_id(printer_uri: &str, job_number: u32) -> Result<JobId, PrintError> {
+        if job_number == 0 || i32::try_from(job_number).is_err() {
+            return Err(PrintError::new(ErrorKind::InvalidRequest, format!("{job_number} is not a valid IPP job id (1 to 2147483647)"))
+                .with_phase(crate::Phase::Prepare));
+        }
         let uri = PrinterUri::parse(printer_uri).map_err(PrintError::from)?;
         Ok(JobId::new(NAME, job_native(&uri.canonical(), i64::from(job_number))))
     }

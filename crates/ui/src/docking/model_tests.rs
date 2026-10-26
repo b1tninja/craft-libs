@@ -786,8 +786,13 @@ fn a_sized_split_sets_the_new_split_and_the_enclosing_one_beside_the_anchor() {
     moved.apply(Action::Move { panel: 4, anchor: 3, placement: sized(Zone::Left) }).unwrap();
     let inner = hsplit(SplitSize::FixedSecond(164.0), tabs(&[2], 0), hsplit(SplitSize::FixedFirst(100.0), tabs(&[4], 0), tabs(&[3], 0)));
     assert_eq!(moved.root, Some(hsplit(SplitSize::Ratio(0.5), tabs(&[1], 0), inner)));
-    // 1 has no divider on its left, and a center is no side.
-    for (anchor, zone) in [(1, Zone::Left), (3, Zone::Center)] {
+    // 1 has no divider on its left: the split on its right gives the room.
+    let mut moved = layout.clone();
+    moved.apply(Action::Move { panel: 4, anchor: 1, placement: sized(Zone::Left) }).unwrap();
+    let rest = hsplit(SplitSize::FixedSecond(60.0), tabs(&[2], 0), tabs(&[3], 0));
+    assert_eq!(moved.root, Some(hsplit(SplitSize::FixedSecond(164.0), hsplit(SplitSize::FixedFirst(100.0), tabs(&[4], 0), tabs(&[1], 0)), rest)));
+    // 1 has no divider above or below it, and a center is no side.
+    for (anchor, zone) in [(1, Zone::Top), (3, Zone::Center)] {
         let mut moved = layout.clone();
         assert_eq!(moved.apply(Action::Move { panel: 4, anchor, placement: sized(zone) }), Err(DockError::InvalidPlacement), "{anchor} {zone:?}");
         assert_eq!(moved, layout);

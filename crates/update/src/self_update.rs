@@ -763,11 +763,66 @@ fn check_helper(app: &App, me: &Path, paths: &Paths, exe: &Path, step: &Finish) 
     if allowed { Ok(()) } else { Err(refused()) }
 }
 
+/// Lets a Windows test observe both sides of `run_step`'s wait for the old launcher. Compiled only
+/// for tests, so production behavior is unchanged.
+#[cfg(all(test, windows))]
+mod wait_watch {
+    use std::sync::mpsc::{self, Receiver, Sender};
+    use std::sync::{Mutex, PoisonError};
+
+    /// A test's two observations of one wait, keyed by the launcher's pid.
+    pub(super) struct Channels {
+        /// Sent just before `run_step` calls the wait.
+        pub(super) entered: Receiver<()>,
+        /// Sent right after the wait returns, before any extraction, and carries the wait's result.
+        pub(super) returned: Receiver<bool>,
+    }
+
+    struct Watch {
+        pid: u32,
+        entered: Option<Sender<()>>,
+        returned: Option<Sender<bool>>,
+    }
+
+    static WATCH: Mutex<Option<Watch>> = Mutex::new(None);
+
+    pub(super) fn watch(pid: u32) -> Channels {
+        let (entered, entered_rx) = mpsc::channel();
+        let (returned, returned_rx) = mpsc::channel();
+        *WATCH.lock().unwrap_or_else(PoisonError::into_inner) = Some(Watch { pid, entered: Some(entered), returned: Some(returned) });
+        Channels { entered: entered_rx, returned: returned_rx }
+    }
+
+    /// Notes that `run_step` is about to wait. Only the first call for a watched pid is kept.
+    pub(super) fn entered(pid: u32) {
+        let mut watch = WATCH.lock().unwrap_or_else(PoisonError::into_inner);
+        let sender = watch.as_mut().filter(|watch| watch.pid == pid).and_then(|watch| watch.entered.take());
+        if let Some(sender) = sender {
+            let _ = sender.send(());
+        }
+    }
+
+    /// Notes the wait's result as soon as it returns; the step hasn't run yet.
+    pub(super) fn returned(pid: u32, waited: bool) {
+        let mut watch = WATCH.lock().unwrap_or_else(PoisonError::into_inner);
+        let sender = watch.as_mut().filter(|watch| watch.pid == pid).and_then(|watch| watch.returned.take());
+        if let Some(sender) = sender {
+            let _ = sender.send(waited);
+        }
+    }
+}
+
 /// Waits up to `wait` for `pid` to exit, does `step` once it has, and removes the download either
 /// way. The MSI, and every program in the portable zip, must be signed like `reference`.
 #[cfg(windows)]
 fn run_step(app: &App, reference: &Path, pid: u32, exe: &Path, step: &Finish, wait: std::time::Duration) -> Result<(), String> {
-    let result = if process::wait_for_exit(pid, wait) {
+    #[cfg(test)]
+    wait_watch::entered(pid);
+    // The test hook needs the result, so it is stored rather than consumed by the branch.
+    let waited = process::wait_for_exit(pid, wait);
+    #[cfg(test)]
+    wait_watch::returned(pid, waited);
+    let result = if waited {
         match step {
             Finish::Msi(msi) => signed_like(app, reference, msi).and_then(|()| install::windows::reinstall(msi)),
             Finish::Portable { zip, tmp } => match (exe.parent(), exe.file_name()) {
@@ -896,6 +951,146 @@ mod tests {
         assert!(!zip.exists() && !tmp.exists(), "the download and the staging folder are removed");
     }
 
+    /// Stands in for the old launcher: `sort.exe` keeps running until the test closes its stdin
+    /// pipe, so the helper's wait cannot succeed early.
+    #[cfg(windows)]
+    struct BlockedLauncher {
+        child: Option<std::process::Child>,
+    }
+
+    #[cfg(windows)]
+    impl BlockedLauncher {
+        fn start() -> Self {
+            let child = std::process::Command::new(system_program("sort.exe"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            Self { child: Some(child) }
+        }
+
+        fn id(&self) -> u32 {
+            self.child.as_ref().unwrap().id()
+        }
+
+        /// Fails unless the stand-in is still running. `try_wait` keeps the handle owned, so
+        /// `finish` and `Drop` can still reap it.
+        fn assert_running(&mut self, when: &str) {
+            let child = self.child.as_mut().unwrap();
+            assert!(child.try_wait().unwrap().is_none(), "the stand-in launcher had already exited {when}");
+        }
+
+        /// Closes the pipe so `sort.exe` exits, and reaps it. If reaping fails the child stays
+        /// owned by `self`, so `Drop` can still kill and reap it.
+        fn finish(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            let child = self.child.as_mut().unwrap();
+            drop(child.stdin.take());
+            child.wait()
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for BlockedLauncher {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                // Closing the pipe normally lets sort exit; killing is the fallback after a failed
+                // assertion, and the wait reaps it either way.
+                drop(child.stdin.take());
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    /// A launcher without `portable.txt` is a standalone installation, and the helper still
+    /// replaces its own executable after it exits. The test holds a stand-in launcher alive
+    /// through a pipe and observes both sides of the helper's wait: the first assertion runs only
+    /// after the helper announces it is about to wait. A wait that returns while the stand-in is alive
+    /// fails the test before any extraction can replace the executable.
+    ///
+    /// The "still blocked" check is a bounded observation, not proof: a helper descheduled for the
+    /// whole window could hide a missing wait until the release below. A premature timeout longer
+    /// than this observation window is also outside this test's coverage.
+    #[cfg(windows)]
+    #[test]
+    fn a_standalone_update_replaces_the_launcher_after_it_exits() {
+        use std::io::Write;
+        use std::sync::mpsc::RecvTimeoutError;
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("ArtCraft Launcher");
+        std::fs::create_dir_all(folder.join("ArtCraftLauncherData")).unwrap();
+        let exe = folder.join("artcraft-launcher.exe");
+        std::fs::write(&exe, "0.1.0").unwrap();
+        std::fs::write(folder.join("ArtCraftLauncherData").join("settings.json"), "{}").unwrap();
+        let zip = dir.path().join("artcraft-launcher-0.2.0-windows-x64-portable.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip).unwrap());
+        let signed_exe = std::fs::read(system_program("cmd.exe")).unwrap();
+        for (name, body) in [
+            ("artcraft-launcher-0.2.0-windows-x64-portable/artcraft-launcher.exe", signed_exe.as_slice()),
+            ("artcraft-launcher-0.2.0-windows-x64-portable/portable.txt", b"".as_slice()),
+        ] {
+            writer.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            writer.write_all(body).unwrap();
+        }
+        writer.finish().unwrap();
+        let tmp = dir.path().join("cache").join(PORTABLE_STAGING);
+        let step = Finish::Portable { zip: zip.clone(), tmp: tmp.clone() };
+
+        // Timeouts only bound the test; each failure names the observation that never arrived.
+        let entered_timeout = std::time::Duration::from_secs(10);
+        let blocked_window = std::time::Duration::from_secs(2);
+        let returned_timeout = std::time::Duration::from_secs(30);
+
+        std::thread::scope(|scope| {
+            let mut old = BlockedLauncher::start();
+            let pid = old.id();
+            let watch = wait_watch::watch(pid);
+            let helper_exe = exe.clone();
+            let step = step.clone();
+            let helper = scope.spawn(move || {
+                run_step(&crate::suite::LAUNCHER, &system_program("cmd.exe"), pid, &helper_exe, &step, std::time::Duration::from_secs(30))
+            });
+            match watch.entered.recv_timeout(entered_timeout) {
+                Ok(()) => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!("the helper didn't reach its wait within {entered_timeout:?} (helper already finished: {})", helper.is_finished())
+                }
+                Err(RecvTimeoutError::Disconnected) => panic!("the entered channel disconnected before the helper reached its wait"),
+            }
+            old.assert_running("before the first replacement check");
+            assert_eq!(std::fs::read_to_string(&exe).unwrap(), "0.1.0", "replaced while the old launcher was still running");
+
+            // A correct wait can't return while the stand-in holds the pipe.
+            match watch.returned.recv_timeout(blocked_window) {
+                Err(RecvTimeoutError::Timeout) => {}
+                Ok(waited) => panic!("run_step left its wait while the old launcher was still running (waited: {waited})"),
+                Err(RecvTimeoutError::Disconnected) => panic!("the returned channel disconnected while the old launcher was still running"),
+            }
+            old.assert_running("after the wait was expected to stay blocked");
+            assert_eq!(std::fs::read_to_string(&exe).unwrap(), "0.1.0", "replaced while the old launcher was still running");
+
+            old.finish().expect("the stand-in launcher couldn't be reaped");
+            match watch.returned.recv_timeout(returned_timeout) {
+                Ok(waited) => assert!(waited, "the wait reported that the launcher was still running although it had exited"),
+                Err(RecvTimeoutError::Timeout) => panic!(
+                    "the helper didn't leave its wait within {returned_timeout:?} after the launcher exited (helper already finished: {})",
+                    helper.is_finished()
+                ),
+                Err(RecvTimeoutError::Disconnected) => panic!("the returned channel disconnected before reporting the wait's result"),
+            }
+            helper.join().unwrap().unwrap();
+        });
+        assert_eq!(std::fs::read(&exe).unwrap(), signed_exe);
+        assert_eq!(std::fs::read_to_string(folder.join("ArtCraftLauncherData").join("settings.json")).unwrap(), "{}");
+        // The update's zip carries `portable.txt`, so the replaced copy is detected as portable
+        // and keeps its data in the folder beside the executable.
+        assert_eq!(detect(&crate::suite::LAUNCHER, &exe), Some(Install::Portable(exe.clone())));
+        assert_eq!(Paths::for_exe(&crate::suite::LAUNCHER, &exe).unwrap().data, folder.join("ArtCraftLauncherData").join("data"));
+        assert!(!folder.join("artcraft-launcher-0.2.0-windows-x64-portable").exists(), "the zip's folder must not be nested in the launcher's");
+        assert!(!zip.exists() && !tmp.exists(), "the download and the staging folder are removed");
+    }
+
     /// The helper finishes only the launcher's own update: its own installation, with the
     /// download from its own cache. A signed launcher must not run or start anything else.
     #[cfg(windows)]
@@ -919,6 +1114,10 @@ mod tests {
         std::fs::write(&elsewhere, "zip").unwrap();
         let other = dir.path().join("other.exe");
         std::fs::write(&other, "other").unwrap();
+        let other_in_folder = folder.join("other.exe");
+        std::fs::write(&other_in_folder, "other").unwrap();
+        let other_app = folder.join(format!("{}.exe", crate::suite::PHOTOCRAFT.id));
+        std::fs::write(&other_app, "another Craft app").unwrap();
         let staging = cache.join(PORTABLE_STAGING);
         let portable = |zip: &Path, tmp: &Path| Finish::Portable { zip: zip.to_path_buf(), tmp: tmp.to_path_buf() };
 
@@ -927,6 +1126,10 @@ mod tests {
         assert!(check_helper(&crate::suite::LAUNCHER, &other, &paths, &exe, &portable(&zip, &staging)).is_err());
         // Not the launcher's installation.
         assert!(check_helper(&crate::suite::LAUNCHER, &me, &paths, &other, &portable(&zip, &staging)).is_err());
+        // A portable marker doesn't make a foreign executable the launcher.
+        assert!(check_helper(&crate::suite::LAUNCHER, &me, &paths, &other_in_folder, &portable(&zip, &staging)).is_err());
+        // Another Craft App's executable is not the launcher, even in the same folder.
+        assert!(check_helper(&crate::suite::LAUNCHER, &me, &paths, &other_app, &portable(&zip, &staging)).is_err());
         // A download from outside the cache.
         assert!(check_helper(&crate::suite::LAUNCHER, &me, &paths, &exe, &portable(&elsewhere, &staging)).is_err());
         // Unpacking anywhere but the cache's staging folder.
@@ -937,6 +1140,8 @@ mod tests {
         // Without portable.txt it is a standalone executable, which updates from the same zip.
         std::fs::remove_file(folder.join("portable.txt")).unwrap();
         assert_eq!(check_helper(&crate::suite::LAUNCHER, &me, &paths, &exe, &portable(&zip, &staging)), Ok(()));
+        // A foreign executable is not a standalone launcher either.
+        assert!(check_helper(&crate::suite::LAUNCHER, &me, &paths, &other_in_folder, &portable(&zip, &staging)).is_err());
         // An MSI is for an MSI installation only.
         assert!(check_helper(&crate::suite::LAUNCHER, &me, &paths, &exe, &Finish::Msi(zip.clone())).is_err());
     }
@@ -1460,10 +1665,11 @@ mod tests {
 
     #[test]
     fn a_development_build_does_not_update_itself() {
-        // `cargo test` runs from a Cargo build tree, wherever `CARGO_TARGET_DIR` put it. This
-        // needs a normal Cargo target tree; the opt-in is passed explicitly so the result
-        // doesn't depend on `CRAFT_UPDATE_DEV`.
-        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        // An archived test runner may relocate its executable without Cargo's metadata.
+        // Supply a complete cache-disabled build tree so this checks the updater guard,
+        // independent of the runner's location and the ambient `CRAFT_UPDATE_DEV` value.
+        let dir = tempfile::tempdir().unwrap();
+        let exe = cargo_build_tree_without_rustc_info(dir.path(), "debug", "debug/deps/artcraft-launcher");
         assert!(is_development_build(&exe, false), "{} should be inside a Cargo target directory", exe.display());
         assert_eq!(current_at(&crate::suite::LAUNCHER, &exe, false), None);
     }

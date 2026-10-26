@@ -34,6 +34,13 @@ pub struct Embed {
     texts: Vec<PathBuf>,
     families: Option<Vec<String>>,
     elsewhere: Vec<String>,
+    serve: Option<Serve>,
+}
+
+/// Where [`Embed::serve`] copies the faces, and the URL prefix they are served under.
+struct Serve {
+    dir: PathBuf,
+    url_prefix: String,
 }
 
 /// A selected face and the file the table embeds it from.
@@ -42,8 +49,9 @@ struct Face {
     path: PathBuf,
     index: u32,
     /// An interface face to cut to the catalogs' characters before it is embedded.
-    #[cfg_attr(not(feature = "subset"), expect(dead_code))]
     cut: bool,
+    /// Hex SHA-256 of the file: the manifest's, or the cut's.
+    sha256: String,
 }
 
 impl Embed {
@@ -82,8 +90,8 @@ impl Embed {
     /// CJK faces are dropped and the rest are kept. Without catalogs the interface faces are left
     /// out too, with a `cargo::warning`, so a full CJK face is never embedded for the interface.
     /// A manifest with no interface face is also a `cargo::warning` when that drops a CJK face.
-    /// Combines with [`Embed::scripts`] and [`Embed::filter`]; with `CRAFT_FONTS_REQUIRED=1`, an
-    /// interface face satisfies its script tags.
+    /// Combines with [`Embed::scripts`], [`Embed::filter`] and [`Embed::serve`]; with
+    /// `CRAFT_FONTS_REQUIRED=1`, an interface face satisfies its script tags.
     pub fn for_ui(mut self) -> Self {
         self.ui = true;
         self
@@ -138,6 +146,22 @@ impl Embed {
         self
     }
 
+    /// Copy the selected faces into `dir` instead of embedding them, for a web build that serves
+    /// them beside its wasm, and write a table of [`ServedFace`](crate::ServedFace)s.
+    ///
+    /// Each font file and its licence file keep their path under the checkout's `fonts/`
+    /// directory (`noto-sans-arabic/NotoSansArabic.ttf`), and a face's `url` is `url_prefix`
+    /// followed by that path, so `serve("web/fonts", "fonts/")` suits a page that serves
+    /// `web/fonts` as `fonts/`. An interface face cut by `Embed::subset_to` is served from its cut,
+    /// with the start of the cut's SHA-256 in the file name (`ui/NotoSansTCUI-Regular.<hash>.ttf`)
+    /// and the cut's own integrity value. A relative `dir` is under the package directory, where
+    /// Cargo runs build scripts. Files already there with the same bytes are left as they are;
+    /// files of faces no longer selected, and earlier cuts, are not removed.
+    pub fn serve(mut self, dir: impl Into<PathBuf>, url_prefix: &str) -> Self {
+        self.serve = Some(Serve { dir: dir.into(), url_prefix: url_prefix.to_owned() });
+        self
+    }
+
     /// Write the face table to `out_file` and print the `cargo::` lines; returns the faces
     /// embedded.
     ///
@@ -183,9 +207,18 @@ impl Embed {
                 self.check_coverage(faces, dir, cargo);
             }
         }
-        let tabled = selected.and_then(|faces| Ok((table(&faces)?, faces.into_iter().map(|face| face.entry).collect())));
-        let (table, faces) = match tabled {
-            Ok(tabled) => tabled,
+        let selected = match (selected, &self.serve, &dir) {
+            (Ok(faces), Some(serve), Some(dir)) => match serve.copy(dir, &faces, cargo) {
+                Ok(table) => Ok((table, faces)),
+                Err(e) => {
+                    write(&out, EMPTY_TABLE)?;
+                    return Err(e);
+                }
+            },
+            (selected, ..) => selected.and_then(|faces| Ok((table(&faces)?, faces))),
+        };
+        let (table, faces) = match selected {
+            Ok((table, faces)) => (table, faces.into_iter().map(|face| face.entry).collect()),
             Err(e) if required => {
                 write(&out, EMPTY_TABLE)?;
                 return Err(e);
@@ -249,8 +282,8 @@ impl Embed {
             // `include_bytes!` resolves relative paths from the including source file.
             let path = file.canonicalize().map_err(|source| Error::Read { path: file, source })?;
             cargo.push(format!("cargo::rerun-if-changed={}", path.display()));
-            let index = entry.index;
-            faces.push(Face { entry, path, index, cut });
+            let (index, sha256) = (entry.index, entry.sha256.clone());
+            faces.push(Face { entry, path, index, cut, sha256 });
         }
         if !uncut.is_empty() {
             let why = if self.catalogs.is_some() { "Embed::subset_to was given no translation catalogs" } else { "no translation catalogs" };
@@ -303,6 +336,7 @@ impl Embed {
             }
             face.path = out;
             face.index = 0;
+            face.sha256 = crate::sha256::hex(&bytes);
         }
         Ok(())
     }
@@ -437,6 +471,125 @@ fn table(faces: &[Face]) -> Result<String, Error> {
     }
     src.push_str("]\n");
     Ok(src)
+}
+
+impl Serve {
+    /// Copy the faces' files and licences into the served directory; returns the table.
+    fn copy(&self, checkout: &Path, faces: &[Face], cargo: &mut Vec<String>) -> Result<String, Error> {
+        let mut copied: Vec<String> = Vec::new();
+        let mut src = String::from("// Generated by craft-fonts-build. Do not edit.\n&[\n");
+        for face in faces {
+            let (entry, path) = (&face.entry, &face.path);
+            let served = served_file(face);
+            let font = std::fs::read(path).map_err(|source| Error::Read { path: path.clone(), source })?;
+            let size = font.len();
+            if !copied.contains(&served) {
+                copied.push(served.clone());
+                copy_file(path, &self.dir.join(&served), cargo)?;
+                let licence = checkout.join(&entry.licence_file);
+                if entry.licence_file.is_empty() || !licence.is_file() {
+                    cargo.push(format!("cargo::warning=craft-fonts: no licence file beside {}", entry.file));
+                } else {
+                    copy_file(&licence, &self.dir.join(served_path(&entry.licence_file)), cargo)?;
+                }
+            }
+            let coverage = crate::coverage::of_face(&font, face.index).unwrap_or_else(|| {
+                cargo.push(format!("cargo::warning=craft-fonts: no character map in {}; the face is never fetched for a character", entry.file));
+                Vec::new()
+            });
+            let scripts: Vec<String> = entry.scripts.iter().map(|s| format!("{s:?}")).collect();
+            let _ = writeln!(
+                src,
+                "    ServedFace {{ family: {:?}, style: {:?}, scripts: &[{}], index: {}, url: {:?}, size: {size}, integrity: {:?}, coverage: {} }},",
+                entry.family,
+                entry.style,
+                scripts.join(", "),
+                face.index,
+                format!("{}{served}", self.url_prefix),
+                integrity(&face.sha256),
+                byte_string(&coverage),
+            );
+        }
+        src.push_str("]\n");
+        Ok(src)
+    }
+}
+
+/// A byte string literal, printable ASCII as itself.
+fn byte_string(bytes: &[u8]) -> String {
+    let mut out = String::from("b\"");
+    for &b in bytes {
+        match b {
+            b'"' | b'\\' => {
+                out.push('\\');
+                out.push(char::from(b));
+            }
+            0x20..=0x7E => out.push(char::from(b)),
+            _ => {
+                let _ = write!(out, "\\x{b:02x}");
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Where a face's file is served, under the served directory: its checkout path under `fonts/`.
+/// A cut adds the start of its SHA-256 before the extension (`ui/A.1234abcd5678ef90.ttf`), so a
+/// cut from changed catalogs gets a new URL instead of meeting a cached copy that fails its
+/// integrity check.
+fn served_file(face: &Face) -> String {
+    let file = served_path(&face.entry.file);
+    if !face.cut {
+        return file.to_owned();
+    }
+    let hash = face.sha256.get(..16).unwrap_or(&face.sha256);
+    match file.rsplit_once('.') {
+        Some((stem, extension)) if !extension.contains('/') => format!("{stem}.{hash}.{extension}"),
+        _ => format!("{file}.{hash}"),
+    }
+}
+
+/// A checkout path relative to the served directory: `fonts/a/A.ttf` → `a/A.ttf`.
+fn served_path(file: &str) -> &str {
+    file.strip_prefix("fonts/").unwrap_or(file)
+}
+
+/// Copy `from` unless `to` already holds the same bytes. The copy keeps `from`'s modification time
+/// and is watched, so the build copies it again once it is deleted, without running every build.
+fn copy_file(from: &Path, to: &Path, cargo: &mut Vec<String>) -> Result<(), Error> {
+    cargo.push(format!("cargo::rerun-if-changed={}", to.display()));
+    let write_error = |source| Error::Write { path: to.to_path_buf(), source };
+    let read_error = |source| Error::Read { path: from.to_path_buf(), source };
+    let bytes = std::fs::read(from).map_err(read_error)?;
+    if std::fs::read(to).is_ok_and(|old| old == bytes) {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent).map_err(write_error)?;
+    }
+    std::fs::write(to, &bytes).map_err(write_error)?;
+    // Cargo reruns a build script whose watched files are newer than its last run.
+    let modified = std::fs::metadata(from).and_then(|m| m.modified()).map_err(read_error)?;
+    std::fs::File::options().write(true).open(to).and_then(|f| f.set_modified(modified)).map_err(write_error)
+}
+
+/// The Subresource Integrity value (`sha256-<base64>`) of a hex SHA-256, or `""` for a value that
+/// isn't one.
+pub(crate) fn integrity(sha256: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let digest: Option<Vec<u8>> =
+        (sha256.len() == 64).then(|| (0..32).map(|i| u8::from_str_radix(sha256.get(2 * i..2 * i + 2)?, 16).ok()).collect()).flatten();
+    let Some(digest) = digest else { return String::new() };
+    let mut out = String::from("sha256-");
+    for chunk in digest.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..4 {
+            let c = if i <= chunk.len() { ALPHABET[((n >> (18 - 6 * i)) & 63) as usize] } else { b'=' };
+            out.push(char::from(c));
+        }
+    }
+    out
 }
 
 fn write(path: &Path, contents: &str) -> Result<(), Error> {

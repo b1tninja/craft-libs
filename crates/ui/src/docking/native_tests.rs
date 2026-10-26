@@ -1,7 +1,7 @@
 //! Floating windows in their own OS windows (feature `native-windows`), drawn by the driver's
 //! stand-in for OS windows.
 
-use egui::{Color32, Event, Key, Modifiers, PointerButton, Pos2, Rect, Vec2, ViewportCommand, epaint::ClippedShape, pos2, vec2};
+use egui::{Color32, Event, Key, Modifiers, PointerButton, Pos2, Rect, ViewportCommand, epaint::ClippedShape, pos2, vec2};
 
 use super::render::{
     APPKIT_CORNER, DragPointer, INACTIVE_PALETTE, MACOS_CLOSE, WindowDrag, appkit_resize_areas, close_rects, drag_opacity, resize_bands, wayland,
@@ -1239,45 +1239,6 @@ fn a_bar_drag_follows_the_pointer_when_moves_land_late() {
     let to = pointer - grab.to_vec2();
     assert_eq!(d.host().windows[&viewport].rect.min, to);
     assert_eq!(window(&d, 5).native.map(|r| [r[0], r[1]]), Some([to.x, to.y]));
-}
-
-/// A bar drag at a steady pointer speed under AppKit's timing: the window's reported place is
-/// fresh, while pointer events are measured against where the window was a frame back on some
-/// frames. Returns the window's step each frame. Released, the layout keeps where it ended.
-fn bar_drag_with_stale_pointer(tells_cursor: bool) -> Vec<Vec2> {
-    let mut d = driver(layout(true));
-    d.host().tells_cursor = tells_cursor;
-    d.host().stale = vec![1, 0, 1, 1, 0];
-    let id = id_of(&d);
-    let viewport = d.viewport(id);
-    let grab = pos2(40.0, 9.0);
-    let mut pointer = d.host().windows[&viewport].rect.min + grab.to_vec2();
-    d.window_step(id, vec![Event::PointerMoved(grab), button(grab, true)]);
-    let mut place = d.host().windows[&viewport].rect.min;
-    let mut steps = Vec::new();
-    // On to the desktop right of the main window, where the release docks nothing.
-    for _ in 0..24 {
-        pointer += vec2(20.0, 5.0);
-        d.window_pointer(id, pointer);
-        let now = d.host().windows[&viewport].rect.min;
-        steps.push(now - place);
-        place = now;
-    }
-    let local = pointer - place.to_vec2();
-    d.window_step(id, vec![button(local, false)]);
-    d.settle();
-    assert_eq!(window(&d, 5).native.map(|r| pos2(r[0], r[1])), Some(d.host().windows[&viewport].rect.min));
-    steps
-}
-
-#[test]
-fn a_bar_drag_follows_the_cursor_where_pointer_events_trail_the_window() {
-    // Without the cursor the window overshoots and steps back.
-    let steps = bar_drag_with_stale_pointer(false);
-    assert!(steps.iter().any(|s| s.x < 0.0), "{steps:?}");
-    // With it, every frame moves the window by the pointer's step.
-    let steps = bar_drag_with_stale_pointer(true);
-    assert!(steps.iter().all(|s| *s == vec2(20.0, 5.0)), "{steps:?}");
 }
 
 #[test]
@@ -2699,4 +2660,108 @@ fn a_native_window_fades_only_while_its_bar_drag_highlights_a_drop_target() {
     assert_eq!(bar_to(&mut d, pos2(760.0, 300.0)), 0.75);
     d.window_step(id, vec![button(pos2(40.0, 9.0), false)]);
     assert_eq!(drag_opacity(&d.ctx, d.id), 1.0, "after the drop");
+}
+
+/// A driver whose window system moves a native window for a bar drag, as AppKit does.
+fn os_driver(layout: Layout<u32>) -> DockDriver<u32, Content> {
+    let d = driver(layout);
+    d.host().moves_windows = true;
+    d
+}
+
+/// Where window [5, 6]'s bar is pressed, in its coordinates.
+const GRAB: Pos2 = pos2(40.0, 9.0);
+
+/// Press window [5, 6]'s bar.
+fn os_press(d: &mut DockDriver<u32, Content>) -> u64 {
+    let id = id_of(d);
+    d.window_step(id, vec![Event::PointerMoved(GRAB), button(GRAB, true)]);
+    id
+}
+
+fn bar_dragging(d: &DockDriver<u32, Content>) -> bool {
+    d.ctx.data(|data| data.get_temp::<WindowDrag>(d.id.with("window-drag"))).is_some()
+}
+
+#[test]
+fn the_window_system_moves_a_native_window_for_its_bar_drag() {
+    let mut d = os_driver(layout(true));
+    let id = id_of(&d);
+    let viewport = d.viewport(id);
+    let before = moves(&d, viewport).len();
+    let sent = d.host().commands.len();
+    os_press(&mut d);
+    assert!(d.host().commands[sent..].iter().any(|(v, c)| *v == viewport && *c == ViewportCommand::StartDrag), "on the press");
+    // Over the right edge zone of frame [3, 4]. The window reports its place where the drag
+    // began, so the target is found from the cursor.
+    let target = ORIGIN + vec2(760.0, 300.0);
+    os_bar_drag_on(&mut d, id, target);
+    assert_eq!(d.host().windows[&viewport].rect.min, target - GRAB.to_vec2());
+    assert_eq!(drag_opacity(&d.ctx, d.id), 0.75, "over a drop target");
+    // Escape does not cancel it.
+    d.window_step(id, vec![escape()]);
+    assert!(bar_dragging(&d));
+    assert_eq!(d.host().windows[&viewport].rect.min, target - GRAB.to_vec2());
+    // Released on the desktop right of the main window, it stays where the cursor left it.
+    let desktop = ORIGIN + vec2(1000.0, 300.0);
+    d.window_pointer(id, desktop);
+    assert_eq!(drag_opacity(&d.ctx, d.id), 1.0, "over empty space");
+    let out = d.window_release(id, GRAB);
+    assert_eq!(window_move(&out), None, "{:?}", out.actions);
+    d.settle();
+    let to = desktop - GRAB.to_vec2();
+    assert_eq!(window(&d, 5).native, Some([to.x, to.y, 240.0, 300.0]));
+    assert_eq!(moves(&d, viewport).len(), before, "the app moved the window");
+}
+
+/// Move the cursor of the bar drag of window `id` to the desktop point `to` in two steps.
+fn os_bar_drag_on(d: &mut DockDriver<u32, Content>, id: u64, to: Pos2) {
+    let from = d.host().windows[&d.viewport(id)].rect.min + GRAB.to_vec2();
+    d.window_pointer(id, from.lerp(to, 0.5));
+    d.window_pointer(id, to);
+}
+
+#[test]
+fn a_bar_drag_the_window_system_moves_ends_once_on_the_first_release_reported() {
+    // The window system reports the release a frame before egui: the window docks then.
+    let mut d = os_driver(layout(true));
+    let id = os_press(&mut d);
+    os_bar_drag_on(&mut d, id, ORIGIN + vec2(760.0, 300.0));
+    d.host().held = false;
+    let out = d.step(vec![]);
+    assert!(matches!(window_move(&out), Some(Target::At { anchor: 3 | 4, placement: Placement::Split(super::Zone::Right) })), "{:?}", out.actions);
+    assert!(in_root(&d, 5) && in_root(&d, 6));
+
+    // With Cmd held it only moves, and egui's release without Cmd a frame later docks nothing.
+    let mut d = os_driver(layout(true));
+    let id = os_press(&mut d);
+    let viewport = d.viewport(id);
+    d.modifiers = Modifiers::COMMAND;
+    let target = ORIGIN + vec2(760.0, 300.0);
+    os_bar_drag_on(&mut d, id, target);
+    assert_eq!(drag_opacity(&d.ctx, d.id), 1.0, "a floating drop");
+    d.host().held = false;
+    let out = d.step(vec![]);
+    assert_eq!(window_move(&out), None, "{:?}", out.actions);
+    assert!(!bar_dragging(&d));
+    d.modifiers = Modifiers::NONE;
+    let sent = d.host().commands.len();
+    let out = d.window_release(id, GRAB);
+    assert_eq!(window_move(&out), None, "{:?}", out.actions);
+    assert!(!bar_dragging(&d));
+    assert!(
+        !d.host().commands[sent..].iter().any(|(v, c)| *v == viewport && matches!(c, ViewportCommand::StartDrag | ViewportCommand::OuterPosition(_)))
+    );
+    d.settle();
+    let to = target - GRAB.to_vec2();
+    assert_eq!(window(&d, 5).native.map(|r| [r[0], r[1]]), Some([to.x, to.y]));
+
+    // A click on the bar over the main window docks and moves nothing.
+    let mut d = os_driver(layout(true));
+    let native = window(&d, 5).native;
+    let id = os_press(&mut d);
+    let out = d.window_release(id, GRAB);
+    assert!(out.actions.is_empty(), "{:?}", out.actions);
+    d.settle();
+    assert_eq!(window(&d, 5).native, native);
 }

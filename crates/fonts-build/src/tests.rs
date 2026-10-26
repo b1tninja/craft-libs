@@ -191,6 +191,68 @@ fn documents_embeds_only_the_named_families() {
     assert!(warnings(&r).iter().any(|w| w.contains("building without craft-fonts") && w.contains("no family Serif")), "{:?}", r.cargo);
 }
 
+#[test]
+fn serve_copies_the_selected_faces_and_writes_urls() {
+    let scratch = Scratch::new("serve");
+    let served = scratch.0.join("dist/fonts");
+    let env = Env { dir: Some(fixture().into()), required: Some("1".into()), out_dir: Some(scratch.0.clone().into()) };
+    let embed = Embed::new().scripts(&["Jpan", "Hant"]).filter(|f| f.style == "Regular").serve(&served, "fonts/");
+    let mut cargo = Vec::new();
+    let names: Vec<String> =
+        embed.run(&env, Path::new("craft_fonts.rs"), &mut cargo).unwrap().iter().map(|f| format!("{} {}", f.family, f.style)).collect();
+    assert_eq!(names, ["Sans JP Regular", "Sans CJK TC Regular", "Sans CJK HK Regular"]);
+
+    let read = |path: &str| std::fs::read(served.join(path)).unwrap();
+    assert_eq!(read("sans-jp/SansJP-Regular.ttf"), std::fs::read(fixture().join("fonts/sans-jp/SansJP-Regular.ttf")).unwrap());
+    assert_eq!(read("sans-cjk/SansCJK.ttc").len(), 28);
+    assert_eq!(read("sans-jp/OFL.txt"), b"Fixture licence text.\n");
+    assert!(!served.join("sans-jp/SansJP-Bold.ttf").exists() && !served.join("sans-arabic").exists());
+    // Cargo copies a deleted file again, and doesn't rerun for files it just copied.
+    assert!(cargo.contains(&format!("cargo::rerun-if-changed={}", served.join("sans-jp/SansJP-Regular.ttf").display())), "{cargo:?}");
+    assert!(cargo.contains(&format!("cargo::rerun-if-changed={}", served.join("sans-jp/OFL.txt").display())), "{cargo:?}");
+    let modified = |path: &Path| std::fs::metadata(path).unwrap().modified().unwrap();
+    assert_eq!(modified(&served.join("sans-jp/SansJP-Regular.ttf")), modified(&fixture().join("fonts/sans-jp/SansJP-Regular.ttf")));
+
+    let table = std::fs::read_to_string(scratch.0.join("craft_fonts.rs")).unwrap();
+    assert!(!table.contains("include_bytes!"), "{table}");
+    assert!(
+        table.contains(
+            "ServedFace { family: \"Sans JP\", style: \"Regular\", scripts: &[\"Jpan\", \"Latn\"], index: 0, url: \"fonts/sans-jp/SansJP-Regular.ttf\", size: 24, integrity: \"sha256-ydCO8fxp8V6HzlK9qKnCRxTkEl2vflCkDtsaor4Q3/E=\", coverage: b\"\" }"
+        ),
+        "{table}"
+    );
+    // Both faces of the collection name the one served file.
+    assert_eq!(table.matches("url: \"fonts/sans-cjk/SansCJK.ttc\"").count(), 2, "{table}");
+
+    // Without a checkout the table is empty and nothing is copied.
+    let env = Env { dir: None, required: None, out_dir: Some(scratch.0.clone().into()) };
+    let empty = scratch.0.join("empty");
+    assert!(Embed::new().serve(&empty, "fonts/").run(&env, Path::new("craft_fonts.rs"), &mut cargo).unwrap().is_empty());
+    assert_eq!(std::fs::read_to_string(scratch.0.join("craft_fonts.rs")).unwrap().trim(), "&[]");
+    assert!(!empty.exists());
+}
+
+#[test]
+fn serve_replaces_a_stale_copy_of_the_same_size() {
+    let scratch = Scratch::new("serve-stale");
+    let served = scratch.0.join("served");
+    let source = std::fs::read(fixture().join("fonts/sans-jp/SansJP-Regular.ttf")).unwrap();
+    std::fs::create_dir_all(served.join("sans-jp")).unwrap();
+    std::fs::write(served.join("sans-jp/SansJP-Regular.ttf"), vec![0; source.len()]).unwrap();
+    let r = run(Embed::new().scripts(&["Jpan"]).filter(|f| f.style == "Regular").serve(&served, "fonts/"), Some(&fixture()), Some("1"));
+    r.result.unwrap();
+    assert_eq!(std::fs::read(served.join("sans-jp/SansJP-Regular.ttf")).unwrap(), source);
+}
+
+#[test]
+fn integrity_is_base64_of_the_hex_hash() {
+    use crate::embed::integrity;
+    assert_eq!(integrity("c9d08ef1fc69f15e87ce52bda8a9c24714e4125daf7e50a40edb1aa2be10dff1"), "sha256-ydCO8fxp8V6HzlK9qKnCRxTkEl2vflCkDtsaor4Q3/E=");
+    for bad in ["", "00", "zz08ef1fc69f15e87ce52bda8a9c24714e4125daf7e50a40edb1aa2be10dff1"] {
+        assert_eq!(integrity(bad), "", "{bad:?}");
+    }
+}
+
 /// A font with only a `cmap` table: a Windows format 4 subtable with `bmp` segments `(first,
 /// last, glyphs)`, mapped to glyphs 1.. when `glyphs` is `None` and through the glyph array
 /// otherwise, and a format 12 subtable with `groups` `(first, last)` when there are any.
@@ -545,6 +607,36 @@ mod subset {
         }
     }
 
+    #[test]
+    fn subset_to_serves_the_cut_under_its_hash() {
+        let scratch = Scratch::new("subset-serve");
+        let dir = checkout(&scratch, &[("Noto Sans TC UI", "Hant,Latn", "ui", tiny("Tiny-glyf.ttf"))]);
+        let catalog = scratch.0.join("zh-TW.tsv");
+        std::fs::write(&catalog, "Open\t一\n").unwrap();
+        let served = scratch.0.join("served");
+        let r = run(Embed::new().subset_to([&catalog]).serve(&served, "fonts/"), Some(&dir), Some("1"));
+        assert_eq!(r.result.as_ref().unwrap(), &["Noto Sans TC UI Regular"]);
+        let cut = std::fs::read(cut_file(&r, "Noto Sans TC UI")).unwrap();
+        let sha256 = crate::sha256::hex(&cut);
+        let file = format!("{}.{}.ttf", 0, &sha256[..16]);
+        assert_eq!(std::fs::read(served.join(&file)).unwrap(), cut);
+        assert!(!served.join("0.ttf").exists());
+        let line = format!("url: \"fonts/{file}\", size: {}, integrity: {:?}, coverage: ", cut.len(), crate::embed::integrity(&sha256));
+        assert!(r.table.contains(&line), "{}\n{line}", r.table);
+    }
+
+    #[test]
+    fn sha256_matches_the_standard_vectors() {
+        use crate::sha256::hex;
+        assert_eq!(hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        assert_eq!(hex(&vec![b'a'; 1_000_000]), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+    }
+
     /// With `CRAFT_FONTS_DIR` set to a craft-fonts checkout, cut its BIZ UDPGothic Regular.
     #[test]
     fn cuts_biz_udpgothic() {
@@ -559,4 +651,44 @@ mod subset {
         assert!(cut.len() < source.len() / 20, "{} of {} bytes", cut.len(), source.len());
         assert_eq!(crate::subset::subset(&source, 0, &chars).unwrap(), cut);
     }
+}
+
+#[test]
+fn for_ui_serves_no_whole_cjk_face() {
+    let scratch = Scratch::new("for-ui-serve");
+    let dir = checkout(
+        &scratch,
+        &[
+            ("Noto Sans TC", "Hant,Latn", "", b"full".to_vec()),
+            ("Noto Sans TC UI", "Hant,Latn", "ui", b"source".to_vec()),
+            ("Noto Sans Arabic", "Arab", "", b"arabic".to_vec()),
+        ],
+    );
+    let served = scratch.0.join("served");
+    let r = run(Embed::new().for_ui().serve(&served, "fonts/"), Some(&dir), None);
+    assert_eq!(r.result.unwrap(), ["Noto Sans Arabic Regular"]);
+    assert_eq!(std::fs::read(served.join("2.ttf")).unwrap(), b"arabic");
+    assert!(!served.join("0.ttf").exists() && !served.join("1.ttf").exists());
+}
+
+#[test]
+fn served_faces_carry_the_characters_their_cmap_maps() {
+    let font = tiny_font(&[(0x41, 0x5A, None), (0x4E00, 0x4E02, Some(&[5, 0, 7]))], &[(0x4E03, 0x4E03), (0x2_0000, 0x2_0001)]);
+    let coverage = crate::coverage::of_face(&font, 0).unwrap();
+    assert_eq!(Cmap::read(&font, 0).unwrap().ranges(), [(0x41, 0x5A), (0x4E00, 0x4E00), (0x4E02, 0x4E03), (0x2_0000, 0x2_0001)]);
+    let covered: Vec<char> =
+        "@AZ[一丁丂七丄\u{FFFF}\u{20000}\u{20001}\u{20002}".chars().filter(|&c| crate::coverage::contains(&coverage, c)).collect();
+    assert_eq!(covered, ['A', 'Z', '一', '丂', '七', '\u{20000}', '\u{20001}']);
+    assert!(!crate::coverage::contains(&[], 'A') && !crate::coverage::contains(&[0x80], 'A'));
+    assert_eq!(crate::coverage::encode(&[(0, 0x10_FFFF)]), [0, 0xFF, 0xFF, 0x43]);
+
+    let scratch = Scratch::new("serve-coverage");
+    let dir = checkout(&scratch, &[("Noto Sans", "Latn", "", font), ("Broken", "Latn", "", b"not a font".to_vec())]);
+    let r = run(Embed::new().serve(scratch.0.join("served"), "fonts/"), Some(&dir), None);
+    assert_eq!(r.result.as_ref().unwrap().len(), 2);
+    let table = &r.table;
+    // Gaps and lengths 0x41 0x19, 0x4DA5 0, 1 1, 0x1_B1FC 1 as LEB128.
+    assert!(table.contains(r#"coverage: b"A\x19\xa5\x9b\x01\x00\x01\x01\xfc\xe3\x06\x01" }"#), "{table}");
+    assert!(table.contains(r#"family: "Broken""#) && table.ends_with("coverage: b\"\" },\n]\n"), "{table}");
+    assert!(warnings(&r).iter().any(|w| w.contains("no character map in fonts/1.ttf")), "{:?}", warnings(&r));
 }

@@ -12,12 +12,29 @@ use craft_scan::ScanSettings;
 use craft_scan::job::{Outcome, PageInfo, ScanJob, ScanJobConfig, ScanJobState};
 use serde_json::{Value, json};
 
+/// A temp folder that is removed when it is dropped, so a failing assertion does not leave it behind.
+struct Folder(PathBuf);
+
+impl std::ops::Deref for Folder {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Folder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, empty temp folder for the test `name`.
-fn folder(name: &str) -> PathBuf {
+fn folder(name: &str) -> Folder {
     let dir = std::env::temp_dir().join(format!("craft-devices-duplex-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp folder");
-    dir
+    Folder(dir)
 }
 
 /// The journal entry of a 2x2 bmp page numbered `number`.
@@ -89,7 +106,6 @@ fn fronts_in_two_loads_then_backs_in_two_parts_end_in_document_order() {
     let read = read_record(&dir).expect("read");
     assert_eq!(read.manual_duplex.map(|d| d.cursor), Some(0));
     assert!(page_mismatch(&dir, &read).is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -128,7 +144,6 @@ fn a_backs_pass_that_ran_the_feeder_empty_still_says_the_backs_are_not_finished(
     assert!(!read.backs_remaining());
     assert_eq!(read.exit_class(), ScanJobState::Terminal(Outcome::Completed).exit_class());
     assert!(detail_text("app", &dir, &read).contains("nothing; the scan is complete"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -156,5 +171,4 @@ fn a_journal_with_no_sheets_is_refused_and_the_numbering_is_total() {
     // The numbering itself never overflows.
     assert_eq!((0..3).map(|i| duplex_page_number(0, i)).collect::<Vec<_>>(), [1, 2, 3]);
     assert_eq!(duplex_page_number(u32::MAX, usize::MAX), 2);
-    let _ = std::fs::remove_dir_all(&dir);
 }

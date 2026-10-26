@@ -264,6 +264,8 @@ struct BlankSummaries {
     printer: Arc<FakePrinter>,
     fields: &'static [&'static str],
     lookups: Arc<AtomicU32>,
+    /// The ticket does not name the user either.
+    ticket_has_no_user: bool,
 }
 
 impl Transport for BlankSummaries {
@@ -275,9 +277,10 @@ impl Transport for BlankSummaries {
             let asked = String::from_utf8(request.body.clone()).unwrap();
             let id: u32 = asked.split("<wprt:JobId>").nth(1).and_then(|r| r.split('<').next()).and_then(|n| n.parse().ok()).unwrap();
             let job = self.printer.job(id).unwrap();
+            let user = if self.ticket_has_no_user { "" } else { job.user.as_str() };
             let ticket = format!(
                 "<wprt:ElementData Name=\"wprt:PrintTicket\" Valid=\"true\"><wprt:PrintTicket><wprt:JobDescription><wprt:JobName>{}</wprt:JobName><wprt:JobOriginatingUserName>{}</wprt:JobOriginatingUserName></wprt:JobDescription></wprt:PrintTicket></wprt:ElementData>",
-                job.name, job.user
+                job.name, user
             );
             body = String::from_utf8(body).unwrap().replace("</wprt:JobElements>", &format!("{ticket}</wprt:JobElements>")).into_bytes();
         }
@@ -302,14 +305,23 @@ impl Transport for BlankSummaries {
 /// A printer holding one tagged job of the default user, and a backend that sees its job lists with
 /// `fields` left out of every summary.
 fn blanked(fields: &'static [&'static str]) -> (WsdBackend, Arc<AtomicU32>, Tag) {
+    blanked_with(fields, false, true)
+}
+
+/// As `blanked`; `ticket_has_no_user` leaves the user out of the ticket too, and `tagged: false`
+/// sends the job without a tag, so the listed name is the bare title.
+fn blanked_with(fields: &'static [&'static str], ticket_has_no_user: bool, tagged: bool) -> (WsdBackend, Arc<AtomicU32>, Tag) {
     let printer = FakePrinter::new(FakeConfig::default());
     let rig = Rig { printer: Arc::clone(&printer), registry: registry_over(&printer, 0), clock: ManualClock::new() };
     let mut job = print_job(&rig, "Quarterly report");
+    if !tagged {
+        job = job.with_tag_policy(TagPolicy::Never);
+    }
     let tag = *job.tag();
     drive(&mut job, &rig);
-    assert!(printer.job(1).unwrap().name.contains(" [ref "), "the printer kept the tag");
+    assert_eq!(printer.job(1).unwrap().name.contains(" [ref "), tagged);
     let lookups = Arc::new(AtomicU32::new(0));
-    let backend = WsdBackend::new().with_transport(BlankSummaries { printer, fields, lookups: Arc::clone(&lookups) });
+    let backend = WsdBackend::new().with_transport(BlankSummaries { printer, fields, lookups: Arc::clone(&lookups), ticket_has_no_user });
     backend.add(URL).unwrap();
     (backend, lookups, tag)
 }
@@ -337,6 +349,28 @@ fn reconcile_tagged_completes_a_summary_without_a_name_or_a_user_with_one_lookup
     let found = backend.reconcile_tagged(URL, "Quarterly report", Some(&tag)).unwrap();
     assert!(matches!(&found, WsdReconciled::Found(m) if m.name.contains(" [ref ")), "{found:?}");
     assert_eq!(lookups.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_user_the_printer_never_reveals_does_not_reject_the_exact_name_but_does_reject_a_title_only_match() {
+    let users = &["JobOriginatingUserName"];
+    // The summary and the ticket both lack the user: the name as sent still finds the job.
+    let (backend, lookups, tag) = blanked_with(users, true, true);
+    let found = backend.reconcile_tagged(URL, "Quarterly report", Some(&tag)).unwrap();
+    assert!(matches!(&found, WsdReconciled::Found(m) if m.name.contains(" [ref ")), "{found:?}");
+    assert_eq!(lookups.load(Ordering::SeqCst), 1, "the ticket was asked and had no user");
+
+    // The listed name is only the title (no tag): the title matches, and the user decides, but it
+    // is unknown, so the job is not claimed.
+    let (backend, lookups, tag) = blanked_with(users, true, false);
+    let found = backend.reconcile_tagged(URL, "Quarterly report", Some(&tag)).unwrap();
+    assert_eq!(found, WsdReconciled::NotFound);
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+
+    // With the user in the ticket the same title-only listing is found.
+    let (backend, _, tag) = blanked_with(users, false, false);
+    let found = backend.reconcile_tagged(URL, "Quarterly report", Some(&tag)).unwrap();
+    assert!(matches!(&found, WsdReconciled::Found(m) if m.name == "Quarterly report"), "{found:?}");
 }
 
 #[test]

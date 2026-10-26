@@ -41,7 +41,7 @@ pub enum IppError {
     UnsupportedFormat { document: String, accepted: Vec<String> },
     /// The caller cancelled; nothing further was sent.
     Cancelled,
-    /// A deadline passed.
+    /// The caller's deadline had passed before the exchange could start; nothing was sent.
     Timeout,
     /// The printer or job is not known.
     NotFound(String),
@@ -239,7 +239,9 @@ impl IppError {
             Self::Cancelled => class(K::Cancelled, P::Prepare, S::Safe),
             Self::TooLarge(what, _) if REQUEST_LABELS.contains(what) => class(K::InvalidRequest, P::Prepare, S::Safe),
             Self::TooLarge(..) | Self::Codec(_) | Self::Protocol(_) => class(K::Failed, net(P::Reply), reached),
-            Self::Timeout => class(K::Timeout, net(P::Reply), reached),
+            // The deadline had already passed when the exchange was about to start (an exchange that
+            // runs past it ends as a transport timeout instead): nothing was sent.
+            Self::Timeout => class(K::Timeout, P::Prepare, S::Safe),
             Self::Transport { kind, stage, .. } => {
                 use TransportKind as T;
                 let kind_of = match kind {
@@ -528,5 +530,15 @@ mod tests {
         assert_eq!(IppError::TooLarge("the request", 1).classify(Op::Send).kind, ErrorKind::InvalidRequest);
         assert_eq!(IppError::TooLarge("the printer's reply", 1).classify(Op::Send).kind, ErrorKind::Failed);
         assert_eq!(IppError::Tls("x".into()).classify(Op::Send).kind, ErrorKind::InvalidRequest);
+    }
+
+    #[test]
+    fn an_expired_deadline_never_reached_the_wire() {
+        // Like the WSD error: the deadline passed before anything was sent, so it is safe to try
+        // again with a fresh one, for a create and a status poll alike.
+        for op in [Op::Send, Op::Status] {
+            let c = IppError::Timeout.classify(op);
+            assert_eq!((c.kind, c.phase, c.safety), (ErrorKind::Timeout, Phase::Prepare, RetrySafety::Safe), "{op:?}");
+        }
     }
 }

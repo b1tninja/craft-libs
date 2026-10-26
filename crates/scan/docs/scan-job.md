@@ -18,6 +18,7 @@ next. It builds a `craft_job::JobView`, the same record a UI shows for a print j
 let mut job = ScanJob::new(settings, ScanJobConfig::default().with_scanner(&details));
 
 loop {
+    if spill_between_attempts { spill(job.take_pages()?); written = 0; }   // optional: take_pages() empties job.pages(), so the cursor starts again
     let plan = job.begin_attempt(now())?;               // or begin_attempt_with(now(), Continuation::Append)
     if plan.kept_pages == 0 {                           // nothing kept: a first attempt, or a start over
         remove_page_files(); written = 0;               // Restart emptied job.pages(): the cursor starts again too
@@ -58,7 +59,9 @@ new pages.
 So after it a writer flushes `job.pages()[written..]` once more, and the loop publishes `job.snapshot()` once more:
 the publishes inside the poll loop never carry the state `finish_attempt` reached. `written` indexes `job.pages()`,
 which is empty again after a `Restart` (the plan then says `kept_pages == 0`): the writer replaces the old page files
-and starts `written` at 0, or the next slice would index past the end.
+and starts `written` at 0, or the next slice would index past the end. `take_pages()` empties `job.pages()` in the
+same way, but the taken pages still count as kept (an `Append` plan says `kept_pages > 0`), so the `kept_pages == 0`
+test does not catch it: an app that spills pages between attempts sets `written = 0` itself whenever it takes them.
 
 The job itself is never shared across threads and needs no lock. A short-lived CLI run is exactly this loop:
 one process, one job, each page written to the job's output folder once `record_progress` has counted it (read

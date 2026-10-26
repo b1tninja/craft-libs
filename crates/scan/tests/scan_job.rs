@@ -300,6 +300,18 @@ fn a_page_writer_that_follows_the_documented_loop_keeps_every_page_and_survives_
     assert!(job.pages().is_empty() && written > job.pages().len(), "a stale cursor would index past the end");
     written = 0;
     assert!(job.pages()[written..].is_empty());
+
+    // An app that spills pages between attempts: take_pages() empties job.pages() but the pages stay kept, so an Append
+    // plan says kept_pages > 0 and the reset above does not run. The app resets the cursor when it takes the pages.
+    job.finish_attempt(scripted(&plan, 3, Source::Feeder, Some(native(InterruptKind::FeederEmpty))), t(4)).expect("finish");
+    written = job.pages().len();
+    assert_eq!(written, 3);
+    assert_eq!(job.take_pages().expect("taken").len(), 3);
+    let plan = job.begin_attempt_with(t(5), Continuation::Append).expect("append");
+    assert!(plan.kept_pages > 0 && job.pages().is_empty(), "kept_pages does not show that the taken pages are gone");
+    assert!(written > job.pages().len(), "a cursor that is not reset after take_pages would index past the end");
+    written = 0;
+    assert!(job.pages()[written..].is_empty());
 }
 
 #[test]

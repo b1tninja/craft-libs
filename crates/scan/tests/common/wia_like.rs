@@ -426,7 +426,9 @@ impl Backend for WiaLike {
             thresholded: false,
             length: Default::default(),
         };
-        Ok(Acquired { source: Source::Glass, pages: vec![page] })
+        // A feeder request is answered from the feeder; glass and Auto (which the driver resolves itself) from the glass.
+        let source = if settings.source == Source::Feeder { Source::Feeder } else { Source::Glass };
+        Ok(Acquired { source, pages: vec![page] })
     }
 }
 

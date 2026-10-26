@@ -435,6 +435,17 @@ fn an_auto_that_the_backend_answered_from_the_glass_is_recorded_as_a_fallback() 
 }
 
 #[test]
+fn a_one_page_feeder_request_to_the_wia_fake_is_not_recorded_as_a_glass_fallback() {
+    let wia = WiaLike { bits: 0x3, fail_listing: false };
+    let mut job = ScanJob::new(feeder_request(1), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(wia.acquire(&plan.settings), t(2)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!((snap.attempts[0].source_used, snap.attempts[0].fell_back), (Some(Source::Feeder), false));
+    assert_eq!(snap.pages[0].source, Some(Source::Feeder));
+}
+
+#[test]
 fn an_auto_that_the_backend_answered_from_the_glass_completes_with_the_one_page_the_glass_gives() {
     // Five pages wanted, the backend resolves Auto to the glass itself and returns one page: that is the whole scan,
     // exactly as when the job's own fallback sends the retry to the glass.

@@ -326,17 +326,25 @@ pub(super) fn split_frame<P>(root: &mut Node<P>, path: &[bool], new: Node<P>, zo
     true
 }
 
-/// [`split_frame`] with the sizes of [`Placement::SplitSized`]: the new split takes `size`, and
-/// the nearest enclosing split whose divider runs along the frame's `zone` side takes `outer`.
-/// False when there is no such split, or a dock is beyond it.
-pub(super) fn split_frame_sized<P>(root: &mut Node<P>, path: &[bool], new: Node<P>, zone: Zone, size: SplitSize, outer: SplitSize) -> bool {
-    let axis = if matches!(zone, Zone::Top | Zone::Bottom) { SplitAxis::Vertical } else { SplitAxis::Horizontal };
+/// The depth along the frame `path` of the split whose size a [`Placement::SplitSized`] on
+/// `zone` replaces: the nearest enclosing split along the zone's axis (`on_axis` at a depth)
+/// whose divider runs along the frame's `zone` side, else, for a frame at the edge of its
+/// area on that side, the nearest one along its opposite side.
+pub(super) fn sized_split_depth(path: &[bool], zone: Zone, on_axis: impl Fn(usize) -> bool) -> Option<usize> {
     // A divider on the frame's start side (left or top) belongs to a split holding the frame
     // in its second child.
     let start = matches!(zone, Zone::Left | Zone::Top);
-    let enclosing = (0..path.len()).rev().find(|&depth| {
-        path.get(depth) == Some(&start) && matches!(node_at(root, &path[..depth]), Some(Node::Split { axis: own, .. }) if *own == axis)
-    });
+    let nearest = |second: bool| (0..path.len()).rev().find(|&depth| path.get(depth) == Some(&second) && on_axis(depth));
+    nearest(start).or_else(|| nearest(!start))
+}
+
+/// [`split_frame`] with the sizes of [`Placement::SplitSized`]: the new split takes `size`, and
+/// the split [`sized_split_depth`] finds takes `outer`. False when there is no such split, or a
+/// dock is beyond it.
+pub(super) fn split_frame_sized<P>(root: &mut Node<P>, path: &[bool], new: Node<P>, zone: Zone, size: SplitSize, outer: SplitSize) -> bool {
+    let axis = if matches!(zone, Zone::Top | Zone::Bottom) { SplitAxis::Vertical } else { SplitAxis::Horizontal };
+    let enclosing =
+        sized_split_depth(path, zone, |depth| matches!(node_at(root, &path[..depth]), Some(Node::Split { axis: own, .. }) if *own == axis));
     let Some(depth) = enclosing else { return false };
     let Some(Node::Split { size: own, first, second, .. }) = node_at_mut(root, &path[..depth]) else { return false };
     if zone == Zone::Center || matches!(**first, Node::Dock { .. }) || matches!(**second, Node::Dock { .. }) {

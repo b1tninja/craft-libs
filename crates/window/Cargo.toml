@@ -1,6 +1,6 @@
 [package]
 name = "craft-window"
-description = "Decide who draws the window frame (the desktop or the app) so every Craft app gets the same titlebar and borders per desktop, and make an app-drawn strip act as the title bar."
+description = "Decide who draws the window frame (the desktop or the app) so every Craft app gets the same titlebar and borders per desktop, make an app-drawn strip act as the title bar, and keep the window list, cascade placement and Window menu for apps with one window per document."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 
 [features]
 # `decorate`: set the decision on an `egui::ViewportBuilder`. `title_bar`: an app-drawn strip as
-# the title bar (on macOS with AppKit's `movable` flag).
+# the title bar (on macOS with AppKit's `movable` flag). `Viewports`: one immediate viewport per window.
 egui = ["dep:egui", "dep:objc2", "dep:objc2-app-kit"]
 
 [dependencies]

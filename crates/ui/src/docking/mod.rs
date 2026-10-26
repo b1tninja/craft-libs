@@ -54,6 +54,8 @@ mod floating_tests;
 mod group_tests;
 #[cfg(test)]
 mod iconic_tests;
+#[cfg(all(test, feature = "native-windows"))]
+mod ime_tests;
 #[cfg(test)]
 mod model_tests;
 #[cfg(all(test, feature = "native-windows"))]

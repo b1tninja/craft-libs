@@ -310,9 +310,10 @@ pub enum Placement<P> {
     /// A side [`Placement::Split`] that gives the new frame its own room instead of half the
     /// anchor's frame: the new split takes `size`, and `outer` replaces the size of the nearest
     /// enclosing split whose divider runs along the anchor frame's `zone` side, so the frames
-    /// beyond that divider give the room. The renderer offers it beside a frame too small to
-    /// halve. `Center`, and an anchor without such a divider or with a dock beyond it, are
-    /// invalid.
+    /// beyond that divider give the room. An anchor at the edge of its area on that side takes
+    /// the nearest such split along its opposite side instead. The renderer offers it beside a
+    /// frame too small to halve. `Center`, and an anchor without either divider or with a dock
+    /// beyond it, are invalid.
     SplitSized { zone: Zone, size: SplitSize, outer: SplitSize },
     /// A new group above or below the anchor's group in a dock column. On an anchor in a
     /// floating window, a split of the anchor's group above or below.

@@ -837,7 +837,6 @@ dependencies = [
  "craft-winprint-gdi",
  "craft-wsd",
  "miniz_oxide 0.9.1",
- "roxmltree 0.20.0",
  "roxmltree 0.21.2",
  "tempfile",
  "winprint",
@@ -930,7 +929,7 @@ name = "craft-wsd"
 version = "0.1.0"
 dependencies = [
  "craft-wsd",
- "roxmltree 0.20.0",
+ "roxmltree 0.21.2",
  "thiserror 2.0.21",
  "ureq",
 ]

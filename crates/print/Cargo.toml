@@ -39,7 +39,7 @@ workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 craft-wsd = { workspace = true, optional = true }
 # Reading the printer's replies (the same crate and version the Windows code uses).
-roxmltree = { version = "0.20", optional = true }
+roxmltree = { version = "0.21", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Printing without starting anything (storytold/pdfcraft#1107): the printer list (EnumPrinters)

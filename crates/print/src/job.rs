@@ -88,7 +88,7 @@ impl JobStatus {
             sheets_total: None,
             pages_done: None,
             pages_total: None,
-            updated_at: SystemTime::now(),
+            updated_at: crate::clock::wall_now(),
         }
     }
 
@@ -192,7 +192,7 @@ impl Submitted {
         Self {
             backend,
             job: None,
-            accepted_at: SystemTime::now(),
+            accepted_at: crate::clock::wall_now(),
             status: None,
             warnings: Vec::new(),
             message: message.into(),

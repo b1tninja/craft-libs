@@ -173,7 +173,7 @@ impl FakeBackend {
             tag_support: TagSupport::None,
             query_caps: JobQueryCaps::NONE,
             user: "fake-user".into(),
-            created_at: Arc::new(SystemTime::now),
+            created_at: Arc::new(crate::clock::wall_now),
             title_max: None,
             open_job_timeout: None,
             push: false,

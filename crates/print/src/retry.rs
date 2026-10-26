@@ -18,8 +18,8 @@
 //!   resubmitting).
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use craft_job::{Jitter, RetryAdvice, RetryFacts, RetryPolicy, advise};
 
@@ -63,21 +63,21 @@ pub trait Clock: Send + Sync {
     fn sleep(&self, duration: Duration);
 }
 
-/// The real clock (`std::time::Instant`, `std::thread::sleep`). Not available on
-/// `wasm32-unknown-unknown`: pass another [`Clock`] there.
+/// The real clock (`std::time::Instant`, `std::thread::sleep`). On `wasm32-unknown-unknown`, where
+/// those panic, it is a logical clock (one millisecond per read, a sleep just moves it on), so
+/// nothing panics and a wait ends; pass another [`Clock`] there for real time.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {
     /// Time since this clock was first read in the process (monotonic).
     fn now(&self) -> Duration {
-        static START: OnceLock<Instant> = OnceLock::new();
-        START.get_or_init(Instant::now).elapsed()
+        crate::clock::monotonic()
     }
 
     /// Block the thread for `duration`.
     fn sleep(&self, duration: Duration) {
-        std::thread::sleep(duration);
+        crate::clock::sleep(duration);
     }
 }
 

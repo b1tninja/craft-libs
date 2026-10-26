@@ -18,6 +18,7 @@
 
 mod backend;
 mod builtin;
+mod clock;
 pub mod convert;
 #[cfg(all(feature = "ipp", not(target_arch = "wasm32")))]
 pub mod ipp;

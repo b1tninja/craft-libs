@@ -1917,7 +1917,10 @@ impl PrintJob {
         if let Some(started) = self.first_wall.and_then(Timestamp::from_system_time) {
             times = times.with_started(started);
         }
-        let finished = self.finished_at.and_then(|end| Timestamp::from_system_time(self.created_wall + end.saturating_sub(self.created)));
+        // A creation time at the far end of what the platform's clock holds (an injected wall clock)
+        // cannot take the offset: no end time then, never a panic.
+        let finished =
+            self.finished_at.and_then(|end| self.created_wall.checked_add(end.saturating_sub(self.created))).and_then(Timestamp::from_system_time);
         if let Some(finished) = finished {
             times = times.with_finished(finished);
         }

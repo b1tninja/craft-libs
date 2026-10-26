@@ -169,6 +169,35 @@ fn a_finished_print_carries_its_document_times_tag_and_remote_id() {
     assert_eq!(view.progress, None, "this printer reported no counters and none were expected");
 }
 
+/// The latest time the platform's clock can hold.
+fn latest() -> SystemTime {
+    let (mut lo, mut hi) = (0u64, u64::MAX);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(mid)).is_some() {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    at(lo)
+}
+
+#[test]
+fn a_wall_clock_at_the_end_of_time_leaves_out_the_end_time_instead_of_panicking() {
+    let fake = network(vec![Ok(status(JobState::Processing)), Ok(status(JobState::Completed))]);
+    let rig = rig(&fake);
+    let end_of_time = latest();
+    let mut job = print_job(&rig).with_wall_clock(move || end_of_time);
+    drive(&mut job, &rig);
+
+    let view = job.view();
+    assert_eq!(view.state, JobState::Completed);
+    assert!(job.snapshot().elapsed > Duration::ZERO, "the job clock moved, so the end is the creation plus an offset");
+    assert!(view.times.created.is_some());
+    assert_eq!(view.times.finished, None, "the end cannot be represented");
+}
+
 #[test]
 fn expected_totals_fill_the_progress_total() {
     let mut reading = status(JobState::Processing);

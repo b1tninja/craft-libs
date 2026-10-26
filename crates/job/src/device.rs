@@ -145,7 +145,7 @@ impl From<IndicatorKey> for String {
 impl<'de> serde::Deserialize<'de> for IndicatorKey {
     /// Reads the wire name; a name that is not a known key becomes `Other` (see `From<String>`).
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Self::from)
+        <String as serde::Deserialize>::deserialize(deserializer).map(Self::from)
     }
 }
 

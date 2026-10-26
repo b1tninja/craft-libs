@@ -992,7 +992,7 @@ name = "craft-wsd"
 version = "0.1.0"
 dependencies = [
  "craft-wsd",
- "roxmltree",
+ "roxmltree 0.21.2",
  "thiserror 2.0.21",
  "ureq",
 ]

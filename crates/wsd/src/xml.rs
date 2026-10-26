@@ -30,7 +30,7 @@ pub fn checked_text(bytes: &[u8]) -> Result<&str> {
 
 /// Parse with a node cap and no DTD.
 pub fn parse(text: &str) -> Result<Document<'_>> {
-    let options = ParsingOptions { allow_dtd: false, nodes_limit: MAX_NODES };
+    let options = ParsingOptions { allow_dtd: false, nodes_limit: MAX_NODES, ..ParsingOptions::default() };
     Document::parse_with_options(text, options).map_err(|e| Error::Xml(e.to_string()))
 }
 

@@ -217,7 +217,8 @@ pub fn parse_bool(s: &str) -> Option<bool> {
 }
 
 /// Escape text for an element or a double-quoted attribute; characters XML 1.0 cannot carry are
-/// dropped.
+/// dropped. Tab, line feed and carriage return are written as character references: a parser turns
+/// a raw one in an attribute value into a space, and a raw carriage return in text into a line feed.
 pub fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -227,7 +228,9 @@ pub fn esc(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            '\t' | '\n' | '\r' => out.push(c),
+            '\t' => out.push_str("&#9;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
             c if (c as u32) < 0x20 || c == '\u{fffe}' || c == '\u{ffff}' => {}
             c => out.push(c),
         }
@@ -242,7 +245,17 @@ mod tests {
     #[test]
     fn escaping_covers_markup_and_controls() {
         assert_eq!(esc("a<b>&\"'"), "a&lt;b&gt;&amp;&quot;&apos;");
-        assert_eq!(esc("x\u{0}y\u{8}z\tq"), "xyz\tq");
+        assert_eq!(esc("x\u{0}y\u{8}z\tq"), "xyz&#9;q");
+    }
+
+    #[test]
+    fn tab_newline_and_carriage_return_survive_a_parse_in_text_and_in_an_attribute() {
+        let original = "a\tb\nc\rd\r\ne <&>\"' f";
+        let doc = format!("<r a=\"{e}\"><t>{e}</t></r>", e = esc(original));
+        let parsed = roxmltree::Document::parse(&doc).unwrap();
+        let root = parsed.root_element();
+        assert_eq!(root.attribute("a"), Some(original), "attribute");
+        assert_eq!(root.children().find(|n| n.has_tag_name("t")).and_then(|n| n.text()), Some(original), "text");
     }
 
     #[test]

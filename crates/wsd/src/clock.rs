@@ -172,27 +172,31 @@ mod tests {
 
     /// `std::time::Instant::now()` and `SystemTime::now()` panic on wasm32-unknown-unknown, where
     /// CI can only build, not run. So the rule is checked in the source: the crate's own code
-    /// reads the clock only through this module. (`http` is not built for wasm32.)
+    /// reads the clock only through this module. Every source file is scanned, so a new module is
+    /// checked without being listed; `http` (not built for wasm32), `testing` and this module are
+    /// the exceptions.
     #[test]
     fn nothing_but_this_module_reads_the_std_clock() {
-        let sources = [
-            ("addressing.rs", include_str!("addressing.rs")),
-            ("discovery.rs", include_str!("discovery.rs")),
-            ("envelope.rs", include_str!("envelope.rs")),
-            ("eventing.rs", include_str!("eventing.rs")),
-            ("fault.rs", include_str!("fault.rs")),
-            ("metadata.rs", include_str!("metadata.rs")),
-            ("mtom.rs", include_str!("mtom.rs")),
-            ("soap.rs", include_str!("soap.rs")),
-            ("transport.rs", include_str!("transport.rs")),
-            ("xml.rs", include_str!("xml.rs")),
-        ];
-        for (name, text) in sources {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.extension().is_none_or(|e| e != "rs") || ["clock.rs", "http.rs", "testing.rs"].contains(&name.as_str()) {
+                continue;
+            }
+            scanned += 1;
+            let text = std::fs::read_to_string(&path).unwrap();
             // Test modules run on the host, where the clock exists; only production code counts.
-            let production = text.split("#[cfg(test)]").next().unwrap_or(text);
-            for banned in ["std::time::Instant", "SystemTime", "UNIX_EPOCH", "time::{Duration, Instant}"] {
-                assert!(!production.contains(banned), "{name} reads the std clock ({banned}); use crate::clock");
+            let production = text.split("#[cfg(test)]").next().unwrap_or(&text);
+            for line in production.lines().filter(|l| !l.trim_start().starts_with("//")) {
+                let imports_instant = line.contains("std::time::{") && line.contains("Instant");
+                for banned in ["std::time::Instant", "SystemTime::now"] {
+                    assert!(!line.contains(banned), "{name} reads the std clock ({banned}); use crate::clock");
+                }
+                assert!(!imports_instant, "{name} imports the std Instant; use crate::clock");
             }
         }
+        assert!(scanned >= 10, "the scan found only {scanned} source files");
     }
 }

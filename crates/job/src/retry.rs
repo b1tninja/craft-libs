@@ -214,12 +214,14 @@ pub fn advise(facts: &RetryFacts, policy: &RetryPolicy) -> RetryAdvice {
         return RetryAdvice::CheckDeviceFirst;
     }
     // The attempt that just failed counts: a caller that says 0 (as `delay` reads it) means the first.
-    if facts.attempts_so_far.max(1) >= policy.max_attempts {
+    // Normalised once, so the limit, the jitter seed and the delay all see the same attempt number.
+    let attempt = facts.attempts_so_far.max(1);
+    if attempt >= policy.max_attempts {
         return RetryAdvice::DoNotRetry;
     }
-    let unit = Jitter::new(facts.jitter_seed ^ u64::from(facts.attempts_so_far).wrapping_mul(0x9E37_79B9_7F4A_7C15)).unit();
+    let unit = Jitter::new(facts.jitter_seed ^ u64::from(attempt).wrapping_mul(0x9E37_79B9_7F4A_7C15)).unit();
     let hint = facts.retry_after.map_or(Duration::ZERO, |d| d.min(policy.max_retry_after));
-    let wait = policy.delay(facts.attempts_so_far, unit).max(hint);
+    let wait = policy.delay(attempt, unit).max(hint);
     if wait.is_zero() { RetryAdvice::RetryNow } else { RetryAdvice::RetryAfter(wait) }
 }
 
@@ -354,6 +356,16 @@ mod tests {
         assert_eq!(advise(&spent, &p), RetryAdvice::DoNotRetry);
         let unknown = RetryFacts::new(true, RetrySafety::OutcomeUnknown).with_retry_after(MS(5));
         assert_eq!(advise(&unknown, &p), RetryAdvice::CheckDeviceFirst);
+    }
+
+    #[test]
+    fn attempt_zero_and_one_give_the_same_advice_including_jitter() {
+        let p = RetryPolicy { jitter_percent: 25, ..policy() };
+        for seed in [0u64, 1, 7, 99, u64::MAX] {
+            let zero = RetryFacts::new(true, RetrySafety::Safe).with_attempts(0).with_jitter_seed(seed);
+            let one = RetryFacts::new(true, RetrySafety::Safe).with_attempts(1).with_jitter_seed(seed);
+            assert_eq!(advise(&zero, &p), advise(&one, &p), "seed {seed}");
+        }
     }
 
     #[test]

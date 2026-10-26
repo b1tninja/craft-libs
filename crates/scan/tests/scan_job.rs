@@ -143,6 +143,30 @@ fn an_append_that_delivers_no_pages_fails_and_can_be_started_again() {
 }
 
 #[test]
+fn an_append_that_adds_nothing_is_not_completed_by_the_feeder_empty_answer() {
+    // A whole-feeder job (pages = 0) jams after five sheets.
+    let mut job = ScanJob::new(feeder_request(0), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("first attempt");
+    job.finish_attempt(scripted(&plan, 5, Source::Feeder, Some(native(InterruptKind::Jam))), t(2)).expect("finish");
+    assert_eq!((job.state(), job.page_count()), (ScanJobState::Interrupted, 5));
+
+    // The jam is cleared, nothing is reloaded: the backend says the feeder is empty and delivers no page.
+    let plan = job.begin_attempt_with(t(3), Continuation::Append).expect("append");
+    job.finish_attempt(scripted(&plan, 0, Source::Feeder, Some(native(InterruptKind::FeederEmpty))), t(4)).expect("finish");
+    let snap = job.snapshot();
+    assert_eq!(snap.state, ScanJobState::Interrupted, "the person decides; the unscanned sheets are not written off as a finished scan");
+    assert_eq!(snap.advice, RetryAdvice::DoNotRetry);
+    assert_eq!(snap.attempts[1].pages_gained, 0);
+    assert_ne!(snap.attempts[1].outcome, AttemptOutcome::Completed);
+
+    // A first attempt that empties the feeder still completes.
+    let mut job = ScanJob::new(feeder_request(0), ScanJobConfig::default());
+    let plan = job.begin_attempt(t(1)).expect("attempt");
+    job.finish_attempt(scripted(&plan, 4, Source::Feeder, Some(native(InterruptKind::FeederEmpty))), t(2)).expect("finish");
+    assert_eq!(job.state(), ScanJobState::Terminal(Outcome::Completed));
+}
+
+#[test]
 fn restart_discards_the_kept_pages_and_asks_for_everything_again() {
     let mut job = ScanJob::new(feeder_request(5), ScanJobConfig::default());
     let plan = job.begin_attempt(t(1)).expect("attempt");

@@ -1185,9 +1185,11 @@ impl ScanJob {
             self.expected = Some(1);
             return (AttemptOutcome::FellBackToGlass, ScanJobState::Interrupted, RetryAdvice::RetryNow, Some(failure));
         }
-        // The feeder ran out with pages in hand: a normal end when the whole feeder was wanted or the
+        // The feeder ran out with pages gained by this attempt: a normal end when the whole feeder was wanted or the
         // wanted count is reached; otherwise a stack that stopped short, waiting for paper.
-        if kept > 0 && matches!(kind, InterruptKind::FeederEmpty | InterruptKind::BusyOrFeederEmpty) && self.expected.is_none_or(|e| count(kept) >= e)
+        if gained > 0
+            && matches!(kind, InterruptKind::FeederEmpty | InterruptKind::BusyOrFeederEmpty)
+            && self.expected.is_none_or(|e| count(kept) >= e)
         {
             return (AttemptOutcome::Completed, ScanJobState::Terminal(Outcome::Completed), RetryAdvice::DoNotRetry, None);
         }

@@ -29,8 +29,9 @@ exponential backoff with seeded jitter, raised to the device's `retry_after` hin
 Lifecycle objects and state machines (`PrintJob`, `ScanJob`), error kinds, attempt records and
 trails, clocks, remote-job listing, filters, capabilities queries and the reconcile engine,
 cancel tokens, and UI. Tags and fingerprints are *data* here; deciding which listed job is ours is
-the domain crate's business. Public enums and records are `#[non_exhaustive]`; build them with
-`new` and the `with_*` builders.
+the domain crate's business. Most public enums and records are `#[non_exhaustive]`; build them with
+`new` and the `with_*` builders. `NativeCode`, `Progress`, `ExpectedTotals` and `RetryPolicy` have
+public fields and are not `#[non_exhaustive]`, so adding a field to them is a breaking change.
 
 ## `JobView` for a print job and a scan job
 

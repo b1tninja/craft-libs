@@ -855,12 +855,17 @@ pub fn discover<S: DiscoverySocket + ?Sized>(socket: &S, opts: &DiscoverOptions)
 pub mod fake {
     //! An in-memory [`DiscoverySocket`] and a device-side responder, for tests of everything that
     //! sits on discovery. No real socket is ever opened.
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
 
     use super::*;
+
+    /// Lock `m`, taking the guard back from a poisoned mutex: one panicking responder must not
+    /// make every later use of the socket panic too.
+    fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 
     /// A device that answers probes and resolves (and nothing else) from memory.
     pub struct FakeResponder {
@@ -878,7 +883,7 @@ pub mod fake {
 
         /// The `AppSequence` for this device's next message; numbers increase by one per call.
         fn next_seq(&self) -> AppSequence {
-            let mut n = self.message_number.lock().unwrap();
+            let mut n = lock(&self.message_number);
             *n += 1;
             AppSequence::new(self.instance_id, *n)
         }
@@ -917,37 +922,37 @@ pub mod fake {
 
         /// Queue a datagram for the next `recv`.
         pub fn push(&self, d: Datagram) {
-            self.inbox.lock().unwrap().push_back(d);
+            lock(&self.inbox).push_back(d);
         }
 
         /// React to everything sent through this socket with the datagrams `responder` returns.
         pub fn add_responder(&self, responder: impl Fn(&Destination, &[u8]) -> Vec<Datagram> + Send + Sync + 'static) {
-            self.responders.lock().unwrap().push(Box::new(responder));
+            lock(&self.responders).push(Box::new(responder));
         }
 
         /// Let `device` answer every probe and resolve sent through this socket.
         pub fn add_device(&self, device: FakeResponder) {
-            self.responders.lock().unwrap().push(Box::new(move |_, payload| device.answer(payload)));
+            lock(&self.responders).push(Box::new(move |_, payload| device.answer(payload)));
         }
 
         /// Everything sent so far.
         pub fn sent(&self) -> Vec<(Destination, Vec<u8>)> {
-            self.sent.lock().unwrap().clone()
+            lock(&self.sent).clone()
         }
     }
 
     impl DiscoverySocket for FakeSocket {
         /// Record the datagram, then queue whatever every responder answers to it. Never fails.
         fn send(&self, to: &Destination, payload: &[u8]) -> Result<()> {
-            self.sent.lock().unwrap().push((to.clone(), payload.to_vec()));
-            let replies: Vec<Datagram> = self.responders.lock().unwrap().iter().flat_map(|r| r(to, payload)).collect();
-            self.inbox.lock().unwrap().extend(replies);
+            lock(&self.sent).push((to.clone(), payload.to_vec()));
+            let replies: Vec<Datagram> = lock(&self.responders).iter().flat_map(|r| r(to, payload)).collect();
+            lock(&self.inbox).extend(replies);
             Ok(())
         }
 
         /// The next queued datagram, or `None` at once when the queue is empty; the deadline is ignored.
         fn recv(&self, _deadline: Instant) -> Result<Option<Datagram>> {
-            Ok(self.inbox.lock().unwrap().pop_front())
+            Ok(lock(&self.inbox).pop_front())
         }
     }
 }
@@ -956,6 +961,19 @@ pub mod fake {
 mod tests {
     use super::fake::{FakeResponder, FakeSocket};
     use super::*;
+
+    #[test]
+    fn a_responder_that_panicked_does_not_make_the_fake_socket_panic_afterwards() {
+        let socket = FakeSocket::new();
+        socket.add_responder(|_, _| panic!("a responder failed"));
+        let to = Destination::unicast("192.168.1.9:3702".parse().unwrap()).unwrap();
+        // The panic happens while the responder list is locked, which poisons it.
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| socket.send(&to, b"x"))).is_err());
+        // Later use of the socket still works.
+        socket.add_responder(|_, _| Vec::new());
+        assert_eq!(socket.sent().len(), 1);
+        assert!(matches!(socket.recv(Instant::now()), Ok(None)));
+    }
 
     #[test]
     fn a_link_local_scope_id_survives_destination_and_datagram() {

@@ -8,16 +8,17 @@ use craft_scan::{bmp, bmp_size, bw};
 use std::path::PathBuf;
 
 /// Every `<name>.bmp` in the fixtures folder with its `<name>.rgba` oracle picture, as (name, bmp bytes, rgba bytes),
-/// sorted by name. Empty when the folder is missing.
+/// sorted by name. Empty when the folder is missing; a fixture whose `.bmp` or `.rgba` cannot be read panics naming the file.
 fn fixtures() -> Vec<(String, Vec<u8>, Vec<u8>)> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join("bmp");
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else { return out };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "bmp")
-            && let (Ok(bytes), Ok(rgba)) = (std::fs::read(&path), std::fs::read(path.with_extension("rgba")))
-        {
+        if path.extension().is_some_and(|e| e == "bmp") {
+            let oracle = path.with_extension("rgba");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read the fixture {}: {e}", path.display()));
+            let rgba = std::fs::read(&oracle).unwrap_or_else(|e| panic!("cannot read the oracle {} for {}: {e}", oracle.display(), path.display()));
             out.push((path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), bytes, rgba));
         }
     }

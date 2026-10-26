@@ -37,10 +37,11 @@ impl NativeCode {
 
 /// `hresult 0x80004005 (E_FAIL)`, `http 503`, `sane 5 (SANE_STATUS_NO_DOCS)`.
 impl fmt::Display for NativeCode {
-    /// Writes `domain code (name)`; an HRESULT code is shown as eight hex digits.
+    /// Writes `domain code (name)`; an HRESULT code is shown as eight hex digits when it fits in `u32`,
+    /// otherwise as the decimal value it really holds (never a truncated one).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_hresult() {
-            write!(f, "{} {:#010x}", self.domain, self.code as u32)?;
+        if let (true, Ok(code)) = (self.is_hresult(), u32::try_from(self.code)) {
+            write!(f, "{} {:#010x}", self.domain, code)?;
         } else {
             write!(f, "{} {}", self.domain, self.code)?;
         }
@@ -73,6 +74,13 @@ mod tests {
         assert_eq!(NativeCode::new("http", 503, None).to_string(), "http 503");
         assert_eq!(NativeCode::new("sane", 5, Some("SANE_STATUS_NO_DOCS")).to_string(), "sane 5 (SANE_STATUS_NO_DOCS)");
         assert_eq!(NativeCode::new("win32", -1, None).to_string(), "win32 -1");
+    }
+
+    #[test]
+    fn an_hresult_domain_code_outside_u32_is_shown_whole_not_truncated() {
+        assert_eq!(NativeCode::new(HRESULT_DOMAIN, -1, None).to_string(), "hresult -1");
+        assert_eq!(NativeCode::new(HRESULT_DOMAIN, 0x1_0000_0005, None).to_string(), "hresult 4294967301");
+        assert_eq!(NativeCode::new(HRESULT_DOMAIN, i64::from(u32::MAX), None).to_string(), "hresult 0xffffffff");
     }
 
     #[test]

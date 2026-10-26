@@ -29,7 +29,7 @@ pub(in crate::docking) use body_drag::held_events;
 #[cfg(feature = "native-windows")]
 pub(in crate::docking) use body_drag::{cancel_body_route, mark_app_drag};
 #[cfg(feature = "native-windows")]
-pub(in crate::docking) use native::{DesktopCursor, InputHook, send_keys, set_input_hook, typing_window};
+pub(in crate::docking) use native::{InputHook, WindowSystem, send_keys, set_input_hook, typing_window};
 
 /// How long after blocking starts a native window that still has the keyboard hands it to the
 /// main window: an OS dialog the app opens with the modal (a file dialog) takes focus a little
@@ -137,9 +137,10 @@ pub(super) struct Renderer<'a, P> {
     /// The other OS windows a drag may cross into.
     #[cfg(feature = "native-windows")]
     pub(super) cross: cross::Cross<P>,
-    /// Where a native window that follows a bar drag goes.
+    /// What the window system tells of the desktop pointer, and whether it moves a native
+    /// window for a bar drag.
     #[cfg(feature = "native-windows")]
-    pub(super) cursor: DesktopCursor,
+    pub(super) window_system: WindowSystem,
 }
 
 pub(super) struct DrawnDivider {

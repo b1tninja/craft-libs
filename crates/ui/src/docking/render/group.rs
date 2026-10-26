@@ -3,7 +3,7 @@ use std::{fmt::Debug, hash::Hash, sync::Arc};
 use egui::{Color32, Galley, Id, Key, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
 
 use super::{Renderer, clamp_float, stripless};
-use crate::docking::{Action, DropTarget, GroupDrag, GroupGesture, Placement, Target, begin_drag, surface::TAB_PADDING};
+use crate::docking::{Action, DockContent, DropTarget, GroupDrag, GroupGesture, Placement, Target, begin_drag, surface::TAB_PADDING};
 use crate::tabs;
 
 /// Where a group is drawn. It decides the drop targets the group offers and its gestures.
@@ -42,9 +42,9 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     /// its whole rect is the body and its only tab has `Rect::NOTHING`. Side splits are offered
     /// only for a `Frame` or `Floating` group whose selected panel accepts splits. Tab labels
     /// shrink widest-first to the minimum width, then the remaining tabs move to the overflow menu;
-    /// hidden overflow tabs still appear in the drop target with `Rect::NOTHING`. `minimized` hides
-    /// the body but keeps the strip. Tabs, strip, header and drag bar are mirrored in right-to-left
-    /// layout.
+    /// hidden overflow tabs still appear in the drop target with `Rect::NOTHING`. The host's extra
+    /// tabs follow the panel tabs and fit with them ([`fit_with_extra`]). `minimized` hides the body
+    /// but keeps the strip. Tabs, strip, header and drag bar are mirrored in right-to-left layout.
     pub(super) fn group(&mut self, ui: &mut Ui, panels: &[P], active: usize, minimized: bool, rect: Rect, kind: GroupKind) {
         let Some(selected) = panels.get(active) else { return };
         self.record_float(panels, rect.size(), rect.size());
@@ -81,13 +81,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         let header_width = if requested.is_finite() { requested.clamp(0.0, strip.width()) } else { 0.0 };
         if header_width > 0.0 {
             let header = mirror(Rect::from_min_max(pos2(strip.right() - header_width, strip.top()), strip.max));
-            let mut child = ui.new_child(UiBuilder::new().scope_id(self.id.with(("header", selected))).max_rect(header));
-            child.set_clip_rect(header.intersect(ui.clip_rect()));
-            self.content.group_header(&mut child, panels, selected, floating);
-            // A press in the header focuses the shown panel, as a press on its tab does.
-            if child.rect_contains_pointer(header) && child.input(|i| i.pointer.any_pressed()) {
-                self.output.focused = Some(selected.clone());
-            }
+            self.host_area(ui, "header", header, selected, |content, ui| content.group_header(ui, panels, selected, floating));
         }
         // The drag bar keeps its reserved width: tabs shrink, then overflow, before it narrows.
         let bar_width = self.style.drag_bar_width.clamp(0.0, (strip.width() - header_width).max(0.0));
@@ -103,10 +97,12 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
                     + TAB_PADDING
             })
             .collect();
+        let wanted = self.content.group_extra_tabs_width(panels, selected, floating);
+        let wanted = if wanted.is_finite() { wanted.clamp(0.0, tabs_width) } else { 0.0 };
         // The widest tabs shrink first, to a common width no narrower than `min_tab_width`; only
         // when every tab at that width cannot fit do the rest go to the overflow menu. A tab
         // narrower than its name cuts it with "…" and names it in a tooltip.
-        let fit = tabs::fit(&widths, active, tabs_width, self.style.min_tab_width, OVERFLOW_WIDTH);
+        let (fit, extra_width) = fit_with_extra(&widths, active, tabs_width, wanted, self.style.min_tab_width);
         let owner = TabGroup { panels, selected, minimized, kind, rect };
         let mut x = strip.left();
         let mut shown = Vec::new();
@@ -138,6 +134,12 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             });
             x += fit.overflow_width;
         }
+        let mut extra = Rect::NOTHING;
+        if extra_width > 0.0 {
+            extra = mirror(Rect::from_min_size(pos2(x, strip.top()), vec2(extra_width, strip.height())));
+            self.host_area(ui, "extra-tabs", extra, selected, |content, ui| content.group_extra_tabs(ui, panels, selected, floating));
+            x += extra_width;
+        }
         let bar =
             mirror(Rect::from_min_max(pos2(x.min(strip.right() - header_width), strip.top()), pos2(strip.right() - header_width, strip.bottom())));
         self.group_handle(ui, "drag-bar", bar, &owner, movable);
@@ -146,7 +148,7 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
         self.group_handle(ui, "drag-border", border, &owner, movable);
         if self.style.wheel_selects_tabs {
             let tabs_area = mirror(Rect::from_min_max(strip.min, pos2(strip.right() - header_width, strip.bottom())));
-            self.wheel_tabs(ui, tabs_area, panels, active);
+            self.wheel_tabs(ui, tabs_area, extra, panels, active);
         }
         // Logical order, hidden tabs included without a hit area, for no-op detection.
         let tabs =
@@ -164,6 +166,17 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             self.contents(ui, selected, Rect::from_min_max(pos2(rect.left(), strip.bottom()), rect.max));
         }
         ui.painter().rect_stroke(rect, 0.0, self.style.border, StrokeKind::Inside);
+    }
+
+    /// A part of the strip the host draws (`header` or `extra-tabs`) at `rect`. A press in it
+    /// focuses the shown panel, as a press on its tab does.
+    fn host_area(&mut self, ui: &mut Ui, name: &'static str, rect: Rect, selected: &P, draw: impl FnOnce(&mut dyn DockContent<P>, &mut Ui)) {
+        let mut child = ui.new_child(UiBuilder::new().scope_id(self.id.with((name, selected))).max_rect(rect));
+        child.set_clip_rect(rect.intersect(ui.clip_rect()));
+        draw(&mut *self.content, &mut child);
+        if child.rect_contains_pointer(rect) && child.input(|i| i.pointer.any_pressed()) {
+            self.output.focused = Some(selected.clone());
+        }
     }
 
     /// The drag bar (`drag-bar`: drag, double-click, and the group menu on a right click, Enter
@@ -209,10 +222,11 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
     }
 
     /// The wheel over a group's strip: down selects the next tab, up the previous, one tab per
-    /// notch, stopping at the ends. Trackpad scrolling adds up to a notch.
-    fn wheel_tabs(&mut self, ui: &Ui, strip: Rect, panels: &[P], active: usize) {
+    /// notch, stopping at the ends. Trackpad scrolling adds up to a notch. The host's extra tabs
+    /// (`extra`) keep the wheel for their own widgets.
+    fn wheel_tabs(&mut self, ui: &Ui, strip: Rect, extra: Rect, panels: &[P], active: usize) {
         let key = self.id.with(("tab-wheel", panels.first()));
-        if !ui.rect_contains_pointer(strip) {
+        if !ui.rect_contains_pointer(strip) || ui.rect_contains_pointer(extra) {
             ui.ctx().data_mut(|d| d.remove::<f32>(key));
             return;
         }
@@ -475,4 +489,22 @@ impl<P: Clone + Eq + Hash + Debug + Send + Sync + 'static> Renderer<'_, P> {
             }
         });
     }
+}
+
+/// Fit the panel tabs and the host's extra tabs (`extra` wide), which fit as one more tab that
+/// never overflows: in a row too narrow for every tab at its minimum width, the panel tabs
+/// overflow into the room the extra tabs leave at theirs. Returns the extra tabs' width.
+fn fit_with_extra(widths: &[f32], active: usize, available: f32, extra: f32, minimum: f32) -> (tabs::TabFit, f32) {
+    if extra <= 0.0 {
+        return (tabs::fit(widths, active, available, minimum, OVERFLOW_WIDTH), 0.0);
+    }
+    let all: Vec<f32> = widths.iter().copied().chain([extra]).collect();
+    let mut fit = tabs::fit(&all, active, available, minimum, OVERFLOW_WIDTH);
+    if fit.overflow.is_empty() {
+        let width = fit.shown.pop().filter(|(index, _)| *index == widths.len()).map_or(0.0, |(_, width)| width);
+        return (fit, width);
+    }
+    let fit = tabs::fit(widths, active, (available - extra.min(minimum)).max(0.0), minimum, OVERFLOW_WIDTH);
+    let used = fit.shown.iter().map(|(_, width)| width).sum::<f32>() + fit.overflow_width;
+    (fit, extra.min(available - used).max(0.0))
 }

@@ -257,6 +257,88 @@ fn reconcile_tagged_finds_a_job_whose_name_lost_the_tag_but_not_one_that_carries
     assert!(matches!(&found, WsdReconciled::Found(m) if m.name.contains(" [ref ")), "{found:?}");
 }
 
+/// A printer whose job lists leave out the named fields of every summary (the ticket still has
+/// them): `GetActiveJobs` and `GetJobHistory` answers are edited, everything else passes through.
+/// Counts the `GetJobElements` lookups.
+struct BlankSummaries {
+    printer: Arc<FakePrinter>,
+    fields: &'static [&'static str],
+    lookups: Arc<AtomicU32>,
+}
+
+impl Transport for BlankSummaries {
+    fn post(&self, _: &DeviceUrl, request: Request) -> Result<Response, WireError> {
+        let (status, content_type, mut body) = self.printer.handle(&request.content_type, &request.body);
+        if request.soap_action.ends_with("GetJobElements") {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            // This fake answers the status only; a real printer also returns the ticket.
+            let asked = String::from_utf8(request.body.clone()).unwrap();
+            let id: u32 = asked.split("<wprt:JobId>").nth(1).and_then(|r| r.split('<').next()).and_then(|n| n.parse().ok()).unwrap();
+            let job = self.printer.job(id).unwrap();
+            let ticket = format!(
+                "<wprt:ElementData Name=\"wprt:PrintTicket\" Valid=\"true\"><wprt:PrintTicket><wprt:JobDescription><wprt:JobName>{}</wprt:JobName><wprt:JobOriginatingUserName>{}</wprt:JobOriginatingUserName></wprt:JobDescription></wprt:PrintTicket></wprt:ElementData>",
+                job.name, job.user
+            );
+            body = String::from_utf8(body).unwrap().replace("</wprt:JobElements>", &format!("{ticket}</wprt:JobElements>")).into_bytes();
+        }
+        if request.soap_action.ends_with("GetActiveJobs") || request.soap_action.ends_with("GetJobHistory") {
+            let mut text = String::from_utf8(body).unwrap();
+            for field in self.fields {
+                let (open, close) = (format!("<wprt:{field}>"), format!("</wprt:{field}>"));
+                let mut from = 0;
+                while let Some(at) = text[from..].find(&open).map(|at| at + from) {
+                    let inner = at + open.len();
+                    let end = inner + text[inner..].find(&close).unwrap();
+                    text.replace_range(inner..end, "");
+                    from = inner + close.len();
+                }
+            }
+            body = text.into_bytes();
+        }
+        Ok(Response::new(status, Some(content_type), body))
+    }
+}
+
+/// A printer holding one tagged job of the default user, and a backend that sees its job lists with
+/// `fields` left out of every summary.
+fn blanked(fields: &'static [&'static str]) -> (WsdBackend, Arc<AtomicU32>, Tag) {
+    let printer = FakePrinter::new(FakeConfig::default());
+    let rig = Rig { printer: Arc::clone(&printer), registry: registry_over(&printer, 0), clock: ManualClock::new() };
+    let mut job = print_job(&rig, "Quarterly report");
+    let tag = *job.tag();
+    drive(&mut job, &rig);
+    assert!(printer.job(1).unwrap().name.contains(" [ref "), "the printer kept the tag");
+    let lookups = Arc::new(AtomicU32::new(0));
+    let backend = WsdBackend::new().with_transport(BlankSummaries { printer, fields, lookups: Arc::clone(&lookups) });
+    backend.add(URL).unwrap();
+    (backend, lookups, tag)
+}
+
+#[test]
+fn reconcile_tagged_completes_a_summary_without_a_name_from_the_ticket() {
+    let (backend, lookups, tag) = blanked(&["JobName"]);
+    let found = backend.reconcile_tagged(URL, "Quarterly report", Some(&tag)).unwrap();
+    assert!(matches!(&found, WsdReconciled::Found(m) if m.name.contains(" [ref ")), "{found:?}");
+    assert!(lookups.load(Ordering::SeqCst) >= 1, "the name came from the ticket");
+}
+
+#[test]
+fn reconcile_tagged_completes_a_summary_without_a_user_from_the_ticket() {
+    // The name is there and the user is not: an empty user must not reject the job the tag matches.
+    let (backend, lookups, tag) = blanked(&["JobOriginatingUserName"]);
+    let found = backend.reconcile_tagged(URL, "Quarterly report", Some(&tag)).unwrap();
+    assert!(matches!(&found, WsdReconciled::Found(m) if m.name.contains(" [ref ")), "{found:?}");
+    assert_eq!(lookups.load(Ordering::SeqCst), 1, "one bounded lookup for the one summary");
+}
+
+#[test]
+fn reconcile_tagged_completes_a_summary_without_a_name_or_a_user_with_one_lookup() {
+    let (backend, lookups, tag) = blanked(&["JobName", "JobOriginatingUserName"]);
+    let found = backend.reconcile_tagged(URL, "Quarterly report", Some(&tag)).unwrap();
+    assert!(matches!(&found, WsdReconciled::Found(m) if m.name.contains(" [ref ")), "{found:?}");
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn without_the_tag_a_lost_reply_reconciles_only_by_title_and_is_ambiguous_when_the_title_was_used_before() {
     let printer = FakePrinter::new(FakeConfig::default());

@@ -745,6 +745,22 @@ fn ticket_name(title: &str, tag: Option<&Tag>) -> String {
     }
 }
 
+/// Fill the name and the user of a job summary that lacks them from the job's own ticket (one
+/// `GetJobElements`). Best effort: when the lookup fails, or the ticket lacks a field too, what was
+/// empty stays empty. A field the summary did carry is kept.
+fn complete_from_ticket(client: &Client<SharedTransport>, id: u32, name: &mut String, user: &mut String) {
+    if let Ok(elements) = client.get_job_elements(id, &[JobSection::Ticket])
+        && let Some(ticket) = elements.ticket
+    {
+        if name.is_empty() {
+            *name = ticket.job_name;
+        }
+        if user.is_empty() {
+            *user = ticket.user_name;
+        }
+    }
+}
+
 /// A job name as it can come back from the printer: XML drops the control characters it cannot
 /// carry and turns line breaks into `\n`, and a printer may trim the ends. Both sides of a match go
 /// through this.
@@ -792,16 +808,8 @@ impl WsdBackend {
             seen.push(id);
             let (mut name, mut user) = (row.job_name.clone(), row.user_name.clone());
             if name.is_empty() && lookups < MAX_NAME_LOOKUPS {
-                // Best effort: a summary without a name is completed from the job's own ticket.
                 lookups += 1;
-                if let Ok(elements) = client.get_job_elements(id, &[JobSection::Ticket])
-                    && let Some(ticket) = elements.ticket
-                {
-                    name = ticket.job_name;
-                    if user.is_empty() {
-                        user = ticket.user_name;
-                    }
-                }
+                complete_from_ticket(&client, id, &mut name, &mut user);
             }
             let status = neutral_status(&row.status);
             let mut remote = RemoteJob::new(JobId::new(NAME, job_native(&url, id)), comparable(&name), status.state).with_reasons(status.reasons);
@@ -863,25 +871,38 @@ impl WsdBackend {
         let title = comparable(job_title);
         // Without a user in the ticket the printer filled in its own, so the user cannot narrow it.
         let user = shape.carries_user().then_some(self.config.user_name.as_str());
+        let mut lookups = 0usize;
         let active = client.get_active_jobs().map_err(|e| e.print_error(Op::Query))?;
         let history = history_or_none(client.get_job_history())?;
         let url = entry.url.as_url();
         // (whether the name is the one sent, the match, its job id)
         let mut found: Vec<(bool, JobMatch, u32)> = Vec::new();
         for row in active.into_iter().chain(history) {
-            if user.is_some_and(|user| row.user_name != user) || found.iter().any(|(_, _, id)| *id == row.status.job_id) {
+            if found.iter().any(|(_, _, id)| *id == row.status.job_id) {
                 continue;
+            }
+            // A summary without a name, or without the user we filter on, is completed from the
+            // job's own ticket (a bounded number of lookups) before anything is decided from it.
+            let (mut listed_name, mut listed_user) = (row.job_name.clone(), row.user_name.clone());
+            if (listed_name.is_empty() || (user.is_some() && listed_user.is_empty())) && lookups < MAX_NAME_LOOKUPS {
+                lookups += 1;
+                complete_from_ticket(&client, row.status.job_id, &mut listed_name, &mut listed_user);
             }
             // The name as sent, or one the printer stored shorter without the tag suffix (see
             // `tag_support`): then the title decides, as in a listing. A name that carries a tag of
             // its own is another print's, whatever its title.
-            let listed = comparable(&row.job_name);
+            let listed = comparable(&listed_name);
             let exact = listed == name;
             if !exact && !(Tag::find_in(&listed).is_none() && crate::remote::title_matches(&listed, &title)) {
                 continue;
             }
+            // Another user's job is not ours. A user the printer never told us (the summary and the
+            // ticket both lack it) cannot rule out a job that carries the name as sent.
+            if user.is_some_and(|user| if listed_user.is_empty() { !exact } else { listed_user != user }) {
+                continue;
+            }
             let job = JobId::new(NAME, job_native(&url, row.status.job_id));
-            found.push((exact, JobMatch { job, name: row.job_name.clone(), status: neutral_status(&row.status) }, row.status.job_id));
+            found.push((exact, JobMatch { job, name: listed_name, status: neutral_status(&row.status) }, row.status.job_id));
         }
         // A job that still carries the name as sent is the answer, whatever else shares its title;
         // the untagged rows decide only when none does.

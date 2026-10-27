@@ -25,6 +25,10 @@ fn target_for(kind: ServiceKind, device: &FakeDevice) -> Target {
 }
 
 /// Everything a client of any WSD service does, written once.
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "one linear walk through discovery, metadata, an operation, eventing and the policy, shared by both service kinds"
+)]
 fn exercise(kind: ServiceKind, other: ServiceKind) {
     let d = kind.descriptor();
     let device = FakeDevice::new(kind, 5357);

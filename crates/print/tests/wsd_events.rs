@@ -371,16 +371,11 @@ fn a_duplicate_is_acknowledged_but_wakes_once_and_a_burst_is_one_counter() {
 
 // ---------------------------------------------------------------- forged and malformed
 
-#[test]
-fn forged_malformed_and_oversized_messages_are_ignored() {
-    let rig = rig();
-    let rx = rig.subscribed(1);
-    let token = rig.token();
-    let addr = rig.addr();
-    let good = event_body(&token, "JobStatusEvent", 1, "g1");
-    let path = format!("/n/{token}");
-    let soap = "application/soap+xml";
+const SOAP: &str = "application/soap+xml";
 
+/// Wrong or missing token, wrong shape of path, wrong identifier header.
+fn wrong_routes(addr: std::net::SocketAddr, token: &str, path: &str, good: &str) {
+    let soap = SOAP;
     // Wrong or missing token, wrong shape of path.
     let other = "a".repeat(64);
     assert_eq!(post(addr, &format!("/n/{other}"), soap, good.as_bytes()), Some(404));
@@ -389,31 +384,41 @@ fn forged_malformed_and_oversized_messages_are_ignored() {
     assert_eq!(post(addr, &format!("{path}/x"), soap, good.as_bytes()), Some(404));
     // Right token, wrong identifier header (or none).
     let wrong_id = event_body(&other, "JobStatusEvent", 1, "g2");
-    assert_eq!(post(addr, &path, soap, wrong_id.as_bytes()), Some(403));
+    assert_eq!(post(addr, path, soap, wrong_id.as_bytes()), Some(403));
     let no_id = good.replace(&format!("<wse:Identifier>{token}</wse:Identifier>"), "");
-    assert_eq!(post(addr, &path, soap, no_id.as_bytes()), Some(403));
+    assert_eq!(post(addr, path, soap, no_id.as_bytes()), Some(403));
+}
+
+/// Bodies that are not a well-formed event of the kind the subscription asked for.
+fn malformed_bodies(addr: std::net::SocketAddr, token: &str, path: &str, good: &str) {
+    let soap = SOAP;
     // Not XML, not SOAP, a fault, no action.
-    assert_eq!(post(addr, &path, soap, b"not xml at all"), Some(400));
-    assert_eq!(post(addr, &path, soap, b"<a/>"), Some(400));
-    assert_eq!(post(addr, &path, soap, good.replace("wsa:Action", "wsa:Nothing").as_bytes()), Some(400));
+    assert_eq!(post(addr, path, soap, b"not xml at all"), Some(400));
+    assert_eq!(post(addr, path, soap, b"<a/>"), Some(400));
+    assert_eq!(post(addr, path, soap, good.replace("wsa:Action", "wsa:Nothing").as_bytes()), Some(400));
     // A DTD (entity expansion) is refused by the bounded parser.
     let dtd = format!("<!DOCTYPE x [<!ENTITY a \"aaaa\">]>{good}");
-    assert_eq!(post(addr, &path, soap, dtd.as_bytes()), Some(400));
+    assert_eq!(post(addr, path, soap, dtd.as_bytes()), Some(400));
     // Wrong namespace for the body, wrong element for the action, an event type we did not ask for.
-    assert_eq!(post(addr, &path, soap, good.replace(&format!("xmlns:wprt=\"{WPRT}\""), "xmlns:wprt=\"urn:evil\"").as_bytes()), Some(400));
+    assert_eq!(post(addr, path, soap, good.replace(&format!("xmlns:wprt=\"{WPRT}\""), "xmlns:wprt=\"urn:evil\"").as_bytes()), Some(400));
     let mismatched = good.replace("<wprt:JobStatusEvent>", "<wprt:JobEndStateEvent>").replace("</wprt:JobStatusEvent>", "</wprt:JobEndStateEvent>");
-    assert_eq!(post(addr, &path, soap, mismatched.as_bytes()), Some(400));
-    let elements = event_body(&token, "PrinterElementsChangeEvent", 0, "g3");
-    assert_eq!(post(addr, &path, soap, elements.as_bytes()), Some(400));
+    assert_eq!(post(addr, path, soap, mismatched.as_bytes()), Some(400));
+    let elements = event_body(token, "PrinterElementsChangeEvent", 0, "g3");
+    assert_eq!(post(addr, path, soap, elements.as_bytes()), Some(400));
     let unknown_action = good.replace(&format!("{WPRT}/JobStatusEvent"), "urn:something:else");
-    assert_eq!(post(addr, &path, soap, unknown_action.as_bytes()), Some(400));
+    assert_eq!(post(addr, path, soap, unknown_action.as_bytes()), Some(400));
     // A job event with no usable job number.
     let no_job = good.replace("<wprt:JobId>1</wprt:JobId>", "");
-    assert_eq!(post(addr, &path, soap, no_job.as_bytes()), Some(400));
+    assert_eq!(post(addr, path, soap, no_job.as_bytes()), Some(400));
     let bad_job = good.replace("<wprt:JobId>1</wprt:JobId>", "<wprt:JobId>one</wprt:JobId>");
-    assert_eq!(post(addr, &path, soap, bad_job.as_bytes()), Some(400));
+    assert_eq!(post(addr, path, soap, bad_job.as_bytes()), Some(400));
+}
+
+/// Wrong content type or method, and HTTP framing that must be refused.
+fn bad_framing(addr: std::net::SocketAddr, path: &str, good: &str) {
+    let soap = SOAP;
     // Wrong content type, wrong method.
-    assert_eq!(post(addr, &path, "text/html", good.as_bytes()), Some(415));
+    assert_eq!(post(addr, path, "text/html", good.as_bytes()), Some(415));
     assert_eq!(raw(addr, format!("GET {path} HTTP/1.1\r\nContent-Length: 0\r\n\r\n").as_bytes()), Some(405));
     // Framing: no length, chunked, two lengths, a huge length, a garbage request line, too many headers.
     assert_eq!(raw(addr, format!("POST {path} HTTP/1.1\r\nContent-Type: {soap}\r\n\r\n").as_bytes()), Some(411));
@@ -429,10 +434,25 @@ fn forged_malformed_and_oversized_messages_are_ignored() {
     assert_eq!(raw(addr, format!("POST {path} HTTP/1.1\r\n{many}Content-Length: 0\r\n\r\n").as_bytes()), Some(431));
     // A body over the cap, actually sent.
     let big = vec![b' '; 70 * 1024];
-    assert_eq!(post(addr, &path, soap, &big), Some(413));
+    assert_eq!(post(addr, path, soap, &big), Some(413));
     // Oversized headers.
     let long = "x".repeat(9000);
     assert_eq!(raw(addr, format!("POST {path} HTTP/1.1\r\nX-Long: {long}\r\n\r\n").as_bytes()), Some(431));
+}
+
+#[test]
+fn forged_malformed_and_oversized_messages_are_ignored() {
+    let rig = rig();
+    let rx = rig.subscribed(1);
+    let token = rig.token();
+    let addr = rig.addr();
+    let good = event_body(&token, "JobStatusEvent", 1, "g1");
+    let path = format!("/n/{token}");
+    let soap = "application/soap+xml";
+
+    wrong_routes(addr, &token, &path, &good);
+    malformed_bodies(addr, &token, &path, &good);
+    bad_framing(addr, &path, &good);
 
     assert!(!rx.is_pending(), "not one of them woke anybody");
     assert_eq!(rx.total(), 0);

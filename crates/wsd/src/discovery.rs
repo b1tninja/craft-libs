@@ -859,7 +859,10 @@ pub mod fake {
     use std::collections::VecDeque;
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
-    use super::*;
+    use super::{
+        AppSequence, Body, Datagram, Destination, DiscoverySocket, Instant, Result, SocketAddr, Target, new_uuid, parse, probe_matches,
+        resolve_matches,
+    };
 
     /// Lock `m`, taking the guard back from a poisoned mutex: one panicking responder must not
     /// make every later use of the socket panic too.
@@ -1149,6 +1152,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity, reason = "a table of hostile inputs, each one line")]
     fn hostile_datagrams_are_errors_not_panics() {
         let good = hello("m", &AppSequence::new(1, 1), &target("a", print_dev(), &["http://10.0.0.1/"]));
         assert!(parse(good.as_bytes()).is_ok());

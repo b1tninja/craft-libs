@@ -11,7 +11,7 @@ use super::client::Client;
 use super::encoder::{ColorMode, DocumentEncoder, EncodeContext};
 use super::error::{Op, Result, WsdError};
 use super::fault::FaultCode;
-use super::model::*;
+use super::model::{Capabilities, JobReason, JobState, JobStatus, PrinterDescription, PrinterElements, Section};
 use super::mtom::Transfer;
 use super::ticket::{Compression, DocumentDescription, Orientation, PrintTicket, Quality, Sides, TicketShape};
 use crate::{CancelToken, RetrySafety, UserConfirmed};

@@ -2,7 +2,7 @@
 
 use super::adapter::{Attachment, Call, SoapClient, Transport};
 use super::error::{REPLY_LABEL, Result, WsdError};
-use super::model::*;
+use super::model::{JobElements, JobStatus, JobSummary, PrinterElements, Section};
 use super::mtom::{self, Transfer};
 use super::ns::{self, Action};
 use super::ops::{self, JobSection};

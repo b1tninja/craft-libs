@@ -9,7 +9,9 @@ use roxmltree::Node;
 
 use super::adapter::xml::{self, child, children, is, text};
 use super::error::{Result, WsdError};
-use super::model::*;
+use super::model::{
+    Capabilities, JobElements, JobReason, JobState, JobStatus, JobSummary, PrinterDescription, PrinterElements, PrinterStatus, Section,
+};
 use super::ns;
 use super::ticket::{DocumentDescription, Orientation, PrintTicket, Quality, Sides};
 

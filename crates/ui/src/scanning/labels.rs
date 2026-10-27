@@ -1,6 +1,7 @@
 //! The wording the app supplies. Identity never depends on it.
 
-use super::*;
+use super::{Color, Connection, LengthLabels, Preset, SamePrinter, Scanner, Source, Warning};
+use crate::capability::Capability;
 
 /// Translated labels supplied by the app; identity never depends on their text.
 pub struct Labels<'a> {

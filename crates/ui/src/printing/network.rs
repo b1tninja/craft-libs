@@ -1456,7 +1456,7 @@ fn choice<T: Copy + PartialEq>(
 ) -> (egui::Response, bool) {
     let before = *value;
     let shown = value.map_or_else(|| auto.to_owned(), &name);
-    let response = egui::ComboBox::from_id_salt(id)
+    let response = crate::ComboBox::from_id_salt(id)
         .selected_text(shown)
         .width(180.0)
         .show_ui(ui, |ui| {

@@ -14,7 +14,8 @@
 //! * **Detect from image (approximate)**: a guess made from the scanned image. Always available, and
 //!   always shown with a note that it is approximate.
 
-use super::*;
+use super::Choices;
+use crate::capability::Capability;
 
 /// How the page length is decided. See the notes at the top of the `length` module.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

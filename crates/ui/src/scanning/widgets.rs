@@ -1,6 +1,6 @@
 //! Drawing: the device row and the settings. The model and the state machine are in the parent module.
 
-use super::*;
+use super::{Choices, Discover, Labels, LengthAvailability, LoadChoices, Pages, Preset, Response, Source, State, same_printer_note};
 
 impl State {
     /// Draw just the device row and the settings. Apps render [`State::feedback`], the Scan action
@@ -36,7 +36,7 @@ impl State {
             let width = ui.available_width().clamp(32.0, 280.0);
             let scanners = &self.scanners;
             let selected = &mut self.settings.scanner;
-            egui::ComboBox::from_id_salt("scanner")
+            crate::ComboBox::from_id_salt("scanner")
                 .width(width)
                 .wrap_mode(egui::TextWrapMode::Truncate)
                 .selected_text(text)
@@ -104,7 +104,7 @@ impl State {
             let caption = ui.label(labels.resolution);
             ui.vertical(|ui| {
                 ui.add_enabled_ui(choices.dpi.is_enabled(), |ui| {
-                    egui::ComboBox::from_id_salt("dpi")
+                    crate::ComboBox::from_id_salt("dpi")
                         .width(width)
                         .selected_text(format!("{} {}", settings.dpi, labels.dpi))
                         .show_ui(ui, |ui| {
@@ -124,7 +124,7 @@ impl State {
             let caption = ui.label(labels.color);
             ui.vertical(|ui| {
                 ui.add_enabled_ui(choices.colors.is_enabled(), |ui| {
-                    egui::ComboBox::from_id_salt("color")
+                    crate::ComboBox::from_id_salt("color")
                         .width(width)
                         .selected_text(labels.color(settings.color))
                         .show_ui(ui, |ui| {
@@ -188,7 +188,7 @@ impl State {
                     let value = choices.length_or_default(settings.page_length, settings.page_size_chosen);
                     settings.page_length = value;
                     ui.vertical(|ui| {
-                        egui::ComboBox::from_id_salt("page-length")
+                        crate::ComboBox::from_id_salt("page-length")
                             .width(width.max(220.0).min(ui.available_width().max(32.0)))
                             .selected_text(labels.length.option(value))
                             .show_ui(ui, |ui| {

@@ -126,12 +126,14 @@ const KEY_ALIASES: &[(&str, Key)] = &[
     ("grave", Key::Backtick),
     ("backquote", Key::Backtick),
     ("apostrophe", Key::Quote),
+    // The minus sign menus and docs print (U+2212), not the hyphen-minus the key types.
+    ("−", Key::Minus),
 ];
 
 impl Key {
     /// Reads a key name: canonical (`K`, `PageUp`, `;`), egui variant names (`ArrowUp`, `Num5`,
     /// `Semicolon`) and the aliases `esc`, `return`, `del`, `pgup`, `pgdn`, `spacebar`, `ins`,
-    /// and the Mac key glyphs. Case does not matter.
+    /// the Mac key glyphs and the minus sign `−`. Case does not matter.
     pub fn parse(name: &str) -> Option<Key> {
         Key::ALL
             .iter()

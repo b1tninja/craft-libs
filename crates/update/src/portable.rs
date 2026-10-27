@@ -837,6 +837,17 @@ mod tests {
         }
     }
 
+    /// ZIP 9 strips a drive prefix from enclosed paths; the original name must still be rejected.
+    #[test]
+    fn rejects_drive_prefixed_names_before_writing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip = archive(dir.path(), "drive.zip", &[("c:escape.exe", b"bad".as_slice())]);
+        let output = dir.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+        assert!(extract(&zip, &output).is_err());
+        assert_eq!(std::fs::read_dir(&output).unwrap().count(), 0);
+    }
+
     #[test]
     fn rejects_traversal_and_case_collisions() {
         let dir = tempfile::tempdir().unwrap();

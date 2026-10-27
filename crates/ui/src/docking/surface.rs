@@ -885,6 +885,11 @@ pub trait DockContent<P> {
     fn window_kind(&self, _panel: &P) -> WindowKind {
         WindowKind::Palette
     }
+    /// A native floating window drew its panel bodies (feature `native-windows`): called once
+    /// per pass of the window, after its last body, with the window's `ui`. An app that
+    /// publishes its own IME descriptor, outside [`crate::ime::Composer`], publishes it here for
+    /// the window. Windows drawn in the main window's pass get no call.
+    fn window_drawn(&mut self, _ui: &mut Ui) {}
     /// Host-owned drop resolution for targets the renderer cannot know about. Returning
     /// feedback consumes the gesture, including no-op targets; the renderer then emits no move.
     fn resolve_drag(&mut self, _ctx: &Context, _style: &DockStyle, _request: &DropRequest<'_, P>) -> Option<DropFeedback> {
@@ -911,6 +916,19 @@ pub trait DockContent<P> {
     /// [`DockArea::new`], `active` and the widget's rect when its response reports
     /// `drag_started()`; the panel then moves as its tab would.
     fn group_header(&mut self, _ui: &mut Ui, _panels: &[P], _active: &P, _floating: bool) {}
+    /// Width the group's extra tabs want: the host's own tabs, drawn right after the group's
+    /// panel tabs (and their "…" button), before the drag bar. They fit with the panel tabs:
+    /// both shrink widest first to [`DockStyle::min_tab_width`] (the extra tabs as one tab); in a
+    /// row narrower still, the panel tabs overflow and the extra tabs keep that width. Zero draws
+    /// none.
+    fn group_extra_tabs_width(&self, _panels: &[P], _active: &P, _floating: bool) -> f32 {
+        0.0
+    }
+    /// Draw the extra tabs into `ui.max_rect()`, which can be narrower than
+    /// [`Self::group_extra_tabs_width`] asked for; the host fits its tabs into it, with an
+    /// overflow of its own. Their widgets take their own input as the header's do, and a press
+    /// among them focuses the shown panel. A drop on them adds the panel after the last panel tab.
+    fn group_extra_tabs(&mut self, _ui: &mut Ui, _panels: &[P], _active: &P, _floating: bool) {}
 }
 
 /// Host-owned drop resolution request, see [`DockContent::resolve_drag`].
@@ -977,6 +995,9 @@ impl<P, C: DockContent<P> + ?Sized> DockContent<P> for Overrides<'_, P, C> {
     fn window_kind(&self, panel: &P) -> WindowKind {
         self.inner.window_kind(panel)
     }
+    fn window_drawn(&mut self, ui: &mut Ui) {
+        self.inner.window_drawn(ui);
+    }
     fn resolve_drag(&mut self, ctx: &Context, style: &DockStyle, request: &DropRequest<'_, P>) -> Option<DropFeedback> {
         self.inner.resolve_drag(ctx, style, request)
     }
@@ -994,6 +1015,12 @@ impl<P, C: DockContent<P> + ?Sized> DockContent<P> for Overrides<'_, P, C> {
     }
     fn group_header(&mut self, ui: &mut Ui, panels: &[P], active: &P, floating: bool) {
         self.inner.group_header(ui, panels, active, floating);
+    }
+    fn group_extra_tabs_width(&self, panels: &[P], active: &P, floating: bool) -> f32 {
+        self.inner.group_extra_tabs_width(panels, active, floating)
+    }
+    fn group_extra_tabs(&mut self, ui: &mut Ui, panels: &[P], active: &P, floating: bool) {
+        self.inner.group_extra_tabs(ui, panels, active, floating);
     }
 }
 
@@ -1014,7 +1041,7 @@ pub struct DockArea<'a, P = ()> {
     #[cfg(feature = "native-windows")]
     input_hook: Option<super::render::InputHook>,
     #[cfg(feature = "native-windows")]
-    cursor: super::render::DesktopCursor,
+    window_system: super::render::WindowSystem,
 }
 
 impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
@@ -1026,7 +1053,7 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
             locked: false,
             maximized: None,
             hide: HidePanels::None,
-            auto_collapse: true,
+            auto_collapse: false,
             float_bounds: None,
             monitors: Vec::new(),
             input_blocked: false,
@@ -1034,7 +1061,7 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
             #[cfg(feature = "native-windows")]
             input_hook: None,
             #[cfg(feature = "native-windows")]
-            cursor: Default::default(),
+            window_system: Default::default(),
         }
     }
 
@@ -1092,14 +1119,14 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
         self
     }
 
-    /// Where native windows that follow a bar drag go: a stand-in window system's cursor.
+    /// A stand-in for the window system that moves native windows and tells the cursor.
     #[cfg(all(feature = "native-windows", any(test, feature = "testing")))]
-    pub(in crate::docking) fn desktop_cursor(mut self, cursor: super::render::DesktopCursor) -> Self {
-        self.cursor = cursor;
+    pub(in crate::docking) fn window_system(mut self, window_system: super::render::WindowSystem) -> Self {
+        self.window_system = window_system;
         self
     }
 
-    /// [D] Auto-Collapse Iconic Panels (default on): a flyout closes on Escape or a press
+    /// [D] Auto-Collapse Iconic Panels (default off): a flyout closes on Escape or a press
     /// outside it. Off, it stays open until its icon or another icon is clicked.
     pub fn auto_collapse_iconic(mut self, on: bool) -> Self {
         self.auto_collapse = on;
@@ -1276,7 +1303,7 @@ impl<'a, P: Clone + Eq + Hash + Debug + Send + Sync + 'static> DockArea<'a, P> {
             #[cfg(feature = "native-windows")]
             cross: Default::default(),
             #[cfg(feature = "native-windows")]
-            cursor: self.cursor,
+            window_system: self.window_system,
         };
         if let Some(root) = &view.root {
             renderer.node(ui, root, rect, &mut Vec::new(), (root, rect));

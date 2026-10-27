@@ -37,6 +37,19 @@ craft-<name> = { git = "https://github.com/storytold/craft-libs", rev = "<commit
 - [`craft-docpath`](crates/docpath/src/lib.rs): decides whether a path or `file:` URL stored in a
   document may be opened. Paths stored in documents are followed only when they are local or on the
   document's own network share; other network paths, device paths and non-file URLs are refused.
+- [`craft-font-catalog`](crates/font-catalog/README.md): the installed fonts on every platform
+  (font folders, fontconfig and Flatpak host folders, CoreText, DirectWrite, the font store),
+  lookup by family, style, localized, legacy, full and PostScript names, family loads shared
+  between threads, and rescans when fonts are installed or removed.
+- [`craft-font-manager`](crates/font-manager/README.md): Craft Font Manager as a library: search
+  and filters over the Google Fonts index, installed fonts by family, the font store interface,
+  and (`egui` feature) `FontsPanel`, the whole interface as one panel for the launcher's Fonts tab
+  and the standalone app.
+- [`craft-font-store`](crates/font-store/README.md): the suite's font store: the pinned Google
+  Fonts and Noto indexes plus indexes the user adds (never curated), exact lookup by family and
+  style or PostScript name, and installs from each source's URLs (jsDelivr, then raw GitHub)
+  checked by size, sha256 and parsing, with the licence, a manifest, and removal. Off until the
+  user turns downloading on; agents can't.
 - [`craft-fonts-build`](crates/fonts-build/README.md): embeds the optional craft-fonts faces
   from an app's `build.rs` (`CRAFT_FONTS_DIR`, `CRAFT_FONTS_REQUIRED`, script filters) as a table
   of `EmbeddedFace`s. No dependencies; the app picks the faces.
@@ -54,6 +67,10 @@ craft-<name> = { git = "https://github.com/storytold/craft-libs", rev = "<commit
 - [`craft-media`](crates/media/README.md): bit-level I/O (`bitstream`), clean-room MP4/MOV
   (`isobmff`) and Matroska/WebM (`matroska`) demuxers and muxers, from FilmCraft, and an ISO BMFF
   box reader. Containers only; codecs stay in each app.
+- [`craft-menu`](crates/menu/README.md): an app's menus as a macOS menu bar: the Mac layout
+  (app menu, Window, Help, system-key clashes), a platform backend trait, and key equivalents
+  fed back to egui as the input egui-winit would have made. Commands and their enabled state
+  stay in each app.
 - [`craft-print`](crates/print/README.md): PDF submission to CUPS and Windows, printer discovery,
   duplex/copies/colour and driver preferences. PDF generation stays in each app.
 
@@ -61,6 +78,9 @@ craft-<name> = { git = "https://github.com/storytold/craft-libs", rev = "<commit
   app menu. Unsaved-document decisions and save prompts stay in each app.
 
 - [`craft-settings`](crates/settings/README.md): `config.toml` settings storage for every app: platform folders, portable mode and overrides, atomic saves while running, backup, damaged-file recovery and schema migrations. Policy in [docs/settings-storage.md](docs/settings-storage.md).
+- [`craft-text`](crates/text/README.md): text processing below the composer. Its `hyphen` module finds
+  hyphenation points, with a bundled US English dictionary and patterns and optional hypher patterns
+  for 47 more languages (one cargo feature each).
 - [`craft-ui`](crates/ui/README.md): SVG catalogs, icon buttons, tabs, pane controls, transactional docking, print settings and theme helpers for egui frontends;
   assets, themes, localization and command handling stay in each app. Requires Rust 1.95 or later.
 - [`craft-wsd`](crates/wsd/README.md): Web Services for Devices core for network printers and scanners: bounded XML, SOAP 1.2 and

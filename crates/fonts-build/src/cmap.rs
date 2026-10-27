@@ -49,6 +49,53 @@ impl<'a> Cmap<'a> {
     pub(crate) fn covers(&self, c: char) -> bool {
         self.subtables.iter().any(|t| glyph(t, u32::from(c)).is_some_and(|g| g != 0))
     }
+
+    /// Every character [`Self::covers`], as sorted, disjoint, non-adjacent inclusive ranges.
+    pub(crate) fn ranges(&self) -> Vec<(u32, u32)> {
+        let mut spans: Vec<(u32, u32)> = self.subtables.iter().flat_map(|t| spans(t)).collect();
+        spans.sort_unstable();
+        let mut ranges: Vec<(u32, u32)> = Vec::new();
+        let mut next = 0;
+        for (start, end) in spans {
+            for c in start.max(next)..=end {
+                if !char::from_u32(c).is_some_and(|c| self.covers(c)) {
+                    continue;
+                }
+                match ranges.last_mut() {
+                    Some(last) if last.1 + 1 == c => last.1 = c,
+                    _ => ranges.push((c, c)),
+                }
+            }
+            next = next.max(end.saturating_add(1));
+        }
+        ranges
+    }
+}
+
+/// The code point spans a subtable lists, mapped or not.
+fn spans(t: &[u8]) -> Vec<(u32, u32)> {
+    let mut spans = Vec::new();
+    match u16_at(t, 0) {
+        Some(4) => {
+            let seg_x2 = u16_at(t, 6).map_or(0, usize::from);
+            for i in 0..seg_x2 / 2 {
+                let (Some(end), Some(start)) = (u16_at(t, 14 + 2 * i), u16_at(t, 16 + seg_x2 + 2 * i)) else { break };
+                if start <= end {
+                    spans.push((u32::from(start), u32::from(end)));
+                }
+            }
+        }
+        Some(12) => {
+            for i in 0..u32_at(t, 12).and_then(|n| usize::try_from(n).ok()).unwrap_or(0) {
+                let (Some(start), Some(end)) = (u32_at(t, 16 + 12 * i), u32_at(t, 20 + 12 * i)) else { break };
+                if start <= end {
+                    spans.push((start, end.min(u32::from(char::MAX))));
+                }
+            }
+        }
+        _ => {}
+    }
+    spans
 }
 
 fn glyph(subtable: &[u8], c: u32) -> Option<u32> {

@@ -570,8 +570,11 @@ let status = craft_print::job_status(&job)?;          // one GetJobElements; or 
   orientation and "no scaling" travel in a PrintTicket that the driver validates first; a
   driver that would change the paper, orientation or scaling is refused before anything is
   sent. Paper is the driver's own option for the sheet's size (to 0.25 mm), preferring the one
-  named like the standard size ("ARCH D" over a custom 24 × 36 in entry). This backend comes
-  from storytold/pdfcraft#599 and #1132.
+  named like the standard size ("ARCH D" over a custom 24 × 36 in entry). Windows' ticket merge
+  renames a driver's vendor namespace prefix (`brpsk` to `ns0000`) once the ticket uses one of
+  its names, and a Brother driver then fails every page with `0x80040003`; the validated ticket
+  is given the prefixes of the driver's own default ticket back (`ticket::respell`). This backend
+  comes from storytold/pdfcraft#599 and #1132.
   **Resolution.** Vector content stays vector. `Windows.Data.Pdf` draws a page's images at the
   page's destination size, by default 96 dpi whatever the images in the PDF are. The spooler
   backend gives each page a destination at the job's resolution instead (the one in the PrintTicket's
